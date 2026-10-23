@@ -68,7 +68,8 @@ after 200 large_pyramid steps). A module `b3SolverScratch` in solver.as now owns
 (`count + count / 4 + 16`), shared by every world since only one `b3Solve` runs at a time. C's stack
 memory is not zeroed and every reader stays inside the counts the step writes, so stale contents past the
 counts or from an earlier step are never read: the parity checks confirm it, including the four world
-solver driver, which steps worlds of different sizes through the same scratch. The mesh prepare span keeps
+solver driver, which steps worlds of different sizes through the same scratch. The scratch keeps its high
+water mark after a world is destroyed. The mesh prepare span keeps
 the lane order array plus a base index instead of a `subarray` view. `b3StepContext`'s default arrays are
 shared sentinels.
 
