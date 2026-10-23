@@ -104,3 +104,8 @@ let u: f32 = m == 0 ? 0.0 : x;                // fine
 ```
 
 Workaround: `<f32>0.0`.
+
+## Whole struct store through a call result is refused
+
+`getM(s)[0] = m` is refused, while a leaf store `getM(s)[0].x = 1` through the
+same call compiles. Binding the array to a local first works.
