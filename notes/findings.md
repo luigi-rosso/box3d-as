@@ -39,3 +39,32 @@ Builtin `Array<V>` and `StaticArray<V>` work, so C's `b3Array(T)` maps to
 `failed to call unlinked import function (env, performance.now)`. The host
 clock is `clock()` from `rive/os`. Either the std should route
 `performance.now` to the host clock or refuse it at compile time.
+
+## `ref` to a primitive local or field is refused, though the message lists them
+
+```as
+class O { a: i32 = 1; b: i32 = 2; }
+function swapI(x: ref i32, y: ref i32): void { let t = x; x = y; y = t; }
+export function f(): i32 {
+  let o = new O();
+  swapI(o.a, o.b); // error: ref needs a place (a local, field, or element); this expression is a temporary
+  let p = 1;
+  let q = 2;
+  swapI(p, q);     // same error
+  return o.a + p;
+}
+```
+
+A struct leaf works. Either the docs should say only struct leaves, or the
+message should not name locals and fields.
+
+## A type alias of a struct is not callable as its constructor
+
+`export type b3Vec3W = b3Vec3W4;` then `b3Vec3W(x, y, z)` is "unknown
+function". `export { b3Vec3W4 as b3Vec3W }` works as both type and
+constructor.
+
+## Doc mismatch: struct ternaries
+
+`value-classes.html` lists ternaries on struct values as compile errors;
+rasc accepts them and returns correct results.
