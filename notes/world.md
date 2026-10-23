@@ -123,8 +123,6 @@ tasks can do the same.
   query recording writers, the step state hash and bounds (recording).
 - The built-in scheduler (`b3CreateScheduler`, `b3ResetScheduler`,
   `b3DestroyScheduler`).
-- Profiling timers: `b3GetTicks` / `b3GetMilliseconds` are called as in C and
-  read 0.
 - `b3CreateStack`, `b3GrowStack`, `b3StackAlloc`/`Free`, `b3CreateArena`,
   `b3ArenaSync`, manifold block allocators and their mutex.
 - `b3GetWorldByteCount` (see above), `b3ValidateNoMoved` calls (a no-op without

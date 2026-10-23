@@ -197,7 +197,7 @@ them); growable `Array` defaults are always per object.
   C's name id (`b3Hash32` of the name, `B3_NULL_NAME` 0 for none); the world
   porter owns that replacement for `b3AddName` / `b3FindName`. Also skipped:
   `B3_DEBUG_POINT_CAPACITY`, `B3_DEBUG_LINE_CAPACITY`, `b3DebugPoint`,
-  `b3DebugLine`. `b3Profile` stays; times read 0.
+  `b3DebugLine`. `b3Profile` stays; its times come from the timers of notes/bench.md.
 - `b3AllocateManifolds(world, count): StaticArray<b3Manifold>` returns
   `b3_emptyManifolds` for 0 (C NULL), else a fresh zeroed array.
   `b3FreeManifolds(world, manifolds, count)` is a no-op kept for call sites.

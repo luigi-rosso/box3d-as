@@ -111,8 +111,7 @@ b3TransferBody(world, targetSet, sourceSet, bodyId: i32), b3TransferJoint(world,
 - Every W8 function and the `B3_SIMD_HAS_WIDTH_8` dispatch branches.
 - `b3ValidateIsland`, the `b3ValidateSolverSets` calls, `b3ValidateNoMoved`,
   `b3ValidateBroadPhase` (validation only), `B3_VALIDATE` lines.
-- Profiling: `b3GetTicks` / `b3GetMilliseconds*` and every `world->profile.*` time; the fields stay
-  0. Tracy zones.
+- Tracy zones. The `b3Profile` timers are ported (notes/bench.md).
 - `b3StackAlloc` / `b3StackFree`: each site is a local array; the overflow color's constraint arrays
   are reset to empty after the finalize pass (C leaves dangling pointers nobody reads).
 

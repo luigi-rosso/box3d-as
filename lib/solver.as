@@ -16,7 +16,11 @@ import {
 	UINT8_MAX,
 	b3AtomicInt,
 	b3AtomicU32,
+	b3GetMilliseconds,
+	b3GetMillisecondsAndReset,
+	b3GetTicks,
 	b3Log,
+	b3Ticks,
 } from "./core";
 import {
 	B3_PI,
@@ -1524,6 +1528,7 @@ function b3SolverTask(workerContext: b3WorkerContext): void {
 	let context = workerContext.context;
 	let activeColorCount = context.activeColorCount;
 	let stages = context.stages;
+	let world = context.world;
 
 	if (workerIndex == 0) {
 		// The orchestrator slot is a race. The calling thread of b3World_Step also enters here
@@ -1546,6 +1551,9 @@ function b3SolverTask(workerContext: b3WorkerContext): void {
 		// The stage index and sync indices are combined in to sync bits for atomic synchronization.
 		// The workers need to compute the previous sync index for a given stage so that CAS works correctly. This
 		// setup makes this easy to do.
+
+		let ticks = b3Ticks();
+		ticks.value = b3GetTicks();
 
 		let bodySyncIndex = 1;
 		let stageIndex = 0;
@@ -1578,6 +1586,8 @@ function b3SolverTask(workerContext: b3WorkerContext): void {
 		b3PrepareJoints_Overflow(context);
 		b3PrepareContacts_Overflow(context);
 
+		world.profile.prepareConstraints += b3GetMillisecondsAndReset(ticks.value);
+
 		let graphSyncIndex = 1;
 		let subStepCount = context.subStepCount;
 		for (let subStepIndex = 0; subStepIndex < subStepCount; ++subStepIndex) {
@@ -1592,6 +1602,8 @@ function b3SolverTask(workerContext: b3WorkerContext): void {
 			iterationStageIndex += 1;
 			bodySyncIndex += 1;
 
+			world.profile.integrateVelocities += b3GetMillisecondsAndReset(ticks.value);
+
 			// Warm start constraints
 			b3WarmStartJoints_Overflow(context);
 			b3WarmStartContacts_Overflow(context);
@@ -1603,6 +1615,8 @@ function b3SolverTask(workerContext: b3WorkerContext): void {
 				iterationStageIndex += 1;
 			}
 			graphSyncIndex += 1;
+
+			world.profile.warmStart += b3GetMillisecondsAndReset(ticks.value);
 
 			// Solve constraints
 			let useBias = true;
@@ -1620,12 +1634,16 @@ function b3SolverTask(workerContext: b3WorkerContext): void {
 				graphSyncIndex += 1;
 			}
 
+			world.profile.solveImpulses += b3GetMillisecondsAndReset(ticks.value);
+
 			// Integrate positions
 			B3_ASSERT(stages[iterationStageIndex].type == b3_stageIntegratePositions);
 			syncBits = b3SyncBits(bodySyncIndex, iterationStageIndex);
 			b3ExecuteMainStage(stages[iterationStageIndex], context, syncBits);
 			iterationStageIndex += 1;
 			bodySyncIndex += 1;
+
+			world.profile.integratePositions += b3GetMillisecondsAndReset(ticks.value);
 
 			// Relax constraints
 			useBias = false;
@@ -1641,6 +1659,8 @@ function b3SolverTask(workerContext: b3WorkerContext): void {
 				}
 				graphSyncIndex += 1;
 			}
+
+			world.profile.relaxImpulses += b3GetMillisecondsAndReset(ticks.value);
 		}
 
 		// Advance the stage according to the sub-stepping tasks just completed
@@ -1661,6 +1681,8 @@ function b3SolverTask(workerContext: b3WorkerContext): void {
 				}
 				graphSyncIndex += 1;
 			}
+
+			world.profile.restitution += b3GetMillisecondsAndReset(ticks.value);
 		}
 
 		stageIndex += activeColorCount;
@@ -1677,6 +1699,8 @@ function b3SolverTask(workerContext: b3WorkerContext): void {
 		B3_ASSERT(stages[stageIndex].type == b3_stageStoreImpulses);
 		b3ExecuteMainStage(stages[stageIndex], context, syncBits);
 		stageIndex += 1;
+
+		world.profile.storeImpulses += b3GetMillisecondsAndReset(ticks.value);
 
 		// Signal workers to finish
 		b3AtomicStoreU32(context.atomicSyncBits, UINT32_MAX);
@@ -1765,6 +1789,9 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 
 	// Solve constraints using graph coloring
 	{
+		let setupTicks = b3Ticks();
+		setupTicks.value = b3GetTicks();
+
 		// Prepare buffers for continuous collision (fast bodies)
 		b3AtomicStoreInt(stepContext.bulletBodyCount, 0);
 		stepContext.bulletBodies = new StaticArray<i32>(awakeBodyCount);
@@ -2199,6 +2226,11 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 		b3AtomicStoreU32(stepContext.atomicSyncBits, 0);
 		b3AtomicStoreInt(stepContext.mainClaimed, 0);
 
+		world.profile.solverSetup = b3GetMillisecondsAndReset(setupTicks.value);
+
+		let constraintTicks = b3Ticks();
+		constraintTicks.value = b3GetTicks();
+
 		let jointIdCapacity = b3GetIdCapacity(world.jointIdPool);
 		let contactIdCapacity = b3GetIdCapacity(world.contactIdPool);
 		for (let i = 0; i < workerCount; ++i) {
@@ -2249,6 +2281,10 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 		}
 		world.splitIslandId = B3_NULL_INDEX;
 
+		world.profile.constraints = b3GetMillisecondsAndReset(constraintTicks.value);
+
+		let transformTicks = b3GetTicks();
+
 		// Prepare the island bit set used in body finalization.
 		let awakeIslandCount = awakeSet.islandSims.length;
 		for (let i = 0; i < world.workerCount; ++i) {
@@ -2279,10 +2315,14 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 
 		overflow.manifoldConstraints = b3_emptyManifoldConstraints;
 		overflow.contactConstraints = b3_emptyContactConstraints;
+
+		world.profile.transforms = b3GetMilliseconds(transformTicks);
 	}
 
 	// Report joint events
 	{
+		let jointEventTicks = b3GetTicks();
+
 		// Gather bits for all joints that have force/torque events
 		let jointStateBitSet = world.taskContexts[0].jointStateBitSet;
 		for (let i = 1; i < world.workerCount; ++i) {
@@ -2317,10 +2357,14 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 				}
 			}
 		}
+
+		world.profile.jointEvents = b3GetMilliseconds(jointEventTicks);
 	}
 
 	// Report hit events
 	{
+		let hitTicks = b3GetTicks();
+
 		B3_ASSERT(world.contactHitEvents.length == 0);
 
 		// Fast path: if no worker flagged any hit-event candidates during b2StoreImpulsesTask, skip entirely.
@@ -2410,15 +2454,23 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 				}
 			}
 		}
+
+		world.profile.hitEvents = b3GetMilliseconds(hitTicks);
 	}
 
 	{
+		let refitTicks = b3GetTicks();
+
 		b3DynamicTree_Refit(world.broadPhase.trees[b3_kinematicBody]);
 		b3DynamicTree_Refit(world.broadPhase.trees[b3_dynamicBody]);
+
+		world.profile.refit = b3GetMilliseconds(refitTicks);
 	}
 
 	let bulletBodyCount = b3AtomicLoadInt(stepContext.bulletBodyCount);
 	if (bulletBodyCount > 0) {
+		let bulletTicks = b3GetTicks();
+
 		// Fast bullet bodies
 		// Note: a bullet body may be moving slow
 		let minRange = 8;
@@ -2473,6 +2525,8 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 				shapeId = shape.nextShapeId;
 			}
 		}
+
+		world.profile.bullets = b3GetMilliseconds(bulletTicks);
 	}
 
 	stepContext.bulletBodies = b3_emptyIndices;
@@ -2480,6 +2534,8 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 
 	// Report sensor hits. This may include bullets sensor hits.
 	{
+		let sensorHitTicks = b3GetTicks();
+
 		let workerCount = world.workerCount;
 		B3_ASSERT(workerCount == world.taskContexts.length);
 
@@ -2498,12 +2554,16 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 				sensor.hits.push(shapeRef);
 			}
 		}
+
+		world.profile.sensorHits = b3GetMilliseconds(sensorHitTicks);
 	}
 
 	// Island sleeping
 	// This must be done last because putting islands to sleep invalidates the enlarged body bits.
 	// todo_erin figure out how to do this in parallel with tree refit
 	if (world.enableSleep == true) {
+		let sleepTicks = b3GetTicks();
+
 		// Collect split island candidate for the next time step. No need to split if sleeping is disabled.
 		B3_ASSERT(world.splitIslandId == B3_NULL_INDEX);
 		let splitSleepTimer: f32 = 0.0;
@@ -2540,5 +2600,7 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 
 			b3TrySleepIsland(world, islandId);
 		}
+
+		world.profile.sleepIslands = b3GetMilliseconds(sleepTicks);
 	}
 }

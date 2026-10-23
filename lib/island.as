@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 // AnimaScript port of src/island.c
 
-import { B3_ASSERT, B3_NULL_INDEX } from "./core";
+import { B3_ASSERT, B3_NULL_INDEX, b3GetMilliseconds, b3GetTicks } from "./core";
 import { b3AllocId, b3FreeId } from "./id_pool";
 import { b3_dynamicBody } from "./types";
 import { b3Contact, b3_contactTouchingFlag } from "./contact";
@@ -567,9 +567,12 @@ export function b3SplitIsland(world: b3World, baseId: i32): void {
 // Note: this task interacts with some allocators without locks under the assumption that no other tasks
 // are interacting with these data structures.
 export function b3SplitIslandTask(world: b3World): void {
+	let ticks = b3GetTicks();
+
 	B3_ASSERT(world.splitIslandId != B3_NULL_INDEX);
 
 	b3SplitIsland(world, world.splitIslandId);
 
 	world.splitIslandId = B3_NULL_INDEX;
+	world.profile.splitIslands += b3GetMilliseconds(ticks);
 }

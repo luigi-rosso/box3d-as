@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 // AnimaScript port of include/box3d/base.h, src/core.h and src/core.c
 
+import { clock } from "rive/os";
 import { b3IsValidFloat } from "./math_functions";
 
 // <float.h> and <stdint.h> limits used across the port
@@ -112,20 +113,28 @@ export function b3IsAVX2Available(): bool {
 	return false;
 }
 
-/// Get the absolute number of system ticks. Profiling timers are skipped, so this reads 0.
+/// Get the absolute number of system ticks. The value is platform specific.
 export function b3GetTicks(): u64 {
-	return 0;
+	return <u64>(clock() * 1000000000.0);
 }
 
 /// Get the milliseconds passed from an initial tick value.
 export function b3GetMilliseconds(ticks: u64): f32 {
-	return 0.0;
+	let ticksNow = b3GetTicks();
+	return <f32>(<f64>(ticksNow - ticks) / 1000000.0);
+}
+
+// Holds a tick count for b3GetMillisecondsAndReset, since rasc refuses a ref to a primitive local.
+export struct b3Ticks {
+	value: u64 = 0;
 }
 
 /// Get the milliseconds passed from an initial tick value.
 export function b3GetMillisecondsAndReset(ticks: ref u64): f32 {
-	ticks = 0;
-	return 0.0;
+	let ticksNow = b3GetTicks();
+	let ms = <f32>(<f64>(ticksNow - ticks) / 1000000.0);
+	ticks = ticksNow;
+	return ms;
 }
 
 /// Yield to be used in a busy loop.

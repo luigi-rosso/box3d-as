@@ -144,9 +144,9 @@ unless built with `-D B3_ENABLE_ASSERT`. `B3_VALIDATE` code is skipped.
 
 ## Skipped
 
-Debug draw, recording, replay, world snapshots, the internal scheduler,
-profiling timers (keep `b3Profile` fields; times read 0) and the SSE2, AVX2
-and NEON backends. `simd_scalar.h` is ported: with `BOX3D_DISABLE_SIMD` the
+Debug draw, recording, replay, world snapshots, the internal scheduler
+and the SSE2, AVX2 and NEON backends. Profiling timers are ported on
+`clock()` from `rive/os` (notes/bench.md). `simd_scalar.h` is ported: with `BOX3D_DISABLE_SIMD` the
 contact solver and SAT still run their 4 lane structure through it, and the
 port keeps that structure so it matches bit for bit. Wasm SIMD later replaces
 the scalar lane type behind `ASC_FEATURE_SIMD`.
