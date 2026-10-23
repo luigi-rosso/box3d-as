@@ -1,0 +1,6 @@
+build/
+verify/out/
+verify/vectors/
+*.wasm
+*.aot
+.DS_Store
