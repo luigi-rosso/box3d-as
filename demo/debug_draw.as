@@ -19,6 +19,8 @@ export const STATE_SLEEPING: i32 = 1;
 export const STATE_STATIC: i32 = 2;
 export const STATE_KINEMATIC: i32 = 3;
 export const STATE_SELECTED: i32 = 16;
+// A static shape that stands up off the ground, sorted with the bodies instead of painted first.
+export const STATE_STANDING: i32 = 32;
 
 // Palette: warm greys and one accent.
 export const INK_BACKGROUND: Color = 0xFF151412;
@@ -247,6 +249,9 @@ export class DebugDraw {
     shadows: bool = true;
     shadowY: f32 = 0;
     lightDir: Vec3 = normalize(v3(0.3, 0.9, 0.5));
+    // Set by the shell; scenes read them to decide what to overlay.
+    showContacts: bool = false;
+    showJoints: bool = true;
 
     // Counts of the last frame.
     primCount: i32 = 0;
@@ -355,7 +360,7 @@ export class DebugDraw {
                 this.face(4, n, base, state, layer, false);
             }
         }
-        if (this.shadows && layer == LAYER_MAIN) {
+        if (this.shadows && layer == LAYER_MAIN && (state & 15) != STATE_STATIC) {
             this.shadow(xf.p, length(halfExtents) * 0.85, this.shadowY);
         }
     }
@@ -376,7 +381,7 @@ export class DebugDraw {
             }
             this.face(n, rotate(xf.q, hull.normals[f]), base, state, layer, false);
         }
-        if (this.shadows && layer == LAYER_MAIN) {
+        if (this.shadows && layer == LAYER_MAIN && (state & 15) != STATE_STATIC) {
             this.shadow(xf.p, hull.radius * 0.8, this.shadowY);
         }
     }
@@ -411,7 +416,7 @@ export class DebugDraw {
         let ringInk = withAlpha(scaleColor(base, 0.45), 0.85);
         this.ring(p, rotate(xf.q, v3(0, 1, 0)), radius, ringDepth, ringInk, layer);
         this.ring(p, rotate(xf.q, v3(1, 0, 0)), radius, ringDepth, ringInk, layer);
-        if (this.shadows && layer == LAYER_MAIN) {
+        if (this.shadows && layer == LAYER_MAIN && (state & 15) != STATE_STATIC) {
             this.shadow(p, radius, this.shadowY);
         }
     }
@@ -451,7 +456,7 @@ export class DebugDraw {
         let ringInk = withAlpha(scaleColor(base, 0.45), 0.85);
         this.ring(p1, axis, radius, depth - radius * 0.02, ringInk, layer);
         this.ring(p2, axis, radius, depth - radius * 0.02, ringInk, layer);
-        if (this.shadows && layer == LAYER_MAIN) {
+        if (this.shadows && layer == LAYER_MAIN && (state & 15) != STATE_STATIC) {
             this.shadow(p1, radius, this.shadowY);
             this.shadow(p2, radius, this.shadowY);
         }
@@ -623,7 +628,7 @@ export class DebugDraw {
     // ---- internals --------------------------------------------------------
 
     private layerFor(state: i32): i32 {
-        return (state & 15) == STATE_STATIC ? LAYER_STATIC : LAYER_MAIN;
+        return (state & 15) == STATE_STATIC && (state & STATE_STANDING) == 0 ? LAYER_STATIC : LAYER_MAIN;
     }
 
     private stateColor(color: Color, state: i32): Color {

@@ -75,6 +75,13 @@ export class OrbitCamera {
         this.animating = true;
     }
 
+    // Moves the target, and any eased goal with it, without cancelling input.
+    shiftTarget(delta: Vec3): void {
+        this.target = add(this.target, delta);
+        this.goalTarget = add(this.goalTarget, delta);
+        this.update();
+    }
+
     // Jumps to the end of an animateTo.
     snap(): void {
         if (this.animating) {

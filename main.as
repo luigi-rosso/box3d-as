@@ -12,7 +12,7 @@ import { clock } from "rive/os";
 import { formatFixed, formatInt } from "rive/format";
 import { OrbitCamera } from "./demo/camera";
 import { DebugDraw, INK_BACKGROUND } from "./demo/debug_draw";
-import { DemoScene, SceneStats } from "./demo/scene";
+import { DemoScene, SceneStats, PROFILE_COUNT } from "./demo/scene";
 import { makeScenes } from "./demo/scenes";
 import { UiText, Rect, addRoundRect, fontAt, textStyle, UI_INK, UI_DIM, UI_FAINT, UI_HAIRLINE, UI_HAIRLINE_HOT,
     UI_INVERTED_TEXT, UI_ACCENT } from "./demo/ui";
@@ -31,8 +31,10 @@ const KEY_SPACE: i32 = 32;
 const KEY_1: i32 = 49;
 const KEY_9: i32 = 57;
 const KEY_B: i32 = 66;
+const KEY_C: i32 = 67;
 const KEY_F: i32 = 70;
 const KEY_G: i32 = 71;
+const KEY_J: i32 = 74;
 const KEY_O: i32 = 79;
 const KEY_P: i32 = 80;
 const KEY_R: i32 = 82;
@@ -55,6 +57,12 @@ const BTN_PICK: i32 = 3;
 const BTN_SHOOT: i32 = 4;
 const BUTTON_COUNT: i32 = 5;
 
+const STATS_WIDTH: f32 = 168;
+const PROFILE_LABELS: StaticArray<string> = ["PAIRS", "COLLIDE", "SOLVER", "UPDATE", "CCD", "ISLANDS", "OTHER"];
+// One tone per profile part, light to dark, for the bar and the swatches.
+const PROFILE_TONES: StaticArray<u32> = [0xFFEDE8E1, 0xFFC9C2B8, 0xFFA59E95, 0xFF877F75, 0xFF6E6860, 0xFF58534D,
+    0xFF45413C];
+
 function formatMs(ms: f64): string {
     return formatFixed(ms, ms < 0.1 ? 3 : 2) + " ms";
 }
@@ -74,10 +82,16 @@ export class Main extends Layout {
     stepOnce: bool = false;
     tool: i32 = TOOL_PICK;
     gridOn: bool = true;
+    contactsOn: bool = false;
+    jointsOn: bool = true;
     accumulator: f32 = 0;
     stepMs: f64 = 0;
     drawMs: f64 = 0;
     statsAge: f32 = 1;
+    logSum: f64 = 0;
+    logMax: f64 = 0;
+    logCount: i32 = 0;
+    logSeconds: i32 = 0;
 
     // Pointer state.
     drag: i32 = DRAG_NONE;
@@ -105,6 +119,7 @@ export class Main extends Layout {
     icon: Paint = new Paint();
     background: Paint = new Paint();
     scrim: Paint = new Paint();
+    scrimRight: Paint = new Paint();
     fontReady: bool = false;
     brand: UiText? = null;
     subtitle: UiText? = null;
@@ -116,6 +131,10 @@ export class Main extends Layout {
     statLabel: Array<UiText> = new Array<UiText>();
     statValue: Array<UiText> = new Array<UiText>();
     toolLabel: Array<UiText> = new Array<UiText>();
+    profileTitle: UiText? = null;
+    profileTotal: UiText? = null;
+    profileLabel: Array<UiText> = new Array<UiText>();
+    profileValue: Array<UiText> = new Array<UiText>();
 
     override init(context: Context): bool {
         this.context = context;
@@ -155,7 +174,7 @@ export class Main extends Layout {
         hintStyle.lineHeight = 17;
         this.hint = new UiText(hintStyle);
         this.help = new UiText(textStyle(light, 11, 0.2)).set(
-            "Drag orbit   Shift drag pan   Scroll zoom   P pause   O step   R reset   Tab tool   1-9 scene");
+            "Drag orbit   Shift drag pan   Scroll zoom   P pause   O step   R reset   Tab tool   C contacts   J joints   1-7 scene");
         this.pausedTag = new UiText(textStyle(regular, 9.5, 2)).set("PAUSED");
         let indexStyle = textStyle(regular, 9.5, 1);
         let nameStyle = textStyle(light, 13, 0.2);
@@ -165,10 +184,18 @@ export class Main extends Layout {
         }
         let labelStyle = textStyle(regular, 9.5, 1.6);
         let valueStyle = textStyle(light, 13, 0.2);
-        let labels = ["STEP", "DRAW", "BODIES", "AWAKE", "CONTACTS", "FACES"];
+        let labels = ["STEP", "DRAW", "BODIES", "AWAKE", "CONTACTS", "JOINTS", "ISLANDS", "FACES"];
         for (let i = 0; i < labels.length; i++) {
             this.statLabel.push(new UiText(labelStyle).set(labels[i]));
             this.statValue.push(new UiText(valueStyle).set("0"));
+        }
+        let smallLabel = textStyle(regular, 8.5, 1.4);
+        let smallValue = textStyle(light, 11, 0.2);
+        this.profileTitle = new UiText(labelStyle).set("B3 PROFILE");
+        this.profileTotal = new UiText(valueStyle).set("0");
+        for (let i = 0; i < PROFILE_COUNT; i++) {
+            this.profileLabel.push(new UiText(smallLabel).set(PROFILE_LABELS[i]));
+            this.profileValue.push(new UiText(smallValue).set("0"));
         }
         let toolStyle = textStyle(light, 12, 0.3);
         this.toolLabel.push(new UiText(toolStyle).set("Pick"));
@@ -219,6 +246,12 @@ export class Main extends Layout {
             sg.release();
         }
         this.scrim.gradient = Gradient.linear(Vector.xy(0, 0), Vector.xy(MARGIN + LIST_WIDTH + 140, 0), scrimStops);
+        let rg = this.scrimRight.gradient;
+        if (rg != null) {
+            rg.release();
+        }
+        this.scrimRight.gradient = Gradient.linear(Vector.xy(this.width, 0),
+            Vector.xy(this.width - MARGIN - STATS_WIDTH - 120, 0), scrimStops);
         this.layoutUi();
     }
 
@@ -259,6 +292,7 @@ export class Main extends Layout {
         }
         this.stepOnce = false;
         this.camera.advance(dt);
+        scene.updateCamera(this.camera);
         this.statsAge += dt;
         return true;
     }
@@ -268,6 +302,24 @@ export class Main extends Layout {
         scene.step(STEP);
         let ms = (clock() - t0) * 1000;
         this.stepMs = this.stepMs == 0 ? ms : this.stepMs * 0.9 + ms * 0.1;
+        if (isDefined(STEP_LOG)) {
+            this.logStep(ms);
+        }
+    }
+
+    // Mean and max step over each second, for timing scenes headless.
+    private logStep(ms: f64): void {
+        this.logSum += ms;
+        this.logMax = Math.max(this.logMax, ms);
+        this.logCount++;
+        if (this.logCount == 60) {
+            this.logSeconds++;
+            this.context!.log("step " + this.scenes[this.current].name() + " s" + formatInt(<f64>this.logSeconds) +
+                " mean " + formatFixed(this.logSum / 60, 3) + " max " + formatFixed(this.logMax, 3));
+            this.logSum = 0;
+            this.logMax = 0;
+            this.logCount = 0;
+        }
     }
 
     private refreshStats(scene: DemoScene): void {
@@ -281,7 +333,13 @@ export class Main extends Layout {
         this.statValue[2].set(formatInt(<f64>s.bodies));
         this.statValue[3].set(formatInt(<f64>s.awake));
         this.statValue[4].set(formatInt(<f64>s.contacts));
-        this.statValue[5].set(formatInt(<f64>this.dd.primCount));
+        this.statValue[5].set(formatInt(<f64>s.joints));
+        this.statValue[6].set(formatInt(<f64>s.islands));
+        this.statValue[7].set(formatInt(<f64>this.dd.primCount));
+        this.profileTotal!.set(formatMs(<f64>s.profileStep));
+        for (let i = 0; i < PROFILE_COUNT; i++) {
+            this.profileValue[i].set(formatFixed(<f64>s.profile[i], 2));
+        }
     }
 
     // ---- drawing ----------------------------------------------------------
@@ -299,6 +357,8 @@ export class Main extends Layout {
 
         let dd = this.dd;
         dd.begin(this.camera);
+        dd.showContacts = this.contactsOn;
+        dd.showJoints = this.jointsOn;
         this.scenes[this.current].draw(dd);
         if (!this.gridOn) {
             dd.showGrid = false;
@@ -318,6 +378,14 @@ export class Main extends Layout {
         path.lineTo(Vector.xy(0, this.height));
         path.close();
         renderer.drawPath(path, this.scrim);
+        let edge = this.width - MARGIN - STATS_WIDTH - 120;
+        path.reset();
+        path.moveTo(Vector.xy(edge, 0));
+        path.lineTo(Vector.xy(this.width, 0));
+        path.lineTo(Vector.xy(this.width, this.height));
+        path.lineTo(Vector.xy(edge, this.height));
+        path.close();
+        renderer.drawPath(path, this.scrimRight);
         if (this.fontReady) {
             this.drawPanel(renderer);
             this.drawStats(renderer);
@@ -375,7 +443,7 @@ export class Main extends Layout {
     private drawStats(renderer: Renderer): void {
         let fill = this.fill;
         let right = this.width - MARGIN;
-        let left = right - 168;
+        let left = right - STATS_WIDTH;
         let y = MARGIN + 2;
         for (let i = 0; i < this.statLabel.length; i++) {
             fill.color = UI_FAINT;
@@ -384,15 +452,65 @@ export class Main extends Layout {
             this.statValue[i].draw(renderer, fill, right, y, 1);
             y += 24;
             if (i == 1) {
-                let path = this.path;
-                path.reset();
-                path.moveTo(Vector.xy(left, y - 4));
-                path.lineTo(Vector.xy(right, y - 4));
-                this.stroke.color = UI_HAIRLINE;
-                renderer.drawPath(path, this.stroke);
+                this.hairline(renderer, left, right, y - 4);
                 y += 6;
             }
         }
+        this.hairline(renderer, left, right, y - 4);
+        y += 10;
+        this.drawProfile(renderer, left, right, y);
+    }
+
+    // b3Profile as a stacked bar over the step, then one row per part.
+    private drawProfile(renderer: Renderer, left: f32, right: f32, y: f32): void {
+        let fill = this.fill;
+        let s = this.stats;
+        fill.color = UI_FAINT;
+        this.profileTitle!.draw(renderer, fill, left, y + 3, 0);
+        fill.color = UI_DIM;
+        this.profileTotal!.draw(renderer, fill, right, y, 1);
+        y += 24;
+        let total: f32 = 0;
+        for (let i = 0; i < PROFILE_COUNT; i++) {
+            total += s.profile[i];
+        }
+        let path = this.path;
+        let x = left;
+        for (let i = 0; i < PROFILE_COUNT && total > 0; i++) {
+            let w = STATS_WIDTH * s.profile[i] / total;
+            if (w > 0.25) {
+                path.reset();
+                path.moveTo(Vector.xy(x, y));
+                path.lineTo(Vector.xy(x + w, y));
+                path.lineTo(Vector.xy(x + w, y + 3));
+                path.lineTo(Vector.xy(x, y + 3));
+                path.close();
+                fill.color = PROFILE_TONES[i];
+                renderer.drawPath(path, fill);
+            }
+            x += w;
+        }
+        y += 12;
+        for (let i = 0; i < PROFILE_COUNT; i++) {
+            path.reset();
+            addRoundRect(path, left, y + 4, 6, 6, 1.5);
+            fill.color = PROFILE_TONES[i];
+            renderer.drawPath(path, fill);
+            fill.color = UI_FAINT;
+            this.profileLabel[i].draw(renderer, fill, left + 14, y + 3, 0);
+            fill.color = UI_DIM;
+            this.profileValue[i].draw(renderer, fill, right, y, 1);
+            y += 18;
+        }
+    }
+
+    private hairline(renderer: Renderer, left: f32, right: f32, y: f32): void {
+        let path = this.path;
+        path.reset();
+        path.moveTo(Vector.xy(left, y));
+        path.lineTo(Vector.xy(right, y));
+        this.stroke.color = UI_HAIRLINE;
+        renderer.drawPath(path, this.stroke);
     }
 
     private drawTransport(renderer: Renderer): void {
@@ -656,11 +774,16 @@ export class Main extends Layout {
 
     override keyboardEvent(event: KeyboardEvent): bool {
         let key = <i32>event.key;
+        let scene = this.scenes[this.current];
         if (key == KEY_LEFT_SHIFT || key == KEY_RIGHT_SHIFT) {
             this.shift = event.phase != "up";
+            if (event.phase == "up") {
+                scene.keyUp(key);
+            } else if (event.phase == "down") {
+                scene.keyDown(key);
+            }
             return true;
         }
-        let scene = this.scenes[this.current];
         if (event.phase == "up") {
             return scene.keyUp(key);
         }
@@ -681,6 +804,10 @@ export class Main extends Layout {
             scene.home(this.camera);
         } else if (key == KEY_G) {
             this.gridOn = !this.gridOn;
+        } else if (key == KEY_C) {
+            this.contactsOn = !this.contactsOn;
+        } else if (key == KEY_J) {
+            this.jointsOn = !this.jointsOn;
         } else if (scene.keyDown(key)) {
             return true;
         } else if (key == KEY_SPACE || key == KEY_B) {

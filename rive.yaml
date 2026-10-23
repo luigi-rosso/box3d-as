@@ -1,6 +1,8 @@
 name: box3d_demo
 main: main
 scripting: wasm
+# Physics steps outrun the 200 ms script budget of the fueled debug bake the live window plays.
+dangerouslyFast: true
 artboard:
   width: 1280
   height: 800
