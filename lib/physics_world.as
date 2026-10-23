@@ -139,7 +139,7 @@ import {
 	b3DynamicTree_RayCast,
 	b3DynamicTree_Rebuild,
 } from "./dynamic_tree";
-import { b3ShapeDistance } from "./distance";
+import { b3SetProxy, b3ShapeDistance } from "./distance";
 import {
 	b3CloneHull,
 	b3DestroyHull,
@@ -1854,21 +1854,36 @@ export function b3World_GetCounters(worldId: b3WorldId): b3Counters {
 	return s;
 }
 
-class WorldQueryContext {
-	world: b3World;
-	fcn: b3OverlapResultFcn;
-	filter: b3QueryFilter;
-
-	constructor(world: b3World, fcn: b3OverlapResultFcn, filter: b3QueryFilter) {
-		this.world = world;
-		this.fcn = fcn;
-		this.filter = filter;
+// C keeps each query's context on its stack. A user callback may start another query, so contexts
+// are pooled by nesting depth, and the tree callbacks, which capture nothing and so allocate
+// nothing, read the innermost one.
+function b3AcquireQueryContext<T>(pool: Array<T>, depth: i32, create: () => T): T {
+	if (depth == pool.length) {
+		pool.push(create());
 	}
+	return pool[depth];
+}
+
+function b3NoOverlap(shapeId: b3ShapeId): bool {
+	return false;
+}
+
+class WorldQueryContext {
+	world: b3World? = null;
+	fcn: b3OverlapResultFcn = b3NoOverlap;
+	filter: b3QueryFilter = b3QueryFilter(0, 0, 0);
+}
+
+const s_queryContexts = new Array<WorldQueryContext>();
+let s_queryDepth = 0;
+
+function b3QueryTreeCallback(proxyId: i32, userData: u64): bool {
+	return TreeQueryCallback(proxyId, userData, s_queryContexts[s_queryDepth - 1]);
 }
 
 function TreeQueryCallback(proxyId: i32, userData: u64, worldContext: WorldQueryContext): bool {
 	let shapeId = <i32>userData;
-	let world = worldContext.world;
+	let world = worldContext.world!;
 
 	let shape = world.shapes[shapeId];
 
@@ -1899,43 +1914,41 @@ export function b3World_OverlapAABB(
 
 	B3_ASSERT(b3IsValidAABB(aabb));
 
-	let worldContext = new WorldQueryContext(world, fcn, filter);
+	let worldContext = b3AcquireQueryContext(s_queryContexts, s_queryDepth, (): WorldQueryContext => new WorldQueryContext());
+	worldContext.world = world;
+	worldContext.fcn = fcn;
+	worldContext.filter = filter;
+	s_queryDepth += 1;
 
 	for (let i = 0; i < b3_bodyTypeCount; ++i) {
-		let treeResult = b3DynamicTree_Query(
-			world.broadPhase.trees[i],
-			aabb,
-			filter.maskBits,
-			false,
-			(proxyId: i32, userData: u64): bool => TreeQueryCallback(proxyId, userData, worldContext),
-		);
+		let treeResult = b3DynamicTree_Query(world.broadPhase.trees[i], aabb, filter.maskBits, false, b3QueryTreeCallback);
 
 		treeStats.nodeVisits += treeResult.nodeVisits;
 		treeStats.leafVisits += treeResult.leafVisits;
 	}
 
+	s_queryDepth -= 1;
 	return treeStats;
 }
 
 class WorldOverlapContext {
-	world: b3World;
-	fcn: b3OverlapResultFcn;
-	filter: b3QueryFilter;
-	proxy: b3ShapeProxy;
-	origin: b3Pos;
+	world: b3World? = null;
+	fcn: b3OverlapResultFcn = b3NoOverlap;
+	filter: b3QueryFilter = b3QueryFilter(0, 0, 0);
+	proxy: b3ShapeProxy = new b3ShapeProxy();
+	origin: b3Pos = b3Vec3();
+}
 
-	constructor(world: b3World, fcn: b3OverlapResultFcn, filter: b3QueryFilter, proxy: b3ShapeProxy, origin: b3Pos) {
-		this.world = world;
-		this.fcn = fcn;
-		this.filter = filter;
-		this.proxy = proxy;
-		this.origin = origin;
-	}
+const s_overlapContexts = new Array<WorldOverlapContext>();
+let s_overlapDepth = 0;
+
+function b3OverlapTreeCallback(proxyId: i32, userData: u64): bool {
+	return b3TreeOverlapCallback(proxyId, userData, s_overlapContexts[s_overlapDepth - 1]);
 }
 
 function b3TreeOverlapCallback(proxyId: i32, userData: u64, worldContext: WorldOverlapContext): bool {
 	let shapeId = <i32>userData;
-	let world = worldContext.world;
+	let world = worldContext.world!;
 
 	let shape = world.shapes[shapeId];
 
@@ -1977,46 +1990,50 @@ export function b3World_OverlapShape(
 
 	// Bound the proxy in origin relative space then lift to a conservative world float box
 	let aabb = b3OffsetAABB(b3MakeAABB(proxy.points, proxy.count, proxy.radius), origin);
-	let worldContext = new WorldOverlapContext(world, fcn, filter, proxy, origin);
+	let worldContext = b3AcquireQueryContext(s_overlapContexts, s_overlapDepth, (): WorldOverlapContext => new WorldOverlapContext());
+	worldContext.world = world;
+	worldContext.fcn = fcn;
+	worldContext.filter = filter;
+	worldContext.proxy = proxy;
+	worldContext.origin = origin;
+	s_overlapDepth += 1;
 
 	for (let i = 0; i < b3_bodyTypeCount; ++i) {
-		let treeResult = b3DynamicTree_Query(
-			world.broadPhase.trees[i],
-			aabb,
-			filter.maskBits,
-			false,
-			(proxyId: i32, userData: u64): bool => b3TreeOverlapCallback(proxyId, userData, worldContext),
-		);
+		let treeResult = b3DynamicTree_Query(world.broadPhase.trees[i], aabb, filter.maskBits, false, b3OverlapTreeCallback);
 
 		treeStats.nodeVisits += treeResult.nodeVisits;
 		treeStats.leafVisits += treeResult.leafVisits;
 	}
 
+	s_overlapDepth -= 1;
 	return treeStats;
 }
 
+function b3NoPlanes(shapeId: b3ShapeId, planeResults: StaticArray<b3PlaneResult>, planeCount: i32): bool {
+	return false;
+}
+
 class WorldMoverContext {
-	world: b3World;
-	fcn: b3PlaneResultFcn;
-	filter: b3QueryFilter;
-	mover: b3Capsule;
-	origin: b3Pos;
+	world: b3World? = null;
+	fcn: b3PlaneResultFcn = b3NoPlanes;
+	filter: b3QueryFilter = b3QueryFilter(0, 0, 0);
+	mover: b3Capsule = b3Capsule();
+	origin: b3Pos = b3Vec3();
 
 	// C's stack buffer, reused for every shape of the query
 	buffer: StaticArray<b3PlaneResult> = new StaticArray<b3PlaneResult>(64);
+}
 
-	constructor(world: b3World, fcn: b3PlaneResultFcn, filter: b3QueryFilter, mover: b3Capsule, origin: b3Pos) {
-		this.world = world;
-		this.fcn = fcn;
-		this.filter = filter;
-		this.mover = mover;
-		this.origin = origin;
-	}
+const s_moverContexts = new Array<WorldMoverContext>();
+let s_moverDepth = 0;
+
+function b3MoverTreeCallback(proxyId: i32, userData: u64): bool {
+	return TreeCollideCallback(proxyId, userData, s_moverContexts[s_moverDepth - 1]);
 }
 
 function TreeCollideCallback(proxyId: i32, userData: u64, worldContext: WorldMoverContext): bool {
 	let shapeId = <i32>userData;
-	let world = worldContext.world;
+	let world = worldContext.world!;
 
 	let shape = world.shapes[shapeId];
 
@@ -2065,38 +2082,65 @@ export function b3World_CollideMover(
 	relBox.upperBound = b3Add(b3Max(mover.center1, mover.center2), r);
 	let aabb = b3OffsetAABB(relBox, origin);
 
-	let worldContext = new WorldMoverContext(world, fcn, filter, mover, origin);
+	let worldContext = b3AcquireQueryContext(s_moverContexts, s_moverDepth, (): WorldMoverContext => new WorldMoverContext());
+	worldContext.world = world;
+	worldContext.fcn = fcn;
+	worldContext.filter = filter;
+	worldContext.mover = mover;
+	worldContext.origin = origin;
+	s_moverDepth += 1;
 
 	for (let i = 0; i < b3_bodyTypeCount; ++i) {
-		b3DynamicTree_Query(
-			world.broadPhase.trees[i],
-			aabb,
-			filter.maskBits,
-			false,
-			(proxyId: i32, userData: u64): bool => TreeCollideCallback(proxyId, userData, worldContext),
-		);
+		b3DynamicTree_Query(world.broadPhase.trees[i], aabb, filter.maskBits, false, b3MoverTreeCallback);
 	}
+
+	s_moverDepth -= 1;
+}
+
+function b3NoCast(
+	shapeId: b3ShapeId,
+	point: b3Pos,
+	normal: b3Vec3,
+	fraction: f32,
+	userMaterialId: u64,
+	triangleIndex: i32,
+	childIndex: i32,
+): f32 {
+	return 0.0;
 }
 
 class WorldRayCastContext {
-	world: b3World;
-	fcn: b3CastResultFcn;
-	filter: b3QueryFilter;
-	fraction: f32;
-	origin: b3Pos;
+	world: b3World? = null;
+	fcn: b3CastResultFcn = b3NoCast;
+	filter: b3QueryFilter = b3QueryFilter(0, 0, 0);
+	fraction: f32 = 0;
+	origin: b3Pos = b3Vec3();
 
-	constructor(world: b3World, fcn: b3CastResultFcn, filter: b3QueryFilter, fraction: f32, origin: b3Pos) {
-		this.world = world;
-		this.fcn = fcn;
-		this.filter = filter;
-		this.fraction = fraction;
-		this.origin = origin;
-	}
+	// C's b3RayResult on the stack of b3World_CastRayClosest
+	result: b3RayResult = b3RayResult();
+}
+
+const s_rayContexts = new Array<WorldRayCastContext>();
+let s_rayDepth = 0;
+
+function b3AcquireRayContext(world: b3World, fcn: b3CastResultFcn, filter: b3QueryFilter, fraction: f32, origin: b3Pos): WorldRayCastContext {
+	let worldContext = b3AcquireQueryContext(s_rayContexts, s_rayDepth, (): WorldRayCastContext => new WorldRayCastContext());
+	worldContext.world = world;
+	worldContext.fcn = fcn;
+	worldContext.filter = filter;
+	worldContext.fraction = fraction;
+	worldContext.origin = origin;
+	s_rayDepth += 1;
+	return worldContext;
+}
+
+function b3RayTreeCallback(input: b3RayCastInput, proxyId: i32, userData: u64): f32 {
+	return RayCastCallback(input, proxyId, userData, s_rayContexts[s_rayDepth - 1]);
 }
 
 function RayCastCallback(input: b3RayCastInput, proxyId: i32, userData: u64, worldContext: WorldRayCastContext): f32 {
 	let shapeId = <i32>userData;
-	let world = worldContext.world;
+	let world = worldContext.world!;
 
 	let shape = world.shapes[shapeId];
 	let shapeFilter = shape.filter;
@@ -2165,17 +2209,10 @@ export function b3World_CastRay(
 	// full precision against the origin, so a hit stays accurate far from the origin.
 	let input = b3RayCastInput(b3ToVec3(origin), translation, 1.0);
 
-	let worldContext = new WorldRayCastContext(world, fcn, filter, 1.0, origin);
+	let worldContext = b3AcquireRayContext(world, fcn, filter, 1.0, origin);
 
 	for (let i = 0; i < b3_bodyTypeCount; ++i) {
-		let treeResult = b3DynamicTree_RayCast(
-			world.broadPhase.trees[i],
-			input,
-			filter.maskBits,
-			false,
-			(input: b3RayCastInput, proxyId: i32, userData: u64): f32 =>
-				RayCastCallback(input, proxyId, userData, worldContext),
-		);
+		let treeResult = b3DynamicTree_RayCast(world.broadPhase.trees[i], input, filter.maskBits, false, b3RayTreeCallback);
 		treeStats.nodeVisits += treeResult.nodeVisits;
 		treeStats.leafVisits += treeResult.leafVisits;
 
@@ -2186,12 +2223,8 @@ export function b3World_CastRay(
 		input.maxFraction = worldContext.fraction;
 	}
 
+	s_rayDepth -= 1;
 	return treeStats;
-}
-
-// Holds C's b3RayResult context so the closure can write it.
-class RayResultContext {
-	result: b3RayResult = b3RayResult();
 }
 
 // This callback finds the closest hit. This is the most common callback used in games.
@@ -2203,12 +2236,14 @@ function b3RayCastClosestFcn(
 	userMaterialId: u64,
 	triangleIndex: i32,
 	childIndex: i32,
-	rayResult: ref b3RayResult,
 ): f32 {
 	// Ignore initial overlap
 	if (fraction == 0.0) {
 		return -1.0;
 	}
+
+	// The innermost ray context is the one of the b3World_CastRayClosest that is calling
+	ref rayResult = s_rayContexts[s_rayDepth - 1].result;
 
 	rayResult.shapeId = shapeId;
 	rayResult.point = point;
@@ -2227,11 +2262,9 @@ export function b3World_CastRayClosest(
 	translation: b3Vec3,
 	filter: b3QueryFilter,
 ): b3RayResult {
-	let resultContext = new RayResultContext();
-
 	let world = b3GetUnlockedWorldFromId(worldId);
 	if (world == null) {
-		return resultContext.result;
+		return b3RayResult();
 	}
 
 	B3_ASSERT(b3IsValidPosition(origin));
@@ -2240,43 +2273,13 @@ export function b3World_CastRayClosest(
 	// The tree traverses in float relative to the world origin. Each shape is then re-differenced at
 	// full precision against its body, so a hit stays accurate far from the origin.
 	let input = b3RayCastInput(b3ToVec3(origin), translation, 1.0);
-	let worldContext = new WorldRayCastContext(
-		world,
-		(
-			shapeId: b3ShapeId,
-			point: b3Pos,
-			normal: b3Vec3,
-			fraction: f32,
-			userMaterialId: u64,
-			triangleIndex: i32,
-			childIndex: i32,
-		): f32 =>
-			b3RayCastClosestFcn(
-				shapeId,
-				point,
-				normal,
-				fraction,
-				userMaterialId,
-				triangleIndex,
-				childIndex,
-				resultContext.result,
-			),
-		filter,
-		1.0,
-		origin,
-	);
+	let worldContext = b3AcquireRayContext(world, b3RayCastClosestFcn, filter, 1.0, origin);
+	worldContext.result = b3RayResult();
 
 	for (let i = 0; i < b3_bodyTypeCount; ++i) {
-		let treeResult = b3DynamicTree_RayCast(
-			world.broadPhase.trees[i],
-			input,
-			filter.maskBits,
-			false,
-			(input: b3RayCastInput, proxyId: i32, userData: u64): f32 =>
-				RayCastCallback(input, proxyId, userData, worldContext),
-		);
-		resultContext.result.nodeVisits += treeResult.nodeVisits;
-		resultContext.result.leafVisits += treeResult.leafVisits;
+		let treeResult = b3DynamicTree_RayCast(world.broadPhase.trees[i], input, filter.maskBits, false, b3RayTreeCallback);
+		worldContext.result.nodeVisits += treeResult.nodeVisits;
+		worldContext.result.leafVisits += treeResult.leafVisits;
 
 		if (worldContext.fraction == 0.0) {
 			break;
@@ -2285,22 +2288,25 @@ export function b3World_CastRayClosest(
 		input.maxFraction = worldContext.fraction;
 	}
 
-	return resultContext.result;
+	s_rayDepth -= 1;
+	return worldContext.result;
 }
 
 class WorldShapeCastContext {
-	world: b3World;
-	fcn: b3CastResultFcn;
+	world: b3World? = null;
+	fcn: b3CastResultFcn = b3NoCast;
 	filter: b3QueryFilter = b3QueryFilter(0, 0, 0);
 	fraction: f32 = 0;
 	origin: b3Pos = b3Vec3();
 	// origin relative input
 	input: b3ShapeCastInput = new b3ShapeCastInput();
+}
 
-	constructor(world: b3World, fcn: b3CastResultFcn) {
-		this.world = world;
-		this.fcn = fcn;
-	}
+const s_shapeCastContexts = new Array<WorldShapeCastContext>();
+let s_shapeCastDepth = 0;
+
+function b3ShapeCastTreeCallback(input: b3BoxCastInput, proxyId: i32, userData: u64): f32 {
+	return b3ShapeCastCallback(input, proxyId, userData, s_shapeCastContexts[s_shapeCastDepth - 1]);
 }
 
 function b3ShapeCastCallback(
@@ -2310,7 +2316,7 @@ function b3ShapeCastCallback(
 	worldContext: WorldShapeCastContext,
 ): f32 {
 	let shapeId = <i32>userData;
-	let world = worldContext.world;
+	let world = worldContext.world!;
 
 	let shape = world.shapes[shapeId];
 	let shapeFilter = shape.filter;
@@ -2358,9 +2364,12 @@ function b3ShapeCastCallback(
 	return input.maxFraction;
 }
 
-// C copies the struct; the proxy points alias as C's pointer does.
+// C copies the struct onto its stack; the proxy points alias as C's pointer does. The copy is read
+// only until the per shape cast returns, before any user callback, so one serves every query.
+const s_shapeCastInputCopy = new b3ShapeCastInput();
+
 function b3CopyShapeCastInput(input: b3ShapeCastInput): b3ShapeCastInput {
-	let copy = new b3ShapeCastInput();
+	let copy = s_shapeCastInputCopy;
 	copy.proxy = input.proxy;
 	copy.translation = input.translation;
 	copy.maxFraction = input.maxFraction;
@@ -2386,7 +2395,9 @@ export function b3World_CastShape(
 	B3_ASSERT(b3IsValidPosition(origin));
 	B3_ASSERT(b3IsValidVec3(translation));
 
-	let worldContext = new WorldShapeCastContext(world, fcn);
+	let worldContext = b3AcquireQueryContext(s_shapeCastContexts, s_shapeCastDepth, (): WorldShapeCastContext => new WorldShapeCastContext());
+	worldContext.world = world;
+	worldContext.fcn = fcn;
 	worldContext.filter = filter;
 	worldContext.fraction = 1.0;
 	worldContext.origin = origin;
@@ -2401,15 +2412,10 @@ export function b3World_CastShape(
 	let localBox = b3MakeAABB(proxy.points, proxy.count, proxy.radius);
 	let treeInput = b3BoxCastInput(b3OffsetAABB(localBox, origin), translation, 1.0);
 
+	s_shapeCastDepth += 1;
+
 	for (let i = 0; i < b3_bodyTypeCount; ++i) {
-		let treeResult = b3DynamicTree_BoxCast(
-			world.broadPhase.trees[i],
-			treeInput,
-			filter.maskBits,
-			false,
-			(input: b3BoxCastInput, proxyId: i32, userData: u64): f32 =>
-				b3ShapeCastCallback(input, proxyId, userData, worldContext),
-		);
+		let treeResult = b3DynamicTree_BoxCast(world.broadPhase.trees[i], treeInput, filter.maskBits, false, b3ShapeCastTreeCallback);
 		treeStats.nodeVisits += treeResult.nodeVisits;
 		treeStats.leafVisits += treeResult.leafVisits;
 
@@ -2420,22 +2426,28 @@ export function b3World_CastShape(
 		treeInput.maxFraction = worldContext.fraction;
 	}
 
+	s_shapeCastDepth -= 1;
 	return treeStats;
 }
 
 class WorldMoverCastContext {
-	world: b3World;
-	fcn: b3MoverFilterFcn?;
+	world: b3World? = null;
+	fcn: b3MoverFilterFcn? = null;
 	filter: b3QueryFilter = b3QueryFilter(0, 0, 0);
 	fraction: f32 = 0;
 	origin: b3Pos = b3Vec3();
 	// origin relative input
 	input: b3ShapeCastInput = new b3ShapeCastInput();
 
-	constructor(world: b3World, fcn: b3MoverFilterFcn?) {
-		this.world = world;
-		this.fcn = fcn;
-	}
+	// C points the proxy at the mover's center1 and center2
+	centers: StaticArray<b3Vec3> = new StaticArray<b3Vec3>(2);
+}
+
+const s_moverCastContexts = new Array<WorldMoverCastContext>();
+let s_moverCastDepth = 0;
+
+function b3MoverCastTreeCallback(input: b3BoxCastInput, proxyId: i32, userData: u64): f32 {
+	return MoverCastCallback(input, proxyId, userData, s_moverCastContexts[s_moverCastDepth - 1]);
 }
 
 function MoverCastCallback(
@@ -2445,7 +2457,7 @@ function MoverCastCallback(
 	worldContext: WorldMoverCastContext,
 ): f32 {
 	let shapeId = <i32>userData;
-	let world = worldContext.world;
+	let world = worldContext.world!;
 
 	let shape = world.shapes[shapeId];
 	let shapeFilter = shape.filter;
@@ -2497,16 +2509,19 @@ export function b3World_CastMover(
 		return 1.0;
 	}
 
+	let worldContext = b3AcquireQueryContext(s_moverCastContexts, s_moverCastDepth, (): WorldMoverCastContext => new WorldMoverCastContext());
+
 	// C points the proxy at center1 and center2, which are adjacent fields.
-	let centers = new StaticArray<b3Vec3>(2);
+	let centers = worldContext.centers;
 	centers[0] = mover.center1;
 	centers[1] = mover.center2;
 
-	let worldContext = new WorldMoverCastContext(world, fcn);
+	worldContext.world = world;
+	worldContext.fcn = fcn;
 	worldContext.filter = filter;
 	worldContext.fraction = 1.0;
 	worldContext.origin = origin;
-	worldContext.input.proxy = new b3ShapeProxy(centers, 2, mover.radius);
+	worldContext.input.proxy = b3SetProxy(worldContext.input.proxy, centers, 2, mover.radius);
 	worldContext.input.translation = translation;
 	worldContext.input.maxFraction = 1.0;
 	worldContext.input.canEncroach = mover.radius > 0.0;
@@ -2514,15 +2529,10 @@ export function b3World_CastMover(
 	// Bound the capsule in origin relative space then lift to a conservative world float box
 	let treeInput = b3BoxCastInput(b3OffsetAABB(b3MakeAABB(centers, 2, mover.radius), origin), translation, 1.0);
 
+	s_moverCastDepth += 1;
+
 	for (let i = 0; i < b3_bodyTypeCount; ++i) {
-		b3DynamicTree_BoxCast(
-			world.broadPhase.trees[i],
-			treeInput,
-			filter.maskBits,
-			false,
-			(input: b3BoxCastInput, proxyId: i32, userData: u64): f32 =>
-				MoverCastCallback(input, proxyId, userData, worldContext),
-		);
+		b3DynamicTree_BoxCast(world.broadPhase.trees[i], treeInput, filter.maskBits, false, b3MoverCastTreeCallback);
 
 		if (worldContext.fraction == 0.0) {
 			break;
@@ -2531,6 +2541,7 @@ export function b3World_CastMover(
 		treeInput.maxFraction = worldContext.fraction;
 	}
 
+	s_moverCastDepth -= 1;
 	return worldContext.fraction;
 }
 

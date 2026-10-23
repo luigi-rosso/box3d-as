@@ -52,7 +52,7 @@ import {
 	b3SimplexCache,
 	b3Sphere,
 } from "./collision";
-import { b3MakeSegmentProxy, b3ShapeCast, b3ShapeDistance } from "./distance";
+import { b3SetProxy, b3ShapeCast, b3ShapeDistance } from "./distance";
 import { b3RayCastSphere } from "./sphere";
 
 /// Compute mass properties of a capsule
@@ -125,10 +125,18 @@ export function b3ComputeSweptCapsuleAABB(shape: b3Capsule, xf1: b3Transform, xf
 	return aabb;
 }
 
+// C builds these inputs on its stack. The overlap and cast below never nest, so they share one set.
+const s_overlapInput = new b3DistanceInput();
+const s_castInput = new b3ShapeCastPairInput();
+const s_capsulePoints = new StaticArray<b3Vec3>(2);
+const s_capsuleProxy = new b3ShapeProxy();
+
 /// Overlap shape versus capsule
 export function b3OverlapCapsule(shape: b3Capsule, shapeTransform: b3Transform, proxy: b3ShapeProxy): bool {
-	let input = new b3DistanceInput();
-	input.proxyA = b3MakeSegmentProxy(shape.center1, shape.center2, shape.radius);
+	let input = s_overlapInput;
+	s_capsulePoints[0] = shape.center1;
+	s_capsulePoints[1] = shape.center2;
+	input.proxyA = b3SetProxy(s_capsuleProxy, s_capsulePoints, 2, shape.radius);
 	input.proxyB = proxy;
 	input.transform = b3InvMulTransforms(shapeTransform, b3Transform_identity);
 	input.useRadii = true;
@@ -364,8 +372,10 @@ export function b3RayCastCapsule(shape: b3Capsule, input: b3RayCastInput): b3Cas
 
 /// Shape cast versus a capsule. Initial overlap is treated as a miss.
 export function b3ShapeCastCapsule(capsule: b3Capsule, input: b3ShapeCastInput): b3CastOutput {
-	let pairInput = new b3ShapeCastPairInput();
-	pairInput.proxyA = b3MakeSegmentProxy(capsule.center1, capsule.center2, capsule.radius);
+	let pairInput = s_castInput;
+	s_capsulePoints[0] = capsule.center1;
+	s_capsulePoints[1] = capsule.center2;
+	pairInput.proxyA = b3SetProxy(s_capsuleProxy, s_capsulePoints, 2, capsule.radius);
 	pairInput.proxyB = input.proxy;
 	pairInput.transform = b3Transform_identity;
 	pairInput.translationB = input.translation;

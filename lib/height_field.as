@@ -17,18 +17,14 @@ import {
 	b3ComputeCosSin,
 	b3Cross,
 	b3Dot,
-	b3InvertTransform,
 	b3Lerp,
 	b3MakeAABB,
-	b3MakeMatrixFromQuat,
 	b3Max,
 	b3MaxFloat,
 	b3Min,
 	b3MinFloat,
-	b3MinInt,
 	b3Mul,
 	b3MulAdd,
-	b3MulMV,
 	b3MulSV,
 	b3Neg,
 	b3Normalize,
@@ -64,7 +60,8 @@ import {
 } from "./collision";
 import { b3AddV, b3GetXV, b3GetZV, b3IntersectRayTriangle, b3LoadV, b3MaxV, b3MinV, b3MulV, b3SplatV, b3SubV, b3TestBoundsTriangleOverlap, b3_halfV } from "./simd";
 import { b3RayCastAABB } from "./aabb";
-import { b3MakePointProxy, b3MakeSegmentProxy, b3ShapeCast, b3ShapeDistance } from "./distance";
+import { b3SetProxy, b3ShapeCast, b3ShapeDistance } from "./distance";
+import { b3SetLocalProxy } from "./shape";
 
 /*
 	Convention
@@ -617,11 +614,26 @@ export function b3ComputeHeightFieldAABB(shape: b3HeightFieldData, transform: b3
 	return b3AABB_Transform(transform, shape.aabb);
 }
 
+// C's stack locals of the queries below. Only the ray cast runs another of them, the shape cast,
+// so it keeps its own input and the rest share one set.
+const s_rayAsCastInput = new b3ShapeCastInput();
+const s_rayAsCastPoint = new StaticArray<b3Vec3>(1);
+const s_queryTriangle = new StaticArray<b3Vec3>(3);
+const s_queryTriangleProxy = new b3ShapeProxy();
+const s_querySegment = new StaticArray<b3Vec3>(2);
+const s_querySegmentProxy = new b3ShapeProxy();
+const s_queryLocalPoints = new StaticArray<b3Vec3>(B3_MAX_SHAPE_CAST_POINTS);
+const s_queryLocalProxy = new b3ShapeProxy();
+const s_queryDistanceInput = new b3DistanceInput();
+const s_queryCastInput = new b3ShapeCastPairInput();
+
 export function b3RayCastHeightField(heightField: b3HeightFieldData, input: b3RayCastInput): b3CastOutput {
-	let shapeCastInput = new b3ShapeCastInput();
-	shapeCastInput.proxy = b3MakePointProxy(input.origin, 0.0);
+	let shapeCastInput = s_rayAsCastInput;
+	s_rayAsCastPoint[0] = input.origin;
+	shapeCastInput.proxy = b3SetProxy(shapeCastInput.proxy, s_rayAsCastPoint, 1, 0.0);
 	shapeCastInput.translation = input.translation;
 	shapeCastInput.maxFraction = input.maxFraction;
+	shapeCastInput.canEncroach = false;
 
 	return b3ShapeCastHeightField(heightField, shapeCastInput);
 }
@@ -771,9 +783,9 @@ export function b3ShapeCastHeightField(heightField: b3HeightFieldData, input: b3
 	let columnCount = heightField.columnCount;
 	let materialIndices = heightField.materialIndices;
 
-	let triangleVertices = new StaticArray<b3Vec3>(3);
-	let pairInput = new b3ShapeCastPairInput();
-	pairInput.proxyA = new b3ShapeProxy(triangleVertices, 3, 0.0);
+	let triangleVertices = s_queryTriangle;
+	let pairInput = s_queryCastInput;
+	pairInput.proxyA = b3SetProxy(s_queryTriangleProxy, triangleVertices, 3, 0.0);
 	pairInput.proxyB = input.proxy;
 	pairInput.transform = b3Transform_identity;
 	pairInput.translationB = input.translation;
@@ -1011,19 +1023,6 @@ export function b3ShapeCastHeightField(heightField: b3HeightFieldData, input: b3
 }
 
 // src/shape.c, until lib/shape.as exists
-function b3MakeLocalProxy(proxy: b3ShapeProxy, transform: b3Transform, buffer: StaticArray<b3Vec3>): b3ShapeProxy {
-	let invTransform = b3InvertTransform(transform);
-	let R = b3MakeMatrixFromQuat(invTransform.q);
-
-	let count = b3MinInt(proxy.count, B3_MAX_SHAPE_CAST_POINTS);
-	for (let i = 0; i < count; ++i) {
-		buffer[i] = b3Add(b3MulMV(R, proxy.points[i]), invTransform.p);
-	}
-
-	return new b3ShapeProxy(buffer, count, proxy.radius);
-}
-
-// src/shape.c, until lib/shape.as exists
 function b3ComputeProxyAABB(proxy: b3ShapeProxy): b3AABB {
 	let points = proxy.points;
 	let aabb = b3AABB(points[0], points[0]);
@@ -1040,8 +1039,7 @@ function b3ComputeProxyAABB(proxy: b3ShapeProxy): b3AABB {
 }
 
 export function b3OverlapHeightField(shape: b3HeightFieldData, shapeTransform: b3Transform, proxy: b3ShapeProxy): bool {
-	let buffer = new StaticArray<b3Vec3>(B3_MAX_SHAPE_CAST_POINTS);
-	let localProxy = b3MakeLocalProxy(proxy, shapeTransform, buffer);
+	let localProxy = b3SetLocalProxy(s_queryLocalProxy, proxy, shapeTransform, s_queryLocalPoints);
 	let aabb = b3ComputeProxyAABB(localProxy);
 
 	let scale = shape.scale;
@@ -1055,9 +1053,9 @@ export function b3OverlapHeightField(shape: b3HeightFieldData, shapeTransform: b
 	let boundsCenter = b3MulV(b3_halfV, b3AddV(boundsMin, boundsMax));
 	let boundsExtent = b3SubV(boundsMax, boundsCenter);
 
-	let triangleVertices = new StaticArray<b3Vec3>(3);
-	let input = new b3DistanceInput();
-	input.proxyA = new b3ShapeProxy(triangleVertices, 3, 0.0);
+	let triangleVertices = s_queryTriangle;
+	let input = s_queryDistanceInput;
+	input.proxyA = b3SetProxy(s_queryTriangleProxy, triangleVertices, 3, 0.0);
 	input.proxyB = localProxy;
 	input.transform = b3Transform_identity;
 	input.useRadii = true;
@@ -1196,10 +1194,12 @@ export function b3CollideMoverAndHeightField(
 	shape: b3HeightFieldData,
 	mover: b3Capsule,
 ): i32 {
-	let triangleVertices = new StaticArray<b3Vec3>(3);
-	let distanceInput = new b3DistanceInput();
-	distanceInput.proxyA = new b3ShapeProxy(triangleVertices, 3, 0.0);
-	distanceInput.proxyB = b3MakeSegmentProxy(mover.center1, mover.center2, 0.0);
+	let triangleVertices = s_queryTriangle;
+	let distanceInput = s_queryDistanceInput;
+	distanceInput.proxyA = b3SetProxy(s_queryTriangleProxy, triangleVertices, 3, 0.0);
+	s_querySegment[0] = mover.center1;
+	s_querySegment[1] = mover.center2;
+	distanceInput.proxyB = b3SetProxy(s_querySegmentProxy, s_querySegment, 2, 0.0);
 	distanceInput.transform = b3Transform_identity;
 	distanceInput.useRadii = false;
 

@@ -43,7 +43,7 @@ import {
 	b3SimplexCache,
 	b3Sphere,
 } from "./collision";
-import { b3MakePointProxy, b3ShapeCast, b3ShapeDistance } from "./distance";
+import { b3SetProxy, b3ShapeCast, b3ShapeDistance } from "./distance";
 
 /// Compute mass properties of a sphere
 export function b3ComputeSphereMass(shape: b3Sphere, density: f32): b3MassData {
@@ -78,10 +78,17 @@ export function b3ComputeSweptSphereAABB(shape: b3Sphere, xf1: b3Transform, xf2:
 	return b3AABB(b3Sub(b3Min(center1, center2), r), b3Add(b3Max(center1, center2), r));
 }
 
+// C builds these inputs on its stack. The overlap and cast below never nest, so they share one set.
+const s_overlapInput = new b3DistanceInput();
+const s_castInput = new b3ShapeCastPairInput();
+const s_spherePoint = new StaticArray<b3Vec3>(1);
+const s_sphereProxy = new b3ShapeProxy();
+
 /// Overlap shape versus sphere
 export function b3OverlapSphere(shape: b3Sphere, shapeTransform: b3Transform, proxy: b3ShapeProxy): bool {
-	let input = new b3DistanceInput();
-	input.proxyA = b3MakePointProxy(shape.center, shape.radius);
+	let input = s_overlapInput;
+	s_spherePoint[0] = shape.center;
+	input.proxyA = b3SetProxy(s_sphereProxy, s_spherePoint, 1, shape.radius);
 	input.proxyB = proxy;
 	input.transform = b3InvMulTransforms(shapeTransform, b3Transform_identity);
 	input.useRadii = true;
@@ -230,8 +237,9 @@ export function b3RayCastHollowSphere(sphere: b3Sphere, input: b3RayCastInput): 
 
 /// Shape cast versus a sphere. Initial overlap is treated as a miss.
 export function b3ShapeCastSphere(sphere: b3Sphere, input: b3ShapeCastInput): b3CastOutput {
-	let pairInput = new b3ShapeCastPairInput();
-	pairInput.proxyA = b3MakePointProxy(sphere.center, sphere.radius);
+	let pairInput = s_castInput;
+	s_spherePoint[0] = sphere.center;
+	pairInput.proxyA = b3SetProxy(s_sphereProxy, s_spherePoint, 1, sphere.radius);
 	pairInput.proxyB = input.proxy;
 	pairInput.transform = b3Transform_identity;
 	pairInput.translationB = input.translation;

@@ -697,6 +697,22 @@ function b3ComputeWitnessPoints(simplex: ref b3Simplex, vertexA: ref b3Vec3, ver
 	}
 }
 
+// C's simplex and backup locals of b3ShapeDistance, which never nests. Holding both here makes the
+// per iteration backup one memory copy instead of a load and store per field.
+const B3_GJK_SIMPLEX: i32 = 0;
+const B3_GJK_BACKUP: i32 = 1;
+const s_gjkSimplexes = new StaticArray<b3Simplex>(2);
+
+unsafe function b3ZeroGJKSimplexes(): void {
+	memory.fill(changetype<usize>(s_gjkSimplexes), 0, 2 * sizeof<b3Simplex>());
+}
+
+unsafe function b3CopyGJKSimplex(dst: i32, src: i32): void {
+	let base = changetype<usize>(s_gjkSimplexes);
+	let size = sizeof<b3Simplex>();
+	memory.copy(base + <usize>dst * size, base + <usize>src * size, size);
+}
+
 /// Compute the closest points between two shapes represented as point clouds.
 /// b3SimplexCache cache is input/output. On the first call set b3SimplexCache.count to zero.
 /// The query runs in frame A, so the witness points and normal are returned in frame A.
@@ -720,7 +736,8 @@ export function b3ShapeDistance(
 	// Compute initial simplex from cache
 	if (B3_ASSERT_ENABLED) B3_ASSERT(cache.count <= <u16>B3_MAX_SIMPLEX_VERTICES);
 
-	let simplex = b3Simplex();
+	b3ZeroGJKSimplexes();
+	ref simplex = s_gjkSimplexes[B3_GJK_SIMPLEX];
 
 	simplex.count = <i32>cache.count;
 	for (let i = 0; i < <i32>cache.count; ++i) {
@@ -768,7 +785,7 @@ export function b3ShapeDistance(
 		simplex.vertices[0].a = 0.0;
 	}
 
-	let backup = b3Simplex();
+	ref backup = s_gjkSimplexes[B3_GJK_BACKUP];
 
 	let simplexIndex = 0;
 	if (simplexes != null && simplexIndex < simplexCapacity) {
@@ -814,7 +831,7 @@ export function b3ShapeDistance(
 		if (solved == false) {
 			// No progress - reconstruct last simplex
 			if (B3_ASSERT_ENABLED) B3_ASSERT(backup.count != 0);
-			simplex = backup;
+			b3CopyGJKSimplex(B3_GJK_SIMPLEX, B3_GJK_BACKUP);
 			break;
 		}
 
@@ -884,7 +901,7 @@ export function b3ShapeDistance(
 		if (distanceSq >= oldDistanceSq) {
 			// No progress - reconstruct last simplex
 			if (B3_ASSERT_ENABLED) B3_ASSERT(backup.count != 0);
-			simplex = backup;
+			b3CopyGJKSimplex(B3_GJK_SIMPLEX, B3_GJK_BACKUP);
 			break;
 		}
 
@@ -955,7 +972,7 @@ export function b3ShapeDistance(
 		let supportB = b3Add(b3MulMV(m, proxyB.points[indexB]), xf.p);
 
 		// Save current simplex and add new vertex - this can fail if we detect cycling
-		backup = simplex;
+		b3CopyGJKSimplex(B3_GJK_BACKUP, B3_GJK_SIMPLEX);
 
 		// Check for duplicate support points. This is the main termination criteria.
 		let duplicate = false;
@@ -1858,6 +1875,15 @@ export function b3MakePointProxy(point: b3Vec3, radius: f32): b3ShapeProxy {
 	let points = new StaticArray<b3Vec3>(1);
 	points[0] = point;
 	return new b3ShapeProxy(points, 1, radius);
+}
+
+/// Refill a caller owned proxy, the allocation free form of the helpers here for hot callers that
+/// keep one proxy and its point storage.
+export function b3SetProxy(proxy: b3ShapeProxy, points: StaticArray<b3Vec3>, count: i32, radius: f32): b3ShapeProxy {
+	proxy.points = points;
+	proxy.count = count;
+	proxy.radius = radius;
+	return proxy;
 }
 
 /// Make a two point proxy, as C does with &capsule->center1.

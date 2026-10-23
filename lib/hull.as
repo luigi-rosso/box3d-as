@@ -109,7 +109,7 @@ import {
 	b3ShapeProxy,
 	b3SimplexCache,
 } from "./collision";
-import { b3MakeSegmentProxy, b3ShapeCast, b3ShapeDistance } from "./distance";
+import { b3MakeSegmentProxy, b3SetProxy, b3ShapeCast, b3ShapeDistance } from "./distance";
 import {
 	b3AddW4,
 	b3BlendW4,
@@ -2757,12 +2757,17 @@ export function b3ComputeSweptHullAABB(shape: b3HullData, xf1: b3Transform, xf2:
 	return b3AABB_Union(aabb1, aabb2);
 }
 
+// C builds these inputs on its stack. The overlap and cast below never nest, so they share one set.
+const s_overlapInput = new b3DistanceInput();
+const s_castInput = new b3ShapeCastPairInput();
+const s_hullProxy = new b3ShapeProxy();
+
 /// Overlap shape versus hull
 export function b3OverlapHull(shape: b3HullData, shapeTransform: b3Transform, proxy: b3ShapeProxy): bool {
 	let points = b3GetHullPoints(shape);
 
-	let input = new b3DistanceInput();
-	input.proxyA = new b3ShapeProxy(points, shape.vertexCount, 0.0);
+	let input = s_overlapInput;
+	input.proxyA = b3SetProxy(s_hullProxy, points, shape.vertexCount, 0.0);
 	input.proxyB = proxy;
 	input.transform = b3InvMulTransforms(shapeTransform, b3Transform_identity);
 	input.useRadii = true;
@@ -2831,8 +2836,8 @@ export function b3RayCastHull(shape: b3HullData, input: b3RayCastInput): b3CastO
 export function b3ShapeCastHull(shape: b3HullData, input: b3ShapeCastInput): b3CastOutput {
 	let points = b3GetHullPoints(shape);
 
-	let pairInput = new b3ShapeCastPairInput();
-	pairInput.proxyA = new b3ShapeProxy(points, shape.vertexCount, 0.0);
+	let pairInput = s_castInput;
+	pairInput.proxyA = b3SetProxy(s_hullProxy, points, shape.vertexCount, 0.0);
 	pairInput.proxyB = input.proxy;
 	pairInput.transform = b3Transform_identity;
 	pairInput.translationB = input.translation;

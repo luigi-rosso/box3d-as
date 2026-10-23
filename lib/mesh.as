@@ -18,18 +18,15 @@ import {
 	b3Cos,
 	b3Cross,
 	b3Dot,
-	b3InvertTransform,
 	b3IsSaneAABB,
 	b3Length,
 	b3Lerp,
 	b3MakeAABB,
-	b3MakeMatrixFromQuat,
 	b3Max,
 	b3MaxInt,
 	b3Min,
 	b3MinInt,
 	b3Mul,
-	b3MulMV,
 	b3MulSV,
 	b3Neg,
 	b3Normalize,
@@ -87,7 +84,8 @@ import {
 	b3_halfV,
 	b3_oneV,
 } from "./simd";
-import { b3MakeSegmentProxy, b3ShapeCast, b3ShapeDistance } from "./distance";
+import { b3SetProxy, b3ShapeCast, b3ShapeDistance } from "./distance";
+import { b3SetLocalProxy } from "./shape";
 import { b3Array_AddIndex } from "./container";
 
 const B3_BIN_COUNT: i32 = 8;
@@ -1405,18 +1403,15 @@ export function b3CreateMesh(def: b3MeshDef, degenerateTriangleIndices: StaticAr
 
 export function b3DestroyMesh(mesh: b3MeshData): void {}
 
-// src/shape.c, until lib/shape.as exists
-function b3MakeLocalProxy(proxy: b3ShapeProxy, transform: b3Transform, buffer: StaticArray<b3Vec3>): b3ShapeProxy {
-	let invTransform = b3InvertTransform(transform);
-	let R = b3MakeMatrixFromQuat(invTransform.q);
-
-	let count = b3MinInt(proxy.count, B3_MAX_SHAPE_CAST_POINTS);
-	for (let i = 0; i < count; ++i) {
-		buffer[i] = b3Add(b3MulMV(R, proxy.points[i]), invTransform.p);
-	}
-
-	return new b3ShapeProxy(buffer, count, proxy.radius);
-}
+// C's stack locals of the queries below. None of them nests in another, so they share one set.
+const s_queryTriangle = new StaticArray<b3Vec3>(3);
+const s_queryTriangleProxy = new b3ShapeProxy();
+const s_querySegment = new StaticArray<b3Vec3>(2);
+const s_querySegmentProxy = new b3ShapeProxy();
+const s_queryLocalPoints = new StaticArray<b3Vec3>(B3_MAX_SHAPE_CAST_POINTS);
+const s_queryLocalProxy = new b3ShapeProxy();
+const s_queryDistanceInput = new b3DistanceInput();
+const s_queryCastInput = new b3ShapeCastPairInput();
 
 // src/shape.c, until lib/shape.as exists
 function b3ComputeProxyAABB(proxy: b3ShapeProxy): b3AABB {
@@ -1438,8 +1433,7 @@ export function b3OverlapMesh(shape: b3Mesh, shapeTransform: b3Transform, proxy:
 	if (B3_ASSERT_ENABLED) B3_ASSERT(proxy.count > 0);
 	let cache = b3SimplexCache();
 
-	let buffer = new StaticArray<b3Vec3>(B3_MAX_SHAPE_CAST_POINTS);
-	let localProxy = b3MakeLocalProxy(proxy, shapeTransform, buffer);
+	let localProxy = b3SetLocalProxy(s_queryLocalProxy, proxy, shapeTransform, s_queryLocalPoints);
 	let aabb = b3ComputeProxyAABB(localProxy);
 
 	let meshScale = shape.scale;
@@ -1454,9 +1448,9 @@ export function b3OverlapMesh(shape: b3Mesh, shapeTransform: b3Transform, proxy:
 	let invScaledBoundsCenter = b3MulV(b3_halfV, b3AddV(invScaledBoundsMin, invScaledBoundsMax));
 	let invScaledBoundsExtent = b3SubV(invScaledBoundsMax, invScaledBoundsCenter);
 
-	let triangleVertices = new StaticArray<b3Vec3>(3);
-	let input = new b3DistanceInput();
-	input.proxyA = new b3ShapeProxy(triangleVertices, 3, 0.0);
+	let triangleVertices = s_queryTriangle;
+	let input = s_queryDistanceInput;
+	input.proxyA = b3SetProxy(s_queryTriangleProxy, triangleVertices, 3, 0.0);
 	input.proxyB = localProxy;
 	input.transform = b3Transform_identity;
 	input.useRadii = true;
@@ -1682,9 +1676,9 @@ export function b3ShapeCastMesh(mesh: b3Mesh, input: b3ShapeCastInput): b3CastOu
 	let invScaledRayMax = b3MaxV(invScaledRayStart, invScaledRayEnd);
 	let invScaledShapeExtent = b3MulV(absInvScale, shapeExtent);
 
-	let triangleVertices = new StaticArray<b3Vec3>(3);
-	let pairInput = new b3ShapeCastPairInput();
-	pairInput.proxyA = new b3ShapeProxy(triangleVertices, 3, 0.0);
+	let triangleVertices = s_queryTriangle;
+	let pairInput = s_queryCastInput;
+	pairInput.proxyA = b3SetProxy(s_queryTriangleProxy, triangleVertices, 3, 0.0);
 
 	let count = 0;
 	let stack = b3_meshStack;
@@ -1818,10 +1812,12 @@ export function b3CollideMoverAndMesh(
 		return 0;
 	}
 
-	let triangleVertices = new StaticArray<b3Vec3>(3);
-	let distanceInput = new b3DistanceInput();
-	distanceInput.proxyA = new b3ShapeProxy(triangleVertices, 3, 0.0);
-	distanceInput.proxyB = b3MakeSegmentProxy(mover.center1, mover.center2, 0.0);
+	let triangleVertices = s_queryTriangle;
+	let distanceInput = s_queryDistanceInput;
+	distanceInput.proxyA = b3SetProxy(s_queryTriangleProxy, triangleVertices, 3, 0.0);
+	s_querySegment[0] = mover.center1;
+	s_querySegment[1] = mover.center2;
+	distanceInput.proxyB = b3SetProxy(s_querySegmentProxy, s_querySegment, 2, 0.0);
 	distanceInput.transform = b3Transform_identity;
 	distanceInput.useRadii = false;
 

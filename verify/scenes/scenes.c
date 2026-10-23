@@ -1902,6 +1902,19 @@ static float Scene_RayAllCallback( b3ShapeId shapeId, b3Pos point, b3Vec3 normal
 	Scene_HashQuery( scene, SCENE_QUERY_RAY_ALL, (uint32_t)childIndex );
 	Scene_HashQuery( scene, SCENE_QUERY_RAY_ALL, Scene_FloatBits( fraction ) );
 	Scene_HashVec3( scene, SCENE_QUERY_RAY_ALL, normal );
+
+	// A query from inside a callback, as games do
+	if ( scene->queryNested == false && scene->queryHits[SCENE_QUERY_RAY_ALL] % 5 == 0 )
+	{
+		scene->queryNested = true;
+		b3Vec3 down = { 0.0f, -4.0f, 0.0f };
+		b3Pos above = { point.x, point.y + 2.0f, point.z };
+		b3RayResult result = b3World_CastRayClosest( scene->worldId, above, down, b3DefaultQueryFilter() );
+		Scene_HashQuery( scene, SCENE_QUERY_RAY_ALL, Scene_FloatBits( result.fraction ) );
+		Scene_HashQuery( scene, SCENE_QUERY_RAY_ALL, (uint32_t)result.shapeId.index1 );
+		scene->queryNested = false;
+	}
+
 	return 1.0f;
 }
 
@@ -1910,6 +1923,18 @@ static bool Scene_OverlapCallback( b3ShapeId shapeId, void* context )
 	Scene* scene = context;
 	scene->queryHits[SCENE_QUERY_OVERLAP] += 1;
 	Scene_HashQuery( scene, SCENE_QUERY_OVERLAP, (uint32_t)shapeId.index1 );
+
+	// An overlap from inside an overlap callback
+	if ( scene->queryNested == false && scene->queryHits[SCENE_QUERY_OVERLAP] % 7 == 0 )
+	{
+		scene->queryNested = true;
+		b3Vec3 point = b3Vec3_zero;
+		b3ShapeProxy proxy = { &point, 1, 1.5f };
+		b3Pos origin = b3Shape_GetAABB( shapeId ).upperBound;
+		b3World_OverlapShape( scene->worldId, origin, &proxy, b3DefaultQueryFilter(), Scene_OverlapCallback, scene );
+		scene->queryNested = false;
+	}
+
 	return true;
 }
 

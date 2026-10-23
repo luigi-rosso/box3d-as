@@ -71,6 +71,7 @@ import {
 	b3Quat,
 	b3Quat_identity,
 	b3ShapeId,
+	b3Shape_GetAABB,
 	b3Shape_GetBody,
 	b3SolvePlanes,
 	b3Sphere,
@@ -181,6 +182,7 @@ export class Scene {
 	queryMs: Float64Array = new Float64Array(SCENE_QUERY_KIND_COUNT);
 	queryHash: Uint32Array = new Uint32Array(SCENE_QUERY_KIND_COUNT);
 	queryHits: Int32Array = new Int32Array(SCENE_QUERY_KIND_COUNT);
+	queryNested: bool = false;
 }
 
 const s_sceneNames: StaticArray<string> = [
@@ -1879,6 +1881,18 @@ function Scene_RayAllCallback(
 	Scene_HashQuery(scene, SCENE_QUERY_RAY_ALL, <u32>childIndex);
 	Scene_HashQuery(scene, SCENE_QUERY_RAY_ALL, reinterpret<u32>(fraction));
 	Scene_HashVec3(scene, SCENE_QUERY_RAY_ALL, normal);
+
+	// A query from inside a callback, as games do
+	if (scene.queryNested == false && scene.queryHits[SCENE_QUERY_RAY_ALL] % 5 == 0) {
+		scene.queryNested = true;
+		let down = b3Vec3(0.0, -4.0, 0.0);
+		let above = b3Vec3(point.x, point.y + 2.0, point.z);
+		let result = b3World_CastRayClosest(scene.worldId, above, down, b3DefaultQueryFilter());
+		Scene_HashQuery(scene, SCENE_QUERY_RAY_ALL, reinterpret<u32>(result.fraction));
+		Scene_HashQuery(scene, SCENE_QUERY_RAY_ALL, <u32>result.shapeId.index1);
+		scene.queryNested = false;
+	}
+
 	return 1.0;
 }
 
@@ -1886,6 +1900,17 @@ function Scene_OverlapCallback(shapeId: b3ShapeId): bool {
 	let scene = s_queryScene;
 	scene.queryHits[SCENE_QUERY_OVERLAP] += 1;
 	Scene_HashQuery(scene, SCENE_QUERY_OVERLAP, <u32>shapeId.index1);
+
+	// An overlap from inside an overlap callback
+	if (scene.queryNested == false && scene.queryHits[SCENE_QUERY_OVERLAP] % 7 == 0) {
+		scene.queryNested = true;
+		let points = new StaticArray<b3Vec3>(1);
+		let proxy = new b3ShapeProxy(points, 1, 1.5);
+		let origin = b3Shape_GetAABB(shapeId).upperBound;
+		b3World_OverlapShape(scene.worldId, origin, proxy, b3DefaultQueryFilter(), Scene_OverlapCallback);
+		scene.queryNested = false;
+	}
+
 	return true;
 }
 

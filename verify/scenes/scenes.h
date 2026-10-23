@@ -83,6 +83,7 @@ typedef struct Scene
 	double queryMs[SCENE_QUERY_KIND_COUNT];
 	uint32_t queryHash[SCENE_QUERY_KIND_COUNT];
 	int queryHits[SCENE_QUERY_KIND_COUNT];
+	bool queryNested;
 } Scene;
 
 int Scene_GetCount( void );

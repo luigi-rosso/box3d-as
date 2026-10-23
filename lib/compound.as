@@ -85,10 +85,15 @@ import {
 import { b3CollideMoverAndMesh, b3ComputeMeshAABB, b3GetMeshNodeBits, b3OverlapMesh, b3RayCastMesh, b3ShapeCastMesh } from "./mesh";
 import { b3CollideMoverAndCapsule, b3ComputeCapsuleAABB, b3OverlapCapsule, b3RayCastCapsule, b3ShapeCastCapsule } from "./capsule";
 import { b3CollideMoverAndSphere, b3ComputeSphereAABB, b3OverlapSphere, b3RayCastSphere, b3ShapeCastSphere } from "./sphere";
-import { b3ComputeProxyAABB, b3MakeLocalProxy } from "./shape";
+import { b3ComputeProxyAABB, b3SetLocalProxy } from "./shape";
+
+// Tree queries read the view's arrays when they start, so one view serves every compound query,
+// nested ones included.
+const s_compoundView = new b3TreeView(new StaticArray<b3TreeNode>(0), null);
 
 export function b3GetCompoundTreeView(compound: b3CompoundData): b3TreeView {
-	let view = new b3TreeView(compound.nodes, null);
+	let view = s_compoundView;
+	view.nodes = compound.nodes;
 	return view;
 }
 
@@ -729,21 +734,25 @@ export function b3ComputeCompoundAABB(shape: b3CompoundData, transform: b3Transf
 	return b3AABB_Transform(transform, shape.bounds);
 }
 
+// The compound queries below run no user code while they are active, so none nests in another of its
+// kind: each kind keeps one context and a tree callback that captures nothing.
 class b3CompoundOverlapContext {
-	compound: b3CompoundData;
+	compound: b3CompoundData? = null;
 	// proxy in the compound frame
-	proxy: b3ShapeProxy;
+	proxy: b3ShapeProxy = new b3ShapeProxy();
+	buffer: StaticArray<b3Vec3> = new StaticArray<b3Vec3>(B3_MAX_SHAPE_CAST_POINTS);
 	overlap: bool = false;
+}
 
-	constructor(compound: b3CompoundData, proxy: b3ShapeProxy) {
-		this.compound = compound;
-		this.proxy = proxy;
-	}
+const s_overlapContext = new b3CompoundOverlapContext();
+
+function b3CompoundOverlapTreeCallback(proxyId: i32, userData: u64): bool {
+	return b3CompoundOverlapCallback(proxyId, userData, s_overlapContext);
 }
 
 function b3CompoundOverlapCallback(proxyId: i32, userData: u64, overlapContext: b3CompoundOverlapContext): bool {
 	let childIndex = <i32>userData;
-	let child = b3GetQueryChild(overlapContext.compound, childIndex);
+	let child = b3GetQueryChild(overlapContext.compound!, childIndex);
 
 	let overlap = false;
 	switch (child.type) {
@@ -785,33 +794,40 @@ export function b3OverlapCompound(shape: b3CompoundData, shapeTransform: b3Trans
 	if (B3_ASSERT_ENABLED) B3_ASSERT(0 < proxy.count && proxy.count <= B3_MAX_SHAPE_CAST_POINTS);
 
 	// Use local proxy.
-	let buffer = new StaticArray<b3Vec3>(B3_MAX_SHAPE_CAST_POINTS);
-	let context = new b3CompoundOverlapContext(shape, b3MakeLocalProxy(proxy, shapeTransform, buffer));
+	let context = s_overlapContext;
+	context.compound = shape;
+	context.overlap = false;
+	b3SetLocalProxy(context.proxy, proxy, shapeTransform, context.buffer);
 
 	let aabb = b3ComputeProxyAABB(context.proxy);
 
 	// This query must be in the compound frame.
 	let view = b3GetCompoundTreeView(shape);
-	b3TreeView_Query(view, aabb, ~(<u64>0), false, (proxyId: i32, userData: u64): bool =>
-		b3CompoundOverlapCallback(proxyId, userData, context),
-	);
+	b3TreeView_Query(view, aabb, ~(<u64>0), false, b3CompoundOverlapTreeCallback);
 
 	return context.overlap;
 }
 
 class b3CompoundCastContext {
-	compound: b3CompoundData;
+	compound: b3CompoundData? = null;
 	output: b3CastOutput = b3CastOutput();
 	// origin of the shape cast, the box cast callback only carries the advancing fraction
 	shapeInput: b3ShapeCastInput? = null;
+}
 
-	constructor(compound: b3CompoundData) {
-		this.compound = compound;
-	}
+const s_rayCastContext = new b3CompoundCastContext();
+const s_shapeCastContext = new b3CompoundCastContext();
+
+function b3CompoundRayCastTreeCallback(input: b3RayCastInput, proxyId: i32, userData: u64): f32 {
+	return b3CompoundRayCastCallback(input, proxyId, userData, s_rayCastContext);
+}
+
+function b3CompoundShapeCastTreeCallback(input: b3BoxCastInput, proxyId: i32, userData: u64): f32 {
+	return b3CompoundShapeCastCallback(input, proxyId, userData, s_shapeCastContext);
 }
 
 function b3CompoundRayCastCallback(input: b3RayCastInput, proxyId: i32, userData: u64, castContext: b3CompoundCastContext): f32 {
-	let compound = castContext.compound;
+	let compound = castContext.compound!;
 
 	let childIndex = <i32>userData;
 
@@ -866,11 +882,11 @@ function b3CompoundRayCastCallback(input: b3RayCastInput, proxyId: i32, userData
 }
 
 export function b3RayCastCompound(shape: b3CompoundData, input: b3RayCastInput): b3CastOutput {
-	let context = new b3CompoundCastContext(shape);
+	let context = s_rayCastContext;
+	context.compound = shape;
+	context.output = b3CastOutput();
 	let view = b3GetCompoundTreeView(shape);
-	b3TreeView_RayCast(view, input, ~(<u64>0), false, (treeInput: b3RayCastInput, proxyId: i32, userData: u64): f32 =>
-		b3CompoundRayCastCallback(treeInput, proxyId, userData, context),
-	);
+	b3TreeView_RayCast(view, input, ~(<u64>0), false, b3CompoundRayCastTreeCallback);
 	return context.output;
 }
 
@@ -879,7 +895,7 @@ const s_childCastInput = new b3ShapeCastInput();
 const s_childCastPoints = new StaticArray<b3Vec3>(B3_MAX_SHAPE_CAST_POINTS);
 
 function b3CompoundShapeCastCallback(input: b3BoxCastInput, proxyId: i32, userData: u64, castContext: b3CompoundCastContext): f32 {
-	let compound = castContext.compound;
+	let compound = castContext.compound!;
 	let shapeInput = castContext.shapeInput!;
 
 	let childIndex = <i32>userData;
@@ -889,7 +905,7 @@ function b3CompoundShapeCastCallback(input: b3BoxCastInput, proxyId: i32, userDa
 
 	// Get the input in the child local space.
 	let localInput = s_childCastInput;
-	localInput.proxy = b3MakeLocalProxy(shapeInput.proxy, child.transform, s_childCastPoints);
+	b3SetLocalProxy(localInput.proxy, shapeInput.proxy, child.transform, s_childCastPoints);
 	localInput.translation = b3InvRotateVector(child.transform.q, shapeInput.translation);
 	localInput.maxFraction = input.maxFraction;
 	localInput.canEncroach = shapeInput.canEncroach;
@@ -943,16 +959,16 @@ export function b3ShapeCastCompound(shape: b3CompoundData, input: b3ShapeCastInp
 		return result;
 	}
 
-	let context = new b3CompoundCastContext(shape);
+	let context = s_shapeCastContext;
+	context.compound = shape;
+	context.output = b3CastOutput();
 	context.shapeInput = input;
 
 	// The compound tree is in the compound local frame, so the proxy box needs no origin offset
 	let box = b3MakeAABB(input.proxy.points, input.proxy.count, input.proxy.radius);
 	let treeInput = b3BoxCastInput(box, input.translation, input.maxFraction);
 	let view = b3GetCompoundTreeView(shape);
-	b3TreeView_BoxCast(view, treeInput, ~(<u64>0), false, (boxInput: b3BoxCastInput, proxyId: i32, userData: u64): f32 =>
-		b3CompoundShapeCastCallback(boxInput, proxyId, userData, context),
-	);
+	b3TreeView_BoxCast(view, treeInput, ~(<u64>0), false, b3CompoundShapeCastTreeCallback);
 	return context.output;
 }
 
@@ -974,23 +990,22 @@ export function b3MakeCompoundChildSweep(compoundTransform: b3Transform, childTr
 }
 
 class b3CompoundMoverContext {
-	compound: b3CompoundData;
-	planes: StaticArray<b3PlaneResult>;
-	planeCapacity: i32;
+	compound: b3CompoundData? = null;
+	planes: StaticArray<b3PlaneResult> = new StaticArray<b3PlaneResult>(0);
+	planeCapacity: i32 = 0;
 	planeCount: i32 = 0;
-	mover: b3Capsule;
+	mover: b3Capsule = b3Capsule();
+}
 
-	constructor(compound: b3CompoundData, planes: StaticArray<b3PlaneResult>, planeCapacity: i32, mover: b3Capsule) {
-		this.compound = compound;
-		this.planes = planes;
-		this.planeCapacity = planeCapacity;
-		this.mover = mover;
-	}
+const s_moverContext = new b3CompoundMoverContext();
+
+function b3CompoundMoverTreeCallback(proxyId: i32, userData: u64): bool {
+	return b3CompoundMoverCallback(proxyId, userData, s_moverContext);
 }
 
 function b3CompoundMoverCallback(proxyId: i32, userData: u64, moverContext: b3CompoundMoverContext): bool {
 	let childIndex = <i32>userData;
-	let child = b3GetQueryChild(moverContext.compound, childIndex);
+	let child = b3GetQueryChild(moverContext.compound!, childIndex);
 	let materialIndices = child.materialIndices!;
 
 	// Transform mover to child space
@@ -1052,7 +1067,12 @@ export function b3CollideMoverAndCompound(
 	shape: b3CompoundData,
 	mover: b3Capsule,
 ): i32 {
-	let context = new b3CompoundMoverContext(shape, planes, capacity, mover);
+	let context = s_moverContext;
+	context.compound = shape;
+	context.planes = planes;
+	context.planeCapacity = capacity;
+	context.planeCount = 0;
+	context.mover = mover;
 
 	let aabb = b3AABB();
 	aabb.lowerBound = b3Min(mover.center1, mover.center2);
@@ -1062,9 +1082,7 @@ export function b3CollideMoverAndCompound(
 	aabb.upperBound = b3Add(aabb.upperBound, r);
 
 	let view = b3GetCompoundTreeView(shape);
-	b3TreeView_Query(view, aabb, ~(<u64>0), false, (proxyId: i32, userData: u64): bool =>
-		b3CompoundMoverCallback(proxyId, userData, context),
-	);
+	b3TreeView_Query(view, aabb, ~(<u64>0), false, b3CompoundMoverTreeCallback);
 
 	return context.planeCount;
 }
