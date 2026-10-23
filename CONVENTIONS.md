@@ -99,9 +99,17 @@ helper from `lib/core.as`.
   `b3Sensor`, `b3BroadPhase`, `b3DynamicTree`, `b3HullData`, `b3MeshData`,
   `b3HeightFieldData`, `b3CompoundData`.
 - Unions become one field per member.
-- Structs cannot be generic arguments of our own classes or functions, so
-  there is no generic container: use `Array<T>` / `StaticArray<T>` directly
-  and write per type helpers where C uses a macro (`b3Array_RemoveSwap`).
+- Structs cannot be generic arguments of our own classes, so there is no
+  container class: use `Array<T>` / `StaticArray<T>` directly. Functions
+  generic over the array type do work, so `lib/container.as` has
+  `b3Array_RemoveSwap`, `b3Array_AddIndex`, `b3Array_Emplace` (returns an
+  index), `b3Array_Resize` and `b3Array_Append` for any `Array<V>`.
+- rasc refuses `ref` to a primitive local or field, so `B3_SWAP` is written
+  inline (`let t = x; x = y; y = t;`); `b3SwapElements(a, i, j)` swaps array
+  elements.
+- Arena, stack and block allocators are not ported: each `b3Bump` or
+  `b3StackAlloc` becomes a local `StaticArray<T>` and its free disappears,
+  `b3Arena` parameters are dropped. `notes/containers.md` lists every site.
 - Struct methods are allowed but keep C's free function style
   (`b3Add(a, b)`) for diffability.
 
@@ -148,13 +156,36 @@ the scalar lane type behind `ASC_FEATURE_SIMD`.
 Each module gets checks against the native scalar build:
 
 - `verify/cref/<module>.c`: links `~/Projects/box3d/build/scalar/src/libbox3d.a`
-  (include `~/Projects/box3d/src` for internals), prints vectors with floats
-  as `%08x` bit patterns.
-- `verify/as/<module>.as`: exports driver functions over `lib/`, compiled with
-  rasc to wasm.
-- `verify/<module>.mjs`: runs the wasm in node and compares every value to the
-  C vectors, exactly. Print the first mismatches with context and a total.
-- `verify/run.sh` runs every module.
+  (include `~/Projects/box3d/src` for internals), built with
+  `clang -O2 -ffp-contract=off -DBOX3D_DISABLE_SIMD -DNDEBUG`. It prints
+  vectors through `verify/cref/common.h`: `vtag`, `vi32`, `vu32`, `vbool`,
+  `vf32` (`%08x` bits), `vu64` and `vf64` (`%016llx`), `vend` ends a line.
+- `verify/as/<module>.as`: exports driver functions over `lib/` that print the
+  same lines through `verify/as/common.as`, which has the same functions.
+  Floats cross to the host as bits, so NaN payloads survive.
+- `verify/<module>.mjs`: usually three lines, `runModule(name, drive)` from
+  `verify/lib.mjs`. It loads the wasm, lets `drive` call the exports, then
+  compares line by line with the C vectors, exactly, and prints the first
+  mismatches with context and decoded floats, then a total.
+- `verify/run.sh [module...]` builds and runs each module and stops at the
+  first failure (`KEEP_GOING=1` to continue). Modules are found by file name;
+  optional `cref/<m>.flags` and `as/<m>.flags` add compiler arguments.
+  `RASC_FLAGS` replaces the default `-O`; run once with `RASC_FLAGS=` too.
 
-Use a fixed set of inputs plus a seeded random sweep. A check passes only when
-the bits match.
+Inputs: a fixed set plus a seeded sweep from `vseed`/`vrand32`/`vrandint`/
+`vrandf`/`vspecialf` (splitmix64, identical on both sides). C leaves the
+evaluation order of arguments and initializers open, so in C drivers draw each
+random value in its own statement. A check passes only when the bits match.
+
+Runtime: drivers compile with `--runtime frame`. The stub never frees, and its
+`__mark`/`__resetTo` rewind would free a world that outlives the rewind. Under
+frame, a minor collection runs only at a frame boundary, where only globals are
+roots, so a long run keeps its world in module globals, steps it from the host
+one export call at a time, and calls `ctx.frameBoundary()` between calls. Every
+driver re-exports `frameBoundary` from `verify/as/common.as`. Never collect from
+inside a driver call.
+
+NaN payloads: when both operands of an operation are NaN, clang may commute it
+and return the other payload, so C at `-O2` is not source exact there. Pass
+`{ nanEqual: true }` to `runModule` to let any NaN match any NaN; the summary
+counts those lines. Leave it off unless a mismatch shows only NaN tokens.
