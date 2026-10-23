@@ -60,10 +60,6 @@ import {
 const b3_zeroContact = new b3Contact();
 const b3_zeroManifolds = new StaticArray<b3Manifold>(1);
 
-// Lane scratch for C's pointer arrays, which a FixedArray cannot hold.
-const b3_contactLanes = new StaticArray<b3Contact>(4);
-const b3_manifoldLanes = new StaticArray<StaticArray<b3Manifold>>(4);
-
 // Never read: the convex paths have a fixed manifold count.
 const b3_noManifoldStarts = new Int32Array(0);
 
@@ -128,6 +124,21 @@ const BS_W = offsetof<b3BodyState>("angularVelocity");
 const BS_DP = offsetof<b3BodyState>("deltaPosition");
 const BS_FLAGS = offsetof<b3BodyState>("flags");
 const BS_DQ = offsetof<b3BodyState>("deltaRotation");
+const CT_FRICTION = offsetof<b3Contact>("friction");
+const CT_RESTITUTION = offsetof<b3Contact>("restitution");
+const CT_ROLLINGRESISTANCE = offsetof<b3Contact>("rollingResistance");
+const CT_TANGENTVELOCITY = offsetof<b3Contact>("tangentVelocity");
+const M_POINTS = offsetof<b3Manifold>("points");
+const M_NORMAL = offsetof<b3Manifold>("normal");
+const M_TWISTIMPULSE = offsetof<b3Manifold>("twistImpulse");
+const M_FRICTIONIMPULSE = offsetof<b3Manifold>("frictionImpulse");
+const M_ROLLINGIMPULSE = offsetof<b3Manifold>("rollingImpulse");
+const M_POINTCOUNT = offsetof<b3Manifold>("pointCount");
+const MP_ANCHORA = offsetof<b3ManifoldPoint>("anchorA");
+const MP_ANCHORB = offsetof<b3ManifoldPoint>("anchorB");
+const MP_SEPARATION = offsetof<b3ManifoldPoint>("separation");
+const MP_NORMALIMPULSE = offsetof<b3ManifoldPoint>("normalImpulse");
+const MP_NORMALVELOCITY = offsetof<b3ManifoldPoint>("normalVelocity");
 const BSIM_INVMASS = offsetof<b3BodySim>("invMass");
 const BSIM_INVINERTIA = offsetof<b3BodySim>("invInertiaWorld");
 const M3_CX = offsetof<b3Matrix3>("cx");
@@ -295,8 +306,11 @@ unsafe function b3PrepareConstraintL<T>(
 	let minFrictionWeight = b3SplatL<T>(B3_MIN_FRICTION_WEIGHT);
 	let minDet = b3SplatL<T>(1000.0 * FLT_MIN);
 
-	let contactLanes = b3_contactLanes;
-	let manifoldLanes = b3_manifoldLanes;
+	// C's pointer lanes: each lane's contact object and its manifold data, which stay put during the step
+	let zeroContact = changetype<usize>(b3_zeroContact);
+	let zeroManifold = changetype<usize>(b3_zeroManifolds);
+	let contactLanes: FixedArray<usize, 4>;
+	let laneManifolds: FixedArray<usize, 4>;
 	let simLanesA: FixedArray<i32, 4>;
 	let simLanesB: FixedArray<i32, 4>;
 	let manifoldCounts: FixedArray<i32, 4>;
@@ -317,7 +331,8 @@ unsafe function b3PrepareConstraintL<T>(
 			store<i32>(c0 + CW_INDEXB + <usize>lane * 4, indexB + 1);
 			manifoldCounts[lane] = contact.manifoldCount;
 
-			contactLanes[lane] = contact;
+			contactLanes[lane] = changetype<usize>(contact);
+			laneManifolds[lane] = changetype<usize>(contact.manifolds);
 			simLanesA[lane] = indexA;
 			simLanesB[lane] = indexB;
 			hitEventLanes |= (contact.flags & b3_simEnableHitEvent) != 0 ? 1 << lane : 0;
@@ -330,7 +345,8 @@ unsafe function b3PrepareConstraintL<T>(
 			store<i32>(c0 + CW_INDEXB + <usize>lane * 4, 0);
 			manifoldCounts[lane] = 0;
 
-			contactLanes[lane] = b3_zeroContact;
+			contactLanes[lane] = zeroContact;
+			laneManifolds[lane] = zeroManifold;
 			simLanesA[lane] = B3_NULL_INDEX;
 			simLanesB[lane] = B3_NULL_INDEX;
 		}
@@ -409,13 +425,13 @@ unsafe function b3PrepareConstraintL<T>(
 		let cl1 = contactLanes[l1];
 		let cl2 = contactLanes[l2];
 		let cl3 = contactLanes[l3];
-		let rollingResistance = b3SetL<T>(cl0.rollingResistance, cl1.rollingResistance, cl2.rollingResistance, cl3.rollingResistance);
-		b3StoreL<T>(c + CW_FRICTION, b3SetL<T>(cl0.friction, cl1.friction, cl2.friction, cl3.friction));
+		let rollingResistance = b3SetL<T>(load<f32>(cl0 + CT_ROLLINGRESISTANCE), load<f32>(cl1 + CT_ROLLINGRESISTANCE), load<f32>(cl2 + CT_ROLLINGRESISTANCE), load<f32>(cl3 + CT_ROLLINGRESISTANCE));
+		b3StoreL<T>(c + CW_FRICTION, b3SetL<T>(load<f32>(cl0 + CT_FRICTION), load<f32>(cl1 + CT_FRICTION), load<f32>(cl2 + CT_FRICTION), load<f32>(cl3 + CT_FRICTION)));
 		b3StoreL<T>(c + CW_ROLLINGRESISTANCE, rollingResistance);
-		b3StoreL<T>(c + CW_RESTITUTION, b3SetL<T>(cl0.restitution, cl1.restitution, cl2.restitution, cl3.restitution));
-		let tangentVelocityX = b3SetL<T>(cl0.tangentVelocity.x, cl1.tangentVelocity.x, cl2.tangentVelocity.x, cl3.tangentVelocity.x);
-		let tangentVelocityY = b3SetL<T>(cl0.tangentVelocity.y, cl1.tangentVelocity.y, cl2.tangentVelocity.y, cl3.tangentVelocity.y);
-		let tangentVelocityZ = b3SetL<T>(cl0.tangentVelocity.z, cl1.tangentVelocity.z, cl2.tangentVelocity.z, cl3.tangentVelocity.z);
+		b3StoreL<T>(c + CW_RESTITUTION, b3SetL<T>(load<f32>(cl0 + CT_RESTITUTION), load<f32>(cl1 + CT_RESTITUTION), load<f32>(cl2 + CT_RESTITUTION), load<f32>(cl3 + CT_RESTITUTION)));
+		let tangentVelocityX = b3SetL<T>(load<f32>(cl0 + CT_TANGENTVELOCITY), load<f32>(cl1 + CT_TANGENTVELOCITY), load<f32>(cl2 + CT_TANGENTVELOCITY), load<f32>(cl3 + CT_TANGENTVELOCITY));
+		let tangentVelocityY = b3SetL<T>(load<f32>(cl0 + CT_TANGENTVELOCITY + 4), load<f32>(cl1 + CT_TANGENTVELOCITY + 4), load<f32>(cl2 + CT_TANGENTVELOCITY + 4), load<f32>(cl3 + CT_TANGENTVELOCITY + 4));
+		let tangentVelocityZ = b3SetL<T>(load<f32>(cl0 + CT_TANGENTVELOCITY + 8), load<f32>(cl1 + CT_TANGENTVELOCITY + 8), load<f32>(cl2 + CT_TANGENTVELOCITY + 8), load<f32>(cl3 + CT_TANGENTVELOCITY + 8));
 
 		// b3AddSymW( iA, iB )
 		let invIABxx = b3AddL(iAxx, iBxx);
@@ -459,20 +475,17 @@ unsafe function b3PrepareConstraintL<T>(
 			let cm0 = manifoldData + <usize>(manifoldBase + manifoldIndex) * sizeof<b3ContactManifoldWide>();
 			let cm = cm0 + <usize>lane * 4;
 
-			let manifoldIndices: FixedArray<i32, 4>;
+			let manifoldLanes: FixedArray<usize, 4>;
 			let activeLanes: FixedArray<i32, 4>;
 			let pointCounts: FixedArray<i32, 4>;
 			let pointCount = 0;
 			for (let k = 0; k < 4; ++k) {
 				if (manifoldIndex < manifoldCounts[k]) {
-					let laneManifolds = contactLanes[k].manifolds;
-					manifoldLanes[k] = laneManifolds;
-					manifoldIndices[k] = manifoldIndex;
+					manifoldLanes[k] = laneManifolds[k] + <usize>manifoldIndex * sizeof<b3Manifold>();
 					activeLanes[k] = 1;
-					pointCounts[k] = laneManifolds[manifoldIndex].pointCount;
+					pointCounts[k] = load<i32>(manifoldLanes[k] + M_POINTCOUNT);
 				} else {
-					manifoldLanes[k] = b3_zeroManifolds;
-					manifoldIndices[k] = 0;
+					manifoldLanes[k] = zeroManifold;
 					activeLanes[k] = 0;
 					pointCounts[k] = 0;
 				}
@@ -486,26 +499,22 @@ unsafe function b3PrepareConstraintL<T>(
 			let rollingMask = b3AndL(rollingResistanceMask, b3GreaterThanL(activeLanesW, zeroW));
 			b3StoreL<T>(cm + MW_ROLLINGMASK, b3MaskValueL(rollingMask));
 
-			let ma0 = manifoldLanes[l0];
-			let ma1 = manifoldLanes[l1];
-			let ma2 = manifoldLanes[l2];
-			let ma3 = manifoldLanes[l3];
-			ref m0 = ma0[manifoldIndices[l0]];
-			ref m1 = ma1[manifoldIndices[l1]];
-			ref m2 = ma2[manifoldIndices[l2]];
-			ref m3 = ma3[manifoldIndices[l3]];
+			let m0 = manifoldLanes[l0];
+			let m1 = manifoldLanes[l1];
+			let m2 = manifoldLanes[l2];
+			let m3 = manifoldLanes[l3];
 
 			// C transposes the normal, twist, friction and rolling impulse floats of each lane
-			let normalX = b3SetL<T>(m0.normal.x, m1.normal.x, m2.normal.x, m3.normal.x);
-			let normalY = b3SetL<T>(m0.normal.y, m1.normal.y, m2.normal.y, m3.normal.y);
-			let normalZ = b3SetL<T>(m0.normal.z, m1.normal.z, m2.normal.z, m3.normal.z);
-			let twistImpulse = b3SetL<T>(m0.twistImpulse, m1.twistImpulse, m2.twistImpulse, m3.twistImpulse);
-			let frictionImpulseX = b3SetL<T>(m0.frictionImpulse.x, m1.frictionImpulse.x, m2.frictionImpulse.x, m3.frictionImpulse.x);
-			let frictionImpulseY = b3SetL<T>(m0.frictionImpulse.y, m1.frictionImpulse.y, m2.frictionImpulse.y, m3.frictionImpulse.y);
-			let frictionImpulseZ = b3SetL<T>(m0.frictionImpulse.z, m1.frictionImpulse.z, m2.frictionImpulse.z, m3.frictionImpulse.z);
-			let rollingImpulseX = b3SetL<T>(m0.rollingImpulse.x, m1.rollingImpulse.x, m2.rollingImpulse.x, m3.rollingImpulse.x);
-			let rollingImpulseY = b3SetL<T>(m0.rollingImpulse.y, m1.rollingImpulse.y, m2.rollingImpulse.y, m3.rollingImpulse.y);
-			let rollingImpulseZ = b3SetL<T>(m0.rollingImpulse.z, m1.rollingImpulse.z, m2.rollingImpulse.z, m3.rollingImpulse.z);
+			let normalX = b3SetL<T>(load<f32>(m0 + M_NORMAL), load<f32>(m1 + M_NORMAL), load<f32>(m2 + M_NORMAL), load<f32>(m3 + M_NORMAL));
+			let normalY = b3SetL<T>(load<f32>(m0 + M_NORMAL + 4), load<f32>(m1 + M_NORMAL + 4), load<f32>(m2 + M_NORMAL + 4), load<f32>(m3 + M_NORMAL + 4));
+			let normalZ = b3SetL<T>(load<f32>(m0 + M_NORMAL + 8), load<f32>(m1 + M_NORMAL + 8), load<f32>(m2 + M_NORMAL + 8), load<f32>(m3 + M_NORMAL + 8));
+			let twistImpulse = b3SetL<T>(load<f32>(m0 + M_TWISTIMPULSE), load<f32>(m1 + M_TWISTIMPULSE), load<f32>(m2 + M_TWISTIMPULSE), load<f32>(m3 + M_TWISTIMPULSE));
+			let frictionImpulseX = b3SetL<T>(load<f32>(m0 + M_FRICTIONIMPULSE), load<f32>(m1 + M_FRICTIONIMPULSE), load<f32>(m2 + M_FRICTIONIMPULSE), load<f32>(m3 + M_FRICTIONIMPULSE));
+			let frictionImpulseY = b3SetL<T>(load<f32>(m0 + M_FRICTIONIMPULSE + 4), load<f32>(m1 + M_FRICTIONIMPULSE + 4), load<f32>(m2 + M_FRICTIONIMPULSE + 4), load<f32>(m3 + M_FRICTIONIMPULSE + 4));
+			let frictionImpulseZ = b3SetL<T>(load<f32>(m0 + M_FRICTIONIMPULSE + 8), load<f32>(m1 + M_FRICTIONIMPULSE + 8), load<f32>(m2 + M_FRICTIONIMPULSE + 8), load<f32>(m3 + M_FRICTIONIMPULSE + 8));
+			let rollingImpulseX = b3SetL<T>(load<f32>(m0 + M_ROLLINGIMPULSE), load<f32>(m1 + M_ROLLINGIMPULSE), load<f32>(m2 + M_ROLLINGIMPULSE), load<f32>(m3 + M_ROLLINGIMPULSE));
+			let rollingImpulseY = b3SetL<T>(load<f32>(m0 + M_ROLLINGIMPULSE + 4), load<f32>(m1 + M_ROLLINGIMPULSE + 4), load<f32>(m2 + M_ROLLINGIMPULSE + 4), load<f32>(m3 + M_ROLLINGIMPULSE + 4));
+			let rollingImpulseZ = b3SetL<T>(load<f32>(m0 + M_ROLLINGIMPULSE + 8), load<f32>(m1 + M_ROLLINGIMPULSE + 8), load<f32>(m2 + M_ROLLINGIMPULSE + 8), load<f32>(m3 + M_ROLLINGIMPULSE + 8));
 
 			// b3PerpW( normal )
 			let perpMask = b3OrL(b3LessThanL(normalX, b3NegL(halfW)), b3GreaterThanL(normalX, halfW));
@@ -561,22 +570,23 @@ unsafe function b3PrepareConstraintL<T>(
 				let cp = cm + MW_POINTS + <usize>pointIndex * sizeof<b3ContactConstraintPointWide>();
 				let pointMask = b3GreaterThanL(pointCountW, b3SplatL<T>(<f32>pointIndex));
 
-				ref p0 = m0.points[pointIndex];
-				ref p1 = m1.points[pointIndex];
-				ref p2 = m2.points[pointIndex];
-				ref p3 = m3.points[pointIndex];
+				let pointOffset = M_POINTS + <usize>pointIndex * sizeof<b3ManifoldPoint>();
+				let p0 = m0 + pointOffset;
+				let p1 = m1 + pointOffset;
+				let p2 = m2 + pointOffset;
+				let p3 = m3 + pointOffset;
 
 				// C transposes anchorA, anchorB, separation and normalImpulse of each lane
-				let rAX = b3BlendL(zeroW, b3SetL<T>(p0.anchorA.x, p1.anchorA.x, p2.anchorA.x, p3.anchorA.x), pointMask);
-				let rAY = b3BlendL(zeroW, b3SetL<T>(p0.anchorA.y, p1.anchorA.y, p2.anchorA.y, p3.anchorA.y), pointMask);
-				let rAZ = b3BlendL(zeroW, b3SetL<T>(p0.anchorA.z, p1.anchorA.z, p2.anchorA.z, p3.anchorA.z), pointMask);
-				let rBX = b3BlendL(zeroW, b3SetL<T>(p0.anchorB.x, p1.anchorB.x, p2.anchorB.x, p3.anchorB.x), pointMask);
-				let rBY = b3BlendL(zeroW, b3SetL<T>(p0.anchorB.y, p1.anchorB.y, p2.anchorB.y, p3.anchorB.y), pointMask);
-				let rBZ = b3BlendL(zeroW, b3SetL<T>(p0.anchorB.z, p1.anchorB.z, p2.anchorB.z, p3.anchorB.z), pointMask);
-				let separation = b3BlendL(zeroW, b3SetL<T>(p0.separation, p1.separation, p2.separation, p3.separation), pointMask);
+				let rAX = b3BlendL(zeroW, b3SetL<T>(load<f32>(p0 + MP_ANCHORA), load<f32>(p1 + MP_ANCHORA), load<f32>(p2 + MP_ANCHORA), load<f32>(p3 + MP_ANCHORA)), pointMask);
+				let rAY = b3BlendL(zeroW, b3SetL<T>(load<f32>(p0 + MP_ANCHORA + 4), load<f32>(p1 + MP_ANCHORA + 4), load<f32>(p2 + MP_ANCHORA + 4), load<f32>(p3 + MP_ANCHORA + 4)), pointMask);
+				let rAZ = b3BlendL(zeroW, b3SetL<T>(load<f32>(p0 + MP_ANCHORA + 8), load<f32>(p1 + MP_ANCHORA + 8), load<f32>(p2 + MP_ANCHORA + 8), load<f32>(p3 + MP_ANCHORA + 8)), pointMask);
+				let rBX = b3BlendL(zeroW, b3SetL<T>(load<f32>(p0 + MP_ANCHORB), load<f32>(p1 + MP_ANCHORB), load<f32>(p2 + MP_ANCHORB), load<f32>(p3 + MP_ANCHORB)), pointMask);
+				let rBY = b3BlendL(zeroW, b3SetL<T>(load<f32>(p0 + MP_ANCHORB + 4), load<f32>(p1 + MP_ANCHORB + 4), load<f32>(p2 + MP_ANCHORB + 4), load<f32>(p3 + MP_ANCHORB + 4)), pointMask);
+				let rBZ = b3BlendL(zeroW, b3SetL<T>(load<f32>(p0 + MP_ANCHORB + 8), load<f32>(p1 + MP_ANCHORB + 8), load<f32>(p2 + MP_ANCHORB + 8), load<f32>(p3 + MP_ANCHORB + 8)), pointMask);
+				let separation = b3BlendL(zeroW, b3SetL<T>(load<f32>(p0 + MP_SEPARATION), load<f32>(p1 + MP_SEPARATION), load<f32>(p2 + MP_SEPARATION), load<f32>(p3 + MP_SEPARATION)), pointMask);
 				let normalImpulse = b3BlendL(
 					zeroW,
-					b3SetL<T>(p0.normalImpulse, p1.normalImpulse, p2.normalImpulse, p3.normalImpulse),
+					b3SetL<T>(load<f32>(p0 + MP_NORMALIMPULSE), load<f32>(p1 + MP_NORMALIMPULSE), load<f32>(p2 + MP_NORMALIMPULSE), load<f32>(p3 + MP_NORMALIMPULSE)),
 					pointMask
 				);
 
@@ -794,10 +804,10 @@ unsafe function b3PrepareConstraintL<T>(
 								continue;
 							}
 
-							let laneManifolds = contactLanes[k].manifolds;
-							ref manifold = laneManifolds[manifoldIndex];
-							if (pointIndex < manifold.pointCount) {
-								manifold.points[pointIndex].normalVelocity = b3LaneL(vn, k);
+							let manifold = laneManifolds[k] + <usize>manifoldIndex * sizeof<b3Manifold>();
+							if (pointIndex < load<i32>(manifold + M_POINTCOUNT)) {
+								let point = manifold + M_POINTS + <usize>pointIndex * sizeof<b3ManifoldPoint>();
+								store<f32>(point + MP_NORMALVELOCITY, b3LaneL(vn, k));
 							}
 						}
 					}
