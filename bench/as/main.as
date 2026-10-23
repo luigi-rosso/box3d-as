@@ -1,5 +1,6 @@
 // Step timing for the port, the AnimaScript side of bench/native.
-// --define=SCENE=0 pyramid (base 10), 1 large_pyramid (base 100), 2 many_bodies; --define=STEPS=n.
+// --define=SCENE=0 pyramid (base 10), 1 large_pyramid (base 100), 2 many_bodies; 3 and up run the
+// verify/scenes mirror (SCENE_NAMES below, copied in as ./scenes by run.sh); --define=STEPS=n.
 // One world step per frame; the scene is built in init and the result logged after the last step.
 
 import { Layout, Context } from "rive/host";
@@ -23,6 +24,7 @@ import {
 	b3World_Step,
 	b3_dynamicBody,
 } from "./lib/box3d";
+import { Scene, Scene_Create, Scene_Step, SCENE_QUERY_KIND_COUNT } from "./scenes";
 
 const SCENE_PYRAMID: i32 = 0;
 const SCENE_LARGE_PYRAMID: i32 = 1;
@@ -30,6 +32,13 @@ const SCENE_MANY_BODIES: i32 = 2;
 const STAGE_COUNT: i32 = 23;
 const WARMUP_STEPS: i32 = 1;
 const SUBSTEP_COUNT: i32 = 4;
+
+// Scenes from verify/scenes, from SCENE=3 on, timed per Scene_Step as bench/native does
+const SCENE_FIRST_MIRRORED: i32 = 3;
+const SCENE_NAMES: StaticArray<string> = [
+	"capsule_mesh", "heightfield", "mesh_drop", "village", "queries", "mover", "card_house", "chains", "bullets",
+];
+const QUERY_NAMES: StaticArray<string> = ["qRay", "qRayAll", "qShapeCast", "qOverlap", "qMover"];
 
 const STAGE_NAMES: StaticArray<string> = [
 	"step", "pairs", "collide", "solve", "solverSetup", "constraints", "prepareConstraints",
@@ -46,6 +55,9 @@ function sceneIndex(): i32 {
 }
 
 function sceneName(scene: i32): string {
+	if (scene >= SCENE_FIRST_MIRRORED) {
+		return SCENE_NAMES[scene - SCENE_FIRST_MIRRORED];
+	}
 	return scene == SCENE_PYRAMID ? "pyramid" : scene == SCENE_LARGE_PYRAMID ? "large_pyramid" : "many_bodies";
 }
 
@@ -191,6 +203,7 @@ export class Main extends Layout {
 	stageSum: Float64Array = new Float64Array(STAGE_COUNT);
 	stages: Float64Array = new Float64Array(STAGE_COUNT);
 	createMs: f64 = 0;
+	mirror: Scene = new Scene();
 
 	override init(context: Context): bool {
 		this.scene = sceneIndex();
@@ -200,13 +213,18 @@ export class Main extends Layout {
 		let t0 = clock();
 		let worldDef = b3DefaultWorldDef();
 		worldDef.workerCount = 1;
-		this.worldId = b3CreateWorld(worldDef);
-		if (this.scene == SCENE_PYRAMID) {
-			createPyramid(this.worldId, 10);
-		} else if (this.scene == SCENE_LARGE_PYRAMID) {
-			createPyramid(this.worldId, 100);
+		if (this.scene >= SCENE_FIRST_MIRRORED) {
+			Scene_Create(this.mirror, sceneName(this.scene), 1);
+			this.worldId = this.mirror.worldId;
 		} else {
-			createManyPyramids(this.worldId);
+			this.worldId = b3CreateWorld(worldDef);
+			if (this.scene == SCENE_PYRAMID) {
+				createPyramid(this.worldId, 10);
+			} else if (this.scene == SCENE_LARGE_PYRAMID) {
+				createPyramid(this.worldId, 100);
+			} else {
+				createManyPyramids(this.worldId);
+			}
 		}
 		this.createMs = (clock() - t0) * 1000.0;
 		console.log("BENCH start scene=" + sceneName(this.scene) + " steps=" + this.steps.toString() +
@@ -220,7 +238,11 @@ export class Main extends Layout {
 		}
 
 		let t0 = clock();
-		b3World_Step(this.worldId, 1.0 / 60.0, SUBSTEP_COUNT);
+		if (this.scene >= SCENE_FIRST_MIRRORED) {
+			Scene_Step(this.mirror, this.stepIndex);
+		} else {
+			b3World_Step(this.worldId, 1.0 / 60.0, SUBSTEP_COUNT);
+		}
 		let ms = (clock() - t0) * 1000.0;
 
 		if (this.stepIndex >= WARMUP_STEPS) {
@@ -255,6 +277,15 @@ export class Main extends Layout {
 			" median=" + formatFixed(median(sorted), 4) + " max=" + formatFixed(sorted[timed - 1], 4);
 		for (let k = 0; k < STAGE_COUNT; ++k) {
 			line += " " + STAGE_NAMES[k] + "=" + formatFixed(this.stageSum[k] / <f64>timed, 4);
+		}
+		if (this.scene >= SCENE_FIRST_MIRRORED) {
+			for (let k = 0; k < SCENE_QUERY_KIND_COUNT; ++k) {
+				line += " " + QUERY_NAMES[k] + "=" + formatFixed(this.mirror.queryMs[k] / <f64>this.steps, 4);
+			}
+			for (let k = 0; k < SCENE_QUERY_KIND_COUNT; ++k) {
+				let hash = this.mirror.queryHash[k];
+				line += " " + QUERY_NAMES[k] + "Hash=" + hash.toString(16).padStart(8, "0");
+			}
 		}
 		console.log(line);
 	}

@@ -102,6 +102,17 @@ int main( int argc, char** argv )
 		stageMin[k] = 1e30;
 	}
 
+	// Query time per step by kind, min over repeats, and the result hashes, which must match the
+	// AnimaScript run
+	static const char* queryNames[SCENE_QUERY_KIND_COUNT] = { "qRay", "qRayAll", "qShapeCast",
+															  "qOverlap", "qMover" };
+	double queryMin[SCENE_QUERY_KIND_COUNT];
+	uint32_t queryHash[SCENE_QUERY_KIND_COUNT] = { 0 };
+	for ( int k = 0; k < SCENE_QUERY_KIND_COUNT; ++k )
+	{
+		queryMin[k] = 1e30;
+	}
+
 	int bodyCount = 0;
 	int contactCount = 0;
 
@@ -140,6 +151,13 @@ int main( int argc, char** argv )
 			stageMin[k] = mean < stageMin[k] ? mean : stageMin[k];
 		}
 
+		for ( int k = 0; k < SCENE_QUERY_KIND_COUNT; ++k )
+		{
+			double mean = scene.queryMs[k] / stepCount;
+			queryMin[k] = mean < queryMin[k] ? mean : queryMin[k];
+			queryHash[k] = scene.queryHash[k];
+		}
+
 		b3Counters counters = b3World_GetCounters( scene.worldId );
 		bodyCount = counters.bodyCount;
 		contactCount = counters.contactCount;
@@ -162,6 +180,14 @@ int main( int argc, char** argv )
 	for ( int k = 0; k < STAGE_COUNT; ++k )
 	{
 		printf( " %s=%.4f", s_stageNames[k], stageMin[k] );
+	}
+	for ( int k = 0; k < SCENE_QUERY_KIND_COUNT; ++k )
+	{
+		printf( " %s=%.4f", queryNames[k], queryMin[k] );
+	}
+	for ( int k = 0; k < SCENE_QUERY_KIND_COUNT; ++k )
+	{
+		printf( " %sHash=%08x", queryNames[k], queryHash[k] );
 	}
 	printf( "\n" );
 	return 0;

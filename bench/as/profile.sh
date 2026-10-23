@@ -13,6 +13,7 @@ OUT=${OUT:-$(mktemp -d)}
 CACHE=${RIVE_AOT_CACHE_DIR:-$OUT/aotcache}
 mkdir -p "$OUT" "$CACHE"
 rsync -a --delete "$HERE/../../lib/" "$HERE/lib/"
+sed 's|"\.\./\.\./lib/|"./lib/|' "$HERE/../../verify/scenes/scenes.as" > "$HERE/scenes.as"
 
 cd "$HERE"
 RIVE_RASC_NAMES=1 RIVE_WAMRC="$WAMRC" RIVE_WASM_AOT_SYNC=o3 RIVE_AOT_CACHE_DIR="$CACHE" \

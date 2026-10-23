@@ -64,3 +64,15 @@ for scene in scenes:
             continue
         cells = [f"{min(float(r[s]) for r in rs):.3f}" for s in STAGES]
         print(f"| {scene} | {impl} | " + ' | '.join(cells) + ' |')
+
+QUERIES = ['qRay', 'qRayAll', 'qShapeCast', 'qOverlap', 'qMover']
+rows = [(scene, impl) for scene in scenes for impl in ORDER if any('qRay' in r for r in runs.get((scene, impl), []))]
+if rows:
+    print()
+    print('| scene | impl | ' + ' | '.join(QUERIES) + ' | hashes |')
+    print('|---|---|' + '---|' * (len(QUERIES) + 1))
+    for scene, impl in rows:
+        rs = runs[(scene, impl)]
+        cells = [f"{min(float(r[q]) for r in rs):.3f}" for q in QUERIES]
+        hashes = ' '.join(rs[-1].get(q + 'Hash', '-') for q in QUERIES)
+        print(f"| {scene} | {impl} | " + ' | '.join(cells) + f' | {hashes} |')

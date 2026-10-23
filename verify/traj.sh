@@ -20,8 +20,8 @@ for a in "$@"; do
 	if [ "$a" = "--large" ]; then large=1; else scenes+=("$a"); fi
 done
 if [ ${#scenes[@]} -eq 0 ]; then
-	scenes=(pyramid card_house chains capsule_mesh heightfield bullets mover)
-	[ $large -eq 1 ] && scenes+=(large_pyramid many_bodies)
+	scenes=(pyramid card_house chains capsule_mesh heightfield bullets mover queries)
+	[ $large -eq 1 ] && scenes+=(large_pyramid many_bodies mesh_drop village)
 fi
 
 if [ "${NATIVE:-0}" = "1" ]; then
@@ -30,6 +30,7 @@ if [ "${NATIVE:-0}" = "1" ]; then
 		steps=300
 		case $s in
 			large_pyramid) steps=200 ;; heightfield) steps=400 ;; bullets) steps=150 ;; many_bodies) steps=100 ;;
+			mesh_drop) steps=120 ;; village) steps=120 ;;
 		esac
 		"$here/scenes/bin/traj_scalar" "$s" $steps 1 "$out/${s}_scalar_w1.bin" > /dev/null || exit 2
 	done

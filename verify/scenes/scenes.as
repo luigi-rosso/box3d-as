@@ -3,7 +3,7 @@
 // AnimaScript mirror of verify/scenes/scenes.c, statement for statement over lib/box3d.as. Every
 // int to float conversion is an explicit <f32>, every float local is annotated.
 
-import { FLT_MAX } from "../../lib/core";
+import { FLT_MAX, b3GetMilliseconds, b3GetTicks } from "../../lib/core";
 import {
 	B3_DEG_TO_RAD,
 	B3_PI,
@@ -97,10 +97,39 @@ import {
 	b3_nullJointId,
 	b3_revoluteJoint,
 	b3_sphericalJoint,
+	b3CompoundCapsuleDef,
+	b3CompoundData,
+	b3CompoundDef,
+	b3CompoundHullDef,
+	b3CompoundMeshDef,
+	b3CompoundSphereDef,
+	b3ComputeCosSin,
+	b3CreateBakedCompoundShape,
+	b3CreateCompound,
+	b3DefaultSurfaceMaterial,
+	b3DestroyCompound,
+	b3MakeCubeHull,
+	b3RotateVector,
+	b3ShapeProxy,
+	b3SurfaceMaterial,
+	b3ToPos,
+	b3Vec3_zero,
+	b3World_CastRay,
+	b3World_CastShape,
+	b3World_OverlapShape,
 } from "../../lib/box3d";
 
 export const SCENE_MOVER_PLANE_CAPACITY: i32 = 8;
 export const SCENE_SUBSTEP_COUNT: i32 = 4;
+export const SCENE_QUERY_MOVER_COUNT: i32 = 8;
+
+// Query kinds timed and hashed by the village and queries scenes
+export const SCENE_QUERY_RAY: i32 = 0;
+export const SCENE_QUERY_RAY_ALL: i32 = 1;
+export const SCENE_QUERY_SHAPE_CAST: i32 = 2;
+export const SCENE_QUERY_OVERLAP: i32 = 3;
+export const SCENE_QUERY_MOVER: i32 = 4;
+export const SCENE_QUERY_KIND_COUNT: i32 = 5;
 
 // Port of CharacterMover in samples/mover.h, minus the camera and drawing
 export class SceneMover {
@@ -139,6 +168,19 @@ export class Scene {
 
 	hasMover: bool = false;
 	mover: SceneMover = new SceneMover();
+
+	// Village and queries scenes
+	compound: b3CompoundData? = null;
+	compoundRotation: b3Quat = b3Quat();
+	halfSpan: f32 = 0;
+	moverCount: i32 = 0;
+	movers: Array<SceneMover> = new Array<SceneMover>(0);
+
+	// Milliseconds spent in each query kind, summed over steps, and a hash and hit count of the
+	// results
+	queryMs: Float64Array = new Float64Array(SCENE_QUERY_KIND_COUNT);
+	queryHash: Uint32Array = new Uint32Array(SCENE_QUERY_KIND_COUNT);
+	queryHits: Int32Array = new Int32Array(SCENE_QUERY_KIND_COUNT);
 }
 
 const s_sceneNames: StaticArray<string> = [
@@ -151,6 +193,9 @@ const s_sceneNames: StaticArray<string> = [
 	"bullets",
 	"mover",
 	"many_bodies",
+	"mesh_drop",
+	"village",
+	"queries",
 ];
 
 export function Scene_GetCount(): i32 {
@@ -1030,9 +1075,7 @@ const s_moverFriction: f32 = 4.0;
 const s_moverGravity: f32 = 15.0;
 
 // samples/mover.cpp CharacterMover::Initialize
-function Scene_InitializeMover(scene: Scene, position: b3Pos): void {
-	scene.mover = new SceneMover();
-	let mover = scene.mover;
+function Scene_InitializeMover(mover: SceneMover, position: b3Pos): void {
 	mover.transform.p = position;
 	mover.transform.q = b3Quat_identity;
 	mover.velocity = b3Vec3(0.0, 0.0, 0.0);
@@ -1083,7 +1126,8 @@ function CreateMover(scene: Scene): void {
 	}
 
 	scene.hasMover = true;
-	Scene_InitializeMover(scene, b3Vec3(0.0, 1.4, 0.0));
+	scene.mover = new SceneMover();
+	Scene_InitializeMover(scene.mover, b3Vec3(0.0, 1.4, 0.0));
 }
 
 function Scene_MoverFilter(shapeId: b3ShapeId): bool {
@@ -1114,9 +1158,15 @@ function Scene_MoverPlaneResult(shapeId: b3ShapeId, planeResults: StaticArray<b3
 }
 
 // samples/mover.cpp CharacterMover::SolveMove
-function Scene_SolveMove(scene: Scene, timeStep: f32, forward: b3Vec3, right: b3Vec3, throttle: b3Vec2, clipVelocity: bool): void {
-	let mover = scene.mover;
-
+function Scene_SolveMove(
+	scene: Scene,
+	mover: SceneMover,
+	timeStep: f32,
+	forward: b3Vec3,
+	right: b3Vec3,
+	throttle: b3Vec2,
+	clipVelocity: bool,
+): void {
 	// Friction
 	let speed: f32 = b3Length(mover.velocity);
 	if (speed < s_moverMinSpeed) {
@@ -1331,7 +1381,7 @@ function Scene_StepMover(scene: Scene, stepIndex: i32, timeStep: f32): void {
 	}
 
 	let clipVelocity = true;
-	Scene_SolveMove(scene, timeStep, forward, right, throttle, clipVelocity);
+	Scene_SolveMove(scene, mover, timeStep, forward, right, throttle, clipVelocity);
 }
 
 // shared/benchmarks.c CreateSmallPyramid
@@ -1390,6 +1440,571 @@ function CreateManyPyramids(scene: Scene): void {
 	}
 }
 
+// shared/benchmarks.c CreateMeshDropBenchmark at release size: 100 x 100 boxes that only collide
+// with a 120 x 120 wave mesh. RandomVec3Uniform is replaced by the scene LCG.
+function CreateMeshDrop(scene: Scene): void {
+	let meshGridCount = 120;
+	let borderCount = 10;
+	let cellWidth: f32 = 1.0;
+
+	{
+		let bodyDef = b3DefaultBodyDef();
+		let groundId = Scene_AddBody(scene, bodyDef);
+
+		let rowHz: f32 = 0.1;
+		let columnHz: f32 = 0.2;
+		let groundAmplitude: f32 = 0.5;
+
+		scene.mesh = b3CreateWaveMesh(meshGridCount, meshGridCount, cellWidth, groundAmplitude, rowHz, columnHz);
+		let shapeDef = b3DefaultShapeDef();
+		shapeDef.filter.categoryBits = 1;
+		b3CreateMeshShape(groundId, shapeDef, scene.mesh!, b3Vec3_one);
+	}
+
+	let box = b3MakeBoxHull(0.02, 0.2, 0.04);
+
+	let bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_dynamicBody;
+
+	let shapeDef = b3DefaultShapeDef();
+	shapeDef.baseMaterial.rollingResistance = 0.1;
+
+	// Don't allow shapes to collide with each other.
+	shapeDef.filter.categoryBits = 2;
+	shapeDef.filter.maskBits = 1;
+
+	scene.seed = 3963634789;
+
+	let gridCount = 100;
+	let spacing: f32 = (cellWidth * <f32>(meshGridCount - 2 * borderCount)) / <f32>gridCount;
+	let offset: f32 = 0.5 * spacing * <f32>(1 - gridCount);
+
+	for (let i = 0; i < gridCount; ++i) {
+		for (let j = 0; j < gridCount; ++j) {
+			let linearVelocity = b3Vec3();
+			linearVelocity.x = Scene_RandomFloat(scene, -1.0, 1.0);
+			linearVelocity.y = Scene_RandomFloat(scene, -1.0, 1.0);
+			linearVelocity.z = Scene_RandomFloat(scene, -1.0, 1.0);
+
+			let angularVelocity = b3Vec3();
+			angularVelocity.x = Scene_RandomFloat(scene, -5.0, 5.0);
+			angularVelocity.y = Scene_RandomFloat(scene, -5.0, 5.0);
+			angularVelocity.z = Scene_RandomFloat(scene, -5.0, 5.0);
+
+			bodyDef.position.x = offset + spacing * <f32>i;
+			bodyDef.position.y = 5.0;
+			bodyDef.position.z = offset + spacing * <f32>j;
+			bodyDef.linearVelocity = linearVelocity;
+			bodyDef.angularVelocity = angularVelocity;
+			let bodyId = Scene_AddBody(scene, bodyDef);
+
+			b3CreateHullShape(bodyId, shapeDef, box.base);
+		}
+	}
+}
+
+function Scene_HashQuery(scene: Scene, kind: i32, value: u32): void {
+	let h: u32 = scene.queryHash[kind] ^ value;
+	scene.queryHash[kind] = h * 16777619;
+}
+
+function Scene_HashVec3(scene: Scene, kind: i32, v: b3Vec3): void {
+	Scene_HashQuery(scene, kind, reinterpret<u32>(v.x));
+	Scene_HashQuery(scene, kind, reinterpret<u32>(v.y));
+	Scene_HashQuery(scene, kind, reinterpret<u32>(v.z));
+}
+
+// The static compound of shared/benchmarks.c CreateVillage: a grid of box tiles with a sparse set
+// of wave mesh patches, and a capsule or sphere prop on every eighth tile
+function Scene_CreateVillageGround(scene: Scene, gridCount: i32, angle: f32): void {
+	let tileWidth: f32 = 4.0;
+	let halfSpan: f32 = 0.5 * tileWidth * <f32>gridCount;
+	scene.halfSpan = halfSpan;
+
+	let hulls = new Array<b3CompoundHullDef>();
+	let meshes = new Array<b3CompoundMeshDef>();
+	let capsules = new Array<b3CompoundCapsuleDef>();
+	let spheres = new Array<b3CompoundSphereDef>();
+
+	let material = b3DefaultSurfaceMaterial();
+	let tile = b3MakeBoxHull(0.5 * tileWidth, 0.5, 0.5 * tileWidth);
+
+	// A wave patch replaces a sparse set of tiles so the compound carries mesh children
+	let wave = b3CreateWaveMesh(8, 8, tileWidth / 8.0, 0.25, 0.25, 0.25)!;
+	let materials = new StaticArray<b3SurfaceMaterial>(1);
+	materials[0] = material;
+
+	for (let i = 0; i < gridCount; ++i) {
+		let x: f32 = -halfSpan + (<f32>i + 0.5) * tileWidth;
+
+		for (let j = 0; j < gridCount; ++j) {
+			let z: f32 = -halfSpan + (<f32>j + 0.5) * tileWidth;
+
+			if (i % 16 == 8 && j % 16 == 8) {
+				let meshDef = new b3CompoundMeshDef(wave);
+				meshDef.transform.p = b3Vec3(x, 0.0, z);
+				meshDef.transform.q = b3Quat_identity;
+				meshDef.scale = b3Vec3_one;
+				meshDef.materials = materials;
+				meshDef.materialCount = 1;
+				meshes.push(meshDef);
+				continue;
+			}
+
+			let transform = b3Transform();
+			transform.p = b3Vec3(x, -0.5, z);
+			transform.q = b3Quat_identity;
+			hulls.push(new b3CompoundHullDef(tile.base, transform, material));
+
+			let tileIndex = i * gridCount + j;
+			if (tileIndex % 8 != 0) {
+				continue;
+			}
+
+			if (((tileIndex / 8) & 1) != 0) {
+				let radius: f32 = 0.25;
+				let capsuleDef = b3CompoundCapsuleDef();
+				capsuleDef.capsule.center1 = b3Vec3(x - 1.0, radius, z);
+				capsuleDef.capsule.center2 = b3Vec3(x + 1.0, radius, z);
+				capsuleDef.capsule.radius = radius;
+				capsuleDef.material = material;
+				capsules.push(capsuleDef);
+			} else {
+				let radius: f32 = 0.5;
+				let sphereDef = b3CompoundSphereDef();
+				sphereDef.sphere.center = b3Vec3(x, radius, z);
+				sphereDef.sphere.radius = radius;
+				sphereDef.material = material;
+				spheres.push(sphereDef);
+			}
+		}
+	}
+
+	let def = new b3CompoundDef();
+	// StaticArray.fromArray traps on arrays of structs (notes/findings.md)
+	let capsuleDefs = new StaticArray<b3CompoundCapsuleDef>(capsules.length);
+	for (let i = 0; i < capsules.length; ++i) {
+		capsuleDefs[i] = capsules[i];
+	}
+	let sphereDefs = new StaticArray<b3CompoundSphereDef>(spheres.length);
+	for (let i = 0; i < spheres.length; ++i) {
+		sphereDefs[i] = spheres[i];
+	}
+
+	def.capsules = capsuleDefs;
+	def.capsuleCount = capsules.length;
+	def.hulls = StaticArray.fromArray<b3CompoundHullDef>(hulls);
+	def.hullCount = hulls.length;
+	def.meshes = StaticArray.fromArray<b3CompoundMeshDef>(meshes);
+	def.meshCount = meshes.length;
+	def.spheres = sphereDefs;
+	def.sphereCount = spheres.length;
+
+	scene.compound = b3CreateCompound(def);
+
+	// The compound clones its inputs
+	b3DestroyMesh(wave);
+
+	// Rotated so broad-phase lookups transform into the compound frame
+	scene.compoundRotation = b3MakeQuatFromAxisAngle(b3Vec3_axisY, angle);
+
+	let bodyDef = b3DefaultBodyDef();
+	bodyDef.rotation = scene.compoundRotation;
+	let groundId = Scene_AddBody(scene, bodyDef);
+
+	let shapeDef = b3DefaultShapeDef();
+	b3CreateBakedCompoundShape(groundId, shapeDef, scene.compound!);
+}
+
+// shared/benchmarks.c CreateVillage at release size: 70 x 70 mixed bodies, every twentieth fast
+// enough to need continuous, onto a rotated 100 x 100 tile compound. RandomFloatRange and
+// RandomVec3Uniform are replaced by the scene LCG.
+function CreateVillage(scene: Scene): void {
+	scene.seed = 2718281828;
+
+	Scene_CreateVillageGround(scene, 100, <f32>-1.15 * B3_PI);
+
+	let sphere = b3Sphere(b3Vec3(0.0, 0.0, 0.0), 0.3);
+	let capsule = b3Capsule(b3Vec3(-0.3, 0.0, 0.0), b3Vec3(0.3, 0.0, 0.0), 0.2);
+	let box = b3MakeCubeHull(0.3);
+
+	let bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_dynamicBody;
+	let shapeDef = b3DefaultShapeDef();
+
+	let bodyGrid = 70;
+	let spacing: f32 = 1.6;
+	let offset: f32 = 0.5 * spacing * <f32>(1 - bodyGrid);
+
+	for (let i = 0; i < bodyGrid; ++i) {
+		for (let j = 0; j < bodyGrid; ++j) {
+			let index = i * bodyGrid + j;
+
+			bodyDef.position.x = offset + spacing * <f32>i;
+			bodyDef.position.y = Scene_RandomFloat(scene, 2.0, 6.0);
+			bodyDef.position.z = offset + spacing * <f32>j;
+			bodyDef.linearVelocity = b3Vec3_zero;
+			bodyDef.angularVelocity.x = Scene_RandomFloat(scene, -2.0, 2.0);
+			bodyDef.angularVelocity.y = Scene_RandomFloat(scene, -2.0, 2.0);
+			bodyDef.angularVelocity.z = Scene_RandomFloat(scene, -2.0, 2.0);
+
+			// Fast enough to need continuous collision against the compound
+			if (index % 20 == 0) {
+				bodyDef.position.y = 20.0;
+				bodyDef.linearVelocity = b3Vec3(0.0, -80.0, 0.0);
+			}
+
+			let bodyId = Scene_AddBody(scene, bodyDef);
+
+			let kind = index % 3;
+			if (kind == 0) {
+				b3CreateSphereShape(bodyId, shapeDef, sphere);
+			} else if (kind == 1) {
+				b3CreateCapsuleShape(bodyId, shapeDef, capsule);
+			} else {
+				b3CreateHullShape(bodyId, shapeDef, box.base);
+			}
+		}
+	}
+}
+
+class SceneCast {
+	point: b3Pos = b3Vec3();
+	normal: b3Vec3 = b3Vec3();
+	fraction: f32 = 0;
+	shapeIndex: i32 = 0;
+	hit: bool = false;
+}
+
+function Scene_ResetCast(cast: SceneCast): void {
+	cast.point = b3Vec3();
+	cast.normal = b3Vec3();
+	cast.fraction = 0.0;
+	cast.shapeIndex = 0;
+	cast.hit = false;
+}
+
+// The query callbacks carry no context, so their targets sit in module globals
+let s_cast: SceneCast = new SceneCast();
+let s_queryScene: Scene = new Scene();
+
+function Scene_ClosestCastCallback(
+	shapeId: b3ShapeId,
+	point: b3Pos,
+	normal: b3Vec3,
+	fraction: f32,
+	userMaterialId: u64,
+	triangleIndex: i32,
+	childIndex: i32,
+): f32 {
+	// Clipping makes each report closer than the last, so the final one is the closest
+	let cast = s_cast;
+	cast.point = point;
+	cast.normal = normal;
+	cast.fraction = fraction;
+	cast.shapeIndex = shapeId.index1;
+	cast.hit = true;
+	return fraction;
+}
+
+function Scene_HashCast(scene: Scene, kind: i32, cast: SceneCast): void {
+	if (cast.hit == false) {
+		Scene_HashQuery(scene, kind, 0);
+		return;
+	}
+
+	scene.queryHits[kind] += 1;
+	Scene_HashQuery(scene, kind, <u32>cast.shapeIndex);
+	Scene_HashQuery(scene, kind, reinterpret<u32>(cast.fraction));
+	Scene_HashVec3(scene, kind, cast.point);
+	Scene_HashVec3(scene, kind, cast.normal);
+}
+
+// shared/benchmarks.c StepVillage: a curtain of tilted sphere casts, one per meter, sweeps across
+// the compound once per 600 steps
+function Scene_StepVillage(scene: Scene, stepIndex: i32): void {
+	let ticks = b3GetTicks();
+
+	let villageStepCount = 600;
+	let castRadius: f32 = 0.05;
+	let castHeight: f32 = 10.0;
+	let castLength: f32 = 12.0;
+
+	let halfSpan = scene.halfSpan;
+	let t: f32 = <f32>(stepIndex % villageStepCount) / <f32>(villageStepCount - 1);
+	let x: f32 = -halfSpan + 2.0 * halfSpan * t;
+
+	let tilt = b3ComputeCosSin((<f32>20.0 / <f32>180.0) * B3_PI);
+	let localTranslation = b3Vec3();
+	localTranslation.x = castLength * tilt.sine;
+	localTranslation.y = -castLength * tilt.cosine;
+	localTranslation.z = 0.0;
+
+	// The curtain is laid out in the compound frame
+	let q = scene.compoundRotation;
+	let translation = b3RotateVector(q, localTranslation);
+
+	let points = new StaticArray<b3Vec3>(1);
+	let proxy = new b3ShapeProxy(points, 1, castRadius);
+	let filter = b3DefaultQueryFilter();
+
+	let castCount = <i32>(2.0 * halfSpan) + 1;
+
+	for (let i = 0; i < castCount; ++i) {
+		let localOrigin = b3Vec3(x, castHeight, -halfSpan + <f32>i);
+
+		Scene_ResetCast(s_cast);
+		s_cast.fraction = 1.0;
+		let origin = b3ToPos(b3RotateVector(q, localOrigin));
+
+		b3World_CastShape(scene.worldId, origin, proxy, translation, filter, Scene_ClosestCastCallback);
+		Scene_HashCast(scene, SCENE_QUERY_SHAPE_CAST, s_cast);
+	}
+
+	scene.queryMs[SCENE_QUERY_SHAPE_CAST] += <f64>b3GetMilliseconds(ticks);
+}
+
+// A query workload over a static world with every shape type: a rotated village compound, a wave
+// mesh, a height field, single hulls, capsules and spheres on a ground box, and a few dynamic
+// bodies resting on them. Each step runs closest ray casts, all-hit ray casts, sphere and box
+// casts, capsule overlaps and capsule movers, timing and hashing each kind.
+function CreateQueries(scene: Scene): void {
+	scene.seed = 1234567;
+
+	{
+		let bodyDef = b3DefaultBodyDef();
+		bodyDef.position = b3Vec3(0.0, -2.0, 10.0);
+		let groundId = Scene_AddBody(scene, bodyDef);
+		let shapeDef = b3DefaultShapeDef();
+		let box = b3MakeBoxHull(100.0, 0.5, 70.0);
+		b3CreateHullShape(groundId, shapeDef, box.base);
+	}
+
+	Scene_CreateVillageGround(scene, 16, 0.3);
+
+	{
+		let bodyDef = b3DefaultBodyDef();
+		bodyDef.position = b3Vec3(52.0, 0.0, 0.0);
+		let meshBodyId = Scene_AddBody(scene, bodyDef);
+		scene.mesh = b3CreateWaveMesh(32, 32, 1.0, 0.5, 0.1, 0.2);
+		let shapeDef = b3DefaultShapeDef();
+		b3CreateMeshShape(meshBodyId, shapeDef, scene.mesh!, b3Vec3_one);
+	}
+
+	{
+		let fieldScale = b3Vec3(1.0, 0.6, 1.0);
+		scene.heightField = b3CreateWave(21, 21, fieldScale, 0.08, 0.06, false);
+		let bodyDef = b3DefaultBodyDef();
+		bodyDef.position = b3Vec3(-72.0, 0.0, -10.0);
+		let fieldBodyId = Scene_AddBody(scene, bodyDef);
+		let shapeDef = b3DefaultShapeDef();
+		b3CreateHeightFieldShape(fieldBodyId, shapeDef, scene.heightField!);
+	}
+
+	let box = b3MakeBoxHull(0.5, 0.5, 0.5);
+	let capsule = b3Capsule(b3Vec3(0.0, -0.5, 0.0), b3Vec3(0.0, 0.5, 0.0), 0.4);
+	let sphere = b3Sphere(b3Vec3(0.0, 0.0, 0.0), 0.5);
+
+	{
+		let shapeDef = b3DefaultShapeDef();
+		for (let i = 0; i < 8; ++i) {
+			for (let j = 0; j < 4; ++j) {
+				let bodyDef = b3DefaultBodyDef();
+				bodyDef.position.x = -28.0 + 8.0 * <f32>i;
+				bodyDef.position.y = -1.0;
+				bodyDef.position.z = 44.0 + 6.0 * <f32>j;
+				let bodyId = Scene_AddBody(scene, bodyDef);
+
+				let kind = (i + j) % 3;
+				if (kind == 0) {
+					b3CreateHullShape(bodyId, shapeDef, box.base);
+				} else if (kind == 1) {
+					b3CreateCapsuleShape(bodyId, shapeDef, capsule);
+				} else {
+					b3CreateSphereShape(bodyId, shapeDef, sphere);
+				}
+			}
+		}
+	}
+
+	{
+		let bodyDef = b3DefaultBodyDef();
+		bodyDef.type = b3_dynamicBody;
+		let shapeDef = b3DefaultShapeDef();
+
+		for (let i = 0; i < 10; ++i) {
+			for (let j = 0; j < 10; ++j) {
+				bodyDef.position.x = -27.0 + 6.0 * <f32>i;
+				bodyDef.position.y = Scene_RandomFloat(scene, 2.0, 5.0);
+				bodyDef.position.z = -27.0 + 6.0 * <f32>j;
+				let bodyId = Scene_AddBody(scene, bodyDef);
+
+				let kind = (i * 10 + j) % 3;
+				if (kind == 0) {
+					b3CreateHullShape(bodyId, shapeDef, box.base);
+				} else if (kind == 1) {
+					b3CreateCapsuleShape(bodyId, shapeDef, capsule);
+				} else {
+					b3CreateSphereShape(bodyId, shapeDef, sphere);
+				}
+			}
+		}
+	}
+
+	scene.moverCount = SCENE_QUERY_MOVER_COUNT;
+	for (let m = 0; m < SCENE_QUERY_MOVER_COUNT; ++m) {
+		let position = b3Vec3();
+		position.x = -62.0 + 16.0 * <f32>m;
+		position.y = 3.0;
+		position.z = -4.0 + 2.0 * <f32>m;
+		let mover = new SceneMover();
+		Scene_InitializeMover(mover, position);
+		scene.movers.push(mover);
+	}
+}
+
+function Scene_RayAllCallback(
+	shapeId: b3ShapeId,
+	point: b3Pos,
+	normal: b3Vec3,
+	fraction: f32,
+	userMaterialId: u64,
+	triangleIndex: i32,
+	childIndex: i32,
+): f32 {
+	let scene = s_queryScene;
+	scene.queryHits[SCENE_QUERY_RAY_ALL] += 1;
+	Scene_HashQuery(scene, SCENE_QUERY_RAY_ALL, <u32>shapeId.index1);
+	Scene_HashQuery(scene, SCENE_QUERY_RAY_ALL, <u32>triangleIndex);
+	Scene_HashQuery(scene, SCENE_QUERY_RAY_ALL, <u32>childIndex);
+	Scene_HashQuery(scene, SCENE_QUERY_RAY_ALL, reinterpret<u32>(fraction));
+	Scene_HashVec3(scene, SCENE_QUERY_RAY_ALL, normal);
+	return 1.0;
+}
+
+function Scene_OverlapCallback(shapeId: b3ShapeId): bool {
+	let scene = s_queryScene;
+	scene.queryHits[SCENE_QUERY_OVERLAP] += 1;
+	Scene_HashQuery(scene, SCENE_QUERY_OVERLAP, <u32>shapeId.index1);
+	return true;
+}
+
+function Scene_StepQueries(scene: Scene, stepIndex: i32, timeStep: f32): void {
+	let worldId = scene.worldId;
+	let filter = b3DefaultQueryFilter();
+	let phase: f32 = <f32>(stepIndex % 64) / 64.0;
+	s_queryScene = scene;
+
+	{
+		let ticks = b3GetTicks();
+		let translation = b3Vec3(3.0, -30.0, 2.0);
+		for (let i = 0; i < 16; ++i) {
+			for (let j = 0; j < 16; ++j) {
+				let origin = b3Vec3();
+				origin.x = -80.0 + 10.0 * (<f32>i + phase);
+				origin.y = 15.0;
+				origin.z = -40.0 + 7.0 * (<f32>j + phase);
+				let result = b3World_CastRayClosest(worldId, origin, translation, filter);
+
+				let cast = s_cast;
+				cast.point = result.point;
+				cast.normal = result.normal;
+				cast.fraction = result.fraction;
+				cast.shapeIndex = result.shapeId.index1;
+				cast.hit = result.hit;
+				Scene_HashCast(scene, SCENE_QUERY_RAY, cast);
+			}
+		}
+		scene.queryMs[SCENE_QUERY_RAY] += <f64>b3GetMilliseconds(ticks);
+	}
+
+	{
+		let ticks = b3GetTicks();
+		let translation = b3Vec3(180.0, 0.0, 0.0);
+		for (let k = 0; k < 32; ++k) {
+			let origin = b3Vec3();
+			origin.x = -90.0;
+			origin.y = 0.3 + 0.1 * <f32>(k % 8);
+			origin.z = -40.0 + 3.5 * (<f32>k + phase);
+			b3World_CastRay(worldId, origin, translation, filter, Scene_RayAllCallback);
+		}
+		scene.queryMs[SCENE_QUERY_RAY_ALL] += <f64>b3GetMilliseconds(ticks);
+	}
+
+	{
+		let ticks = b3GetTicks();
+		let spherePoints = new StaticArray<b3Vec3>(1);
+		let sphereProxy = new b3ShapeProxy(spherePoints, 1, 0.3);
+
+		let boxPoints = new StaticArray<b3Vec3>(8);
+		for (let n = 0; n < 8; ++n) {
+			boxPoints[n].x = (n & 1) != 0 ? <f32>0.25 : <f32>-0.25;
+			boxPoints[n].y = (n & 2) != 0 ? <f32>0.25 : <f32>-0.25;
+			boxPoints[n].z = (n & 4) != 0 ? <f32>0.25 : <f32>-0.25;
+		}
+		let boxProxy = new b3ShapeProxy(boxPoints, 8, 0.0);
+
+		let translation = b3Vec3(0.0, -20.0, 1.5);
+		for (let k = 0; k < 128; ++k) {
+			let origin = b3Vec3();
+			origin.x = -80.0 + 1.25 * <f32>k + 5.0 * phase;
+			origin.y = 8.0;
+			origin.z = -30.0 + 0.7 * <f32>k;
+
+			Scene_ResetCast(s_cast);
+			s_cast.fraction = 1.0;
+			let proxy = (k & 1) != 0 ? boxProxy : sphereProxy;
+			b3World_CastShape(worldId, origin, proxy, translation, filter, Scene_ClosestCastCallback);
+			Scene_HashCast(scene, SCENE_QUERY_SHAPE_CAST, s_cast);
+		}
+		scene.queryMs[SCENE_QUERY_SHAPE_CAST] += <f64>b3GetMilliseconds(ticks);
+	}
+
+	{
+		let ticks = b3GetTicks();
+		let capsulePoints = new StaticArray<b3Vec3>(2);
+		capsulePoints[0] = b3Vec3(0.0, -0.4, 0.0);
+		capsulePoints[1] = b3Vec3(0.0, 0.4, 0.0);
+		let proxy = new b3ShapeProxy(capsulePoints, 2, 0.3);
+		for (let k = 0; k < 64; ++k) {
+			let origin = b3Vec3();
+			origin.x = -78.0 + 2.4 * <f32>k + 3.0 * phase;
+			origin.y = 0.5;
+			origin.z = -20.0 + 1.1 * <f32>k;
+			b3World_OverlapShape(worldId, origin, proxy, filter, Scene_OverlapCallback);
+		}
+		scene.queryMs[SCENE_QUERY_OVERLAP] += <f64>b3GetMilliseconds(ticks);
+	}
+
+	{
+		let ticks = b3GetTicks();
+		for (let m = 0; m < scene.moverCount; ++m) {
+			let mover = scene.movers[m];
+			let cs = b3ComputeCosSin(<f32>0.785 * <f32>m);
+			let forward = b3Vec3(cs.cosine, 0.0, cs.sine);
+			let right = b3Vec3(-cs.sine, 0.0, cs.cosine);
+			let throttle = b3Vec2(1.0, 0.0);
+			if (stepIndex % 120 >= 60) {
+				throttle.x = 0.5;
+				throttle.y = 1.0;
+			}
+
+			if (stepIndex % 90 == 45 && mover.onGround == true) {
+				mover.velocity.y = s_moverJumpSpeed;
+				mover.onGround = false;
+			}
+
+			Scene_SolveMove(scene, mover, timeStep, forward, right, throttle, true);
+
+			Scene_HashVec3(scene, SCENE_QUERY_MOVER, mover.transform.p);
+			Scene_HashVec3(scene, SCENE_QUERY_MOVER, mover.velocity);
+			Scene_HashQuery(scene, SCENE_QUERY_MOVER, <u32>mover.totalIterations);
+			scene.queryHits[SCENE_QUERY_MOVER] += mover.planeCount;
+		}
+		scene.queryMs[SCENE_QUERY_MOVER] += <f64>b3GetMilliseconds(ticks);
+	}
+}
+
 // Returns false for an unknown scene name
 export function Scene_Create(scene: Scene, name: string, workerCount: i32): bool {
 	scene.name = name;
@@ -1417,6 +2032,12 @@ export function Scene_Create(scene: Scene, name: string, workerCount: i32): bool
 		CreateMover(scene);
 	} else if (name == "many_bodies") {
 		CreateManyPyramids(scene);
+	} else if (name == "mesh_drop") {
+		CreateMeshDrop(scene);
+	} else if (name == "village") {
+		CreateVillage(scene);
+	} else if (name == "queries") {
+		CreateQueries(scene);
 	} else {
 		b3DestroyWorld(scene.worldId);
 		scene.worldId = b3WorldId();
@@ -1438,6 +2059,12 @@ export function Scene_Step(scene: Scene, stepIndex: i32): void {
 		Scene_StepMover(scene, stepIndex, timeStep);
 	}
 
+	if (scene.name == "village") {
+		Scene_StepVillage(scene, stepIndex);
+	} else if (scene.name == "queries") {
+		Scene_StepQueries(scene, stepIndex, timeStep);
+	}
+
 	b3World_Step(scene.worldId, timeStep, SCENE_SUBSTEP_COUNT);
 }
 
@@ -1453,6 +2080,11 @@ export function Scene_Destroy(scene: Scene): void {
 	if (scene.heightField != null) {
 		b3DestroyHeightField(scene.heightField!);
 		scene.heightField = null;
+	}
+
+	if (scene.compound != null) {
+		b3DestroyCompound(scene.compound!);
+		scene.compound = null;
 	}
 
 	scene.bodies = new Array<b3BodyId>(0);

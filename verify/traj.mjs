@@ -12,7 +12,7 @@ import { loadWasm, verifyDir } from './lib.mjs';
 import { readTrajectory, diff } from './scenes/dump.mjs';
 
 const sceneNames = [ 'pyramid', 'large_pyramid', 'card_house', 'chains', 'capsule_mesh', 'heightfield', 'bullets',
-	'mover', 'many_bodies' ];
+	'mover', 'many_bodies', 'mesh_drop', 'village', 'queries' ];
 
 const args = process.argv.slice( 2 );
 const flags = Object.fromEntries( args.filter( ( a ) => a.startsWith( '--' ) ).map( ( a ) =>

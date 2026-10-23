@@ -109,3 +109,22 @@ Workaround: `<f32>0.0`.
 
 `getM(s)[0] = m` is refused, while a leaf store `getM(s)[0].x = 1` through the
 same call compiles. Binding the array to a local first works.
+
+## `StaticArray.fromArray` traps on an array of structs
+
+```as
+struct P { x: f32 = 0; y: f32 = 0; }
+export function f(n: i32): f32 {
+	let a = new Array<P>();
+	for (let i = 0; i < n; ++i) {
+		let p = P();
+		p.x = <f32>i;
+		a.push(p);
+	}
+	let s = StaticArray.fromArray<P>(a);
+	return s[n - 1].x; // traps "unreachable" inside fromArray, with -O and without, --runtime frame
+}
+```
+
+`fromArray` of an array of class references works. Workaround: a `new StaticArray<P>(a.length)` and
+an element copy loop (verify/scenes/scenes.as, the village compound defs).

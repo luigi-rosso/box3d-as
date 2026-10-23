@@ -16,6 +16,18 @@ enum
 {
 	SCENE_MOVER_PLANE_CAPACITY = 8,
 	SCENE_SUBSTEP_COUNT = 4,
+	SCENE_QUERY_MOVER_COUNT = 8,
+};
+
+// Query kinds timed and hashed by the village and queries scenes
+enum
+{
+	SCENE_QUERY_RAY = 0,
+	SCENE_QUERY_RAY_ALL = 1,
+	SCENE_QUERY_SHAPE_CAST = 2,
+	SCENE_QUERY_OVERLAP = 3,
+	SCENE_QUERY_MOVER = 4,
+	SCENE_QUERY_KIND_COUNT = 5,
 };
 
 // Port of CharacterMover in samples/mover.h, minus the camera and drawing
@@ -58,6 +70,19 @@ typedef struct Scene
 
 	bool hasMover;
 	SceneMover mover;
+
+	// Village and queries scenes
+	b3CompoundData* compound;
+	b3Quat compoundRotation;
+	float halfSpan;
+	int moverCount;
+	SceneMover movers[SCENE_QUERY_MOVER_COUNT];
+
+	// Milliseconds spent in each query kind, summed over steps, and a hash and hit count of the
+	// results
+	double queryMs[SCENE_QUERY_KIND_COUNT];
+	uint32_t queryHash[SCENE_QUERY_KIND_COUNT];
+	int queryHits[SCENE_QUERY_KIND_COUNT];
 } Scene;
 
 int Scene_GetCount( void );
