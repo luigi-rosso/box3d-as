@@ -824,3 +824,118 @@ export {
   b3DotW4 as b3DotW,
   b3CrossW4 as b3CrossW,
 };
+
+// Wasm SIMD lanes. Under ASC_FEATURE_SIMD a b3FloatW4 held in registers is one v128 with lane i at x, y, z, w.
+// v128 cannot appear in a declaration of the scalar artifact, so these are generic over T and instantiate only
+// from code behind ASC_FEATURE_SIMD. Each matches its b3FloatW4 counterpart bit for bit (notes/containers.md).
+// Masks are all ones lanes here, where the scalar path stores 1.0 or 0.0.
+
+@inline export function b3AddV4<T>(a: T, b: T): T {
+	return f32x4.add(a, b);
+}
+
+@inline export function b3SubV4<T>(a: T, b: T): T {
+	return f32x4.sub(a, b);
+}
+
+@inline export function b3MulV4<T>(a: T, b: T): T {
+	return f32x4.mul(a, b);
+}
+
+@inline export function b3DivV4<T>(a: T, b: T): T {
+	return f32x4.div(a, b);
+}
+
+@inline export function b3SqrtV4<T>(a: T): T {
+	return f32x4.sqrt(a);
+}
+
+@inline export function b3NegV4<T>(a: T): T {
+	return f32x4.neg(a);
+}
+
+// a + b * c
+@inline export function b3MulAddV4<T>(a: T, b: T, c: T): T {
+	return f32x4.add(a, f32x4.mul(b, c));
+}
+
+// a - b * c
+@inline export function b3MulSubV4<T>(a: T, b: T, c: T): T {
+	return f32x4.sub(a, f32x4.mul(b, c));
+}
+
+@inline export function b3MinV4<T>(a: T, b: T): T {
+	return v128.bitselect(a, b, f32x4.le(a, b));
+}
+
+@inline export function b3MaxV4<T>(a: T, b: T): T {
+	return v128.bitselect(a, b, f32x4.ge(a, b));
+}
+
+@inline export function b3AbsV4<T>(a: T): T {
+	return v128.bitselect(f32x4.neg(a), a, f32x4.lt(a, f32x4.splat(0.0)));
+}
+
+// mask ? b : a
+@inline export function b3BlendV4<T>(a: T, b: T, mask: T): T {
+	return v128.bitselect(b, a, mask);
+}
+
+// A stored scalar mask (1.0 or 0.0) as lane bits, true where the scalar path tests != 0
+@inline export function b3MaskV4<T>(a: T): T {
+	return f32x4.ne(a, f32x4.splat(0.0));
+}
+
+@inline export function b3AllZeroV4<T>(a: T): bool {
+	return i32x4.all_true(f32x4.eq(a, f32x4.splat(0.0)));
+}
+
+// (aX bX + aY bY) + aZ bZ
+@inline export function b3DotV4<T>(aX: T, aY: T, aZ: T, bX: T, bY: T, bZ: T): T {
+	return f32x4.add(f32x4.add(f32x4.mul(aX, bX), f32x4.mul(aY, bY)), f32x4.mul(aZ, bZ));
+}
+
+// One component of b3CrossW4: X is (aY, aZ, bY, bZ), Y is (aZ, aX, bZ, bX), Z is (aX, aY, bX, bY)
+@inline export function b3CrossV4<T>(a1: T, a2: T, b1: T, b2: T): T {
+	return f32x4.sub(f32x4.mul(a1, b2), f32x4.mul(a2, b1));
+}
+
+// One row of a symmetric matrix times a vector, m0 x + (m1 y + m2 z)
+@inline export function b3MulRowV4<T>(m0: T, m1: T, m2: T, x: T, y: T, z: T): T {
+	return f32x4.add(f32x4.mul(m0, x), f32x4.add(f32x4.mul(m1, y), f32x4.mul(m2, z)));
+}
+
+// Lane k of each row, one column of b3TransposeW4
+@inline export function b3Transpose0V4<T>(r0: T, r1: T, r2: T, r3: T): T {
+	return v128.shuffle<f32>(v128.shuffle<f32>(r0, r1, 0, 4, 0, 4), v128.shuffle<f32>(r2, r3, 0, 4, 0, 4), 0, 1, 4, 5);
+}
+
+@inline export function b3Transpose1V4<T>(r0: T, r1: T, r2: T, r3: T): T {
+	return v128.shuffle<f32>(v128.shuffle<f32>(r0, r1, 1, 5, 1, 5), v128.shuffle<f32>(r2, r3, 1, 5, 1, 5), 0, 1, 4, 5);
+}
+
+@inline export function b3Transpose2V4<T>(r0: T, r1: T, r2: T, r3: T): T {
+	return v128.shuffle<f32>(v128.shuffle<f32>(r0, r1, 2, 6, 2, 6), v128.shuffle<f32>(r2, r3, 2, 6, 2, 6), 0, 1, 4, 5);
+}
+
+@inline export function b3Transpose3V4<T>(r0: T, r1: T, r2: T, r3: T): T {
+	return v128.shuffle<f32>(v128.shuffle<f32>(r0, r1, 3, 7, 3, 7), v128.shuffle<f32>(r2, r3, 3, 7, 3, 7), 0, 1, 4, 5);
+}
+
+@inline export function b3SetV4<T>(a: f32, b: f32, c: f32, d: f32): T {
+	return f32x4.replace_lane(f32x4.replace_lane(f32x4.replace_lane(f32x4.splat(a), 1, b), 2, c), 3, d);
+}
+
+// ( (const float*)&w )[lane]
+@inline export function b3LaneV4<T>(a: T, lane: i32): f32 {
+	if (lane == 0) {
+		return f32x4.extract_lane(a, 0);
+	}
+	if (lane == 1) {
+		return f32x4.extract_lane(a, 1);
+	}
+	if (lane == 2) {
+		return f32x4.extract_lane(a, 2);
+	}
+	return f32x4.extract_lane(a, 3);
+}
