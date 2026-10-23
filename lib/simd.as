@@ -824,3 +824,238 @@ export {
   b3DotW4 as b3DotW,
   b3CrossW4 as b3CrossW,
 };
+
+// Lane generic wide math for the contact solver kernels. T is v128 under ASC_FEATURE_SIMD, where one value holds the
+// four lanes of a b3FloatW4 at x, y, z, w. Without SIMD T is f32 and a kernel runs once per lane: the lanes of a wide
+// constraint touch distinct dynamic bodies, so lane order cannot change results. v128 cannot appear in a declaration
+// of the scalar artifact, which is why these are generic. Each matches its b3FloatW4 counterpart bit for bit
+// (notes/containers.md); v128 masks are all ones lanes, f32 masks are the scalar path's 1.0 or 0.0.
+
+@inline export function b3SplatL<T>(a: f32): T {
+	if (isFloat<T>()) {
+		return a;
+	} else {
+		return f32x4.splat(a);
+	}
+}
+
+@inline export unsafe function b3LoadL<T>(p: usize): T {
+	if (isFloat<T>()) {
+		return load<f32>(p);
+	} else {
+		return v128.load(p);
+	}
+}
+
+@inline export unsafe function b3StoreL<T>(p: usize, a: T): void {
+	if (isFloat<T>()) {
+		store<f32>(p, a);
+	} else {
+		v128.store(p, a);
+	}
+}
+
+// The lanes a, b, c, d; a lane kernel takes a
+@inline export function b3SetL<T>(a: f32, b: f32, c: f32, d: f32): T {
+	if (isFloat<T>()) {
+		return a;
+	} else {
+		return f32x4.replace_lane(f32x4.replace_lane(f32x4.replace_lane(f32x4.splat(a), 1, b), 2, c), 3, d);
+	}
+}
+
+// ( (const float*)&w )[lane]
+@inline export function b3LaneL<T>(a: T, lane: i32): f32 {
+	if (isFloat<T>()) {
+		return a;
+	} else {
+		if (lane == 0) {
+			return f32x4.extract_lane(a, 0);
+		}
+		if (lane == 1) {
+			return f32x4.extract_lane(a, 1);
+		}
+		if (lane == 2) {
+			return f32x4.extract_lane(a, 2);
+		}
+		return f32x4.extract_lane(a, 3);
+	}
+}
+
+@inline export function b3AddL<T>(a: T, b: T): T {
+	if (isFloat<T>()) {
+		return a + b;
+	} else {
+		return f32x4.add(a, b);
+	}
+}
+
+@inline export function b3SubL<T>(a: T, b: T): T {
+	if (isFloat<T>()) {
+		return a - b;
+	} else {
+		return f32x4.sub(a, b);
+	}
+}
+
+@inline export function b3MulL<T>(a: T, b: T): T {
+	if (isFloat<T>()) {
+		return a * b;
+	} else {
+		return f32x4.mul(a, b);
+	}
+}
+
+@inline export function b3DivL<T>(a: T, b: T): T {
+	if (isFloat<T>()) {
+		return a / b;
+	} else {
+		return f32x4.div(a, b);
+	}
+}
+
+@inline export function b3SqrtL<T>(a: T): T {
+	if (isFloat<T>()) {
+		return Mathf.sqrt(a);
+	} else {
+		return f32x4.sqrt(a);
+	}
+}
+
+@inline export function b3NegL<T>(a: T): T {
+	if (isFloat<T>()) {
+		return -a;
+	} else {
+		return f32x4.neg(a);
+	}
+}
+
+// a + b * c
+@inline export function b3MulAddL<T>(a: T, b: T, c: T): T {
+	return b3AddL(a, b3MulL(b, c));
+}
+
+// a - b * c
+@inline export function b3MulSubL<T>(a: T, b: T, c: T): T {
+	return b3SubL(a, b3MulL(b, c));
+}
+
+@inline export function b3MinL<T>(a: T, b: T): T {
+	if (isFloat<T>()) {
+		return a <= b ? a : b;
+	} else {
+		return v128.bitselect(a, b, f32x4.le(a, b));
+	}
+}
+
+@inline export function b3MaxL<T>(a: T, b: T): T {
+	if (isFloat<T>()) {
+		return a >= b ? a : b;
+	} else {
+		return v128.bitselect(a, b, f32x4.ge(a, b));
+	}
+}
+
+@inline export function b3AbsL<T>(a: T): T {
+	if (isFloat<T>()) {
+		return a < 0.0 ? -a : a;
+	} else {
+		return v128.bitselect(f32x4.neg(a), a, f32x4.lt(a, f32x4.splat(0.0)));
+	}
+}
+
+@inline export function b3GreaterThanL<T>(a: T, b: T): T {
+	if (isFloat<T>()) {
+		return a > b ? <f32>1.0 : <f32>0.0;
+	} else {
+		return f32x4.gt(a, b);
+	}
+}
+
+@inline export function b3LessThanL<T>(a: T, b: T): T {
+	if (isFloat<T>()) {
+		return a < b ? <f32>1.0 : <f32>0.0;
+	} else {
+		return f32x4.lt(a, b);
+	}
+}
+
+@inline export function b3AndL<T>(a: T, b: T): T {
+	if (isFloat<T>()) {
+		return a != 0.0 && b != 0.0 ? <f32>1.0 : <f32>0.0;
+	} else {
+		return v128.and(a, b);
+	}
+}
+
+@inline export function b3OrL<T>(a: T, b: T): T {
+	if (isFloat<T>()) {
+		return a != 0.0 || b != 0.0 ? <f32>1.0 : <f32>0.0;
+	} else {
+		return v128.or(a, b);
+	}
+}
+
+// mask ? b : a
+@inline export function b3BlendL<T>(a: T, b: T, mask: T): T {
+	if (isFloat<T>()) {
+		return mask != 0.0 ? b : a;
+	} else {
+		return v128.bitselect(b, a, mask);
+	}
+}
+
+// A mask read back from memory, where it is stored as 1.0 or 0.0; true where the scalar path tests != 0
+@inline export function b3MaskL<T>(a: T): T {
+	if (isFloat<T>()) {
+		return a;
+	} else {
+		return f32x4.ne(a, f32x4.splat(0.0));
+	}
+}
+
+// A mask as the 1.0 or 0.0 the scalar path stores
+@inline export function b3MaskValueL<T>(mask: T): T {
+	if (isFloat<T>()) {
+		return mask;
+	} else {
+		return v128.and(mask, f32x4.splat(1.0));
+	}
+}
+
+// (aX bX + aY bY) + aZ bZ
+@inline export function b3DotL<T>(aX: T, aY: T, aZ: T, bX: T, bY: T, bZ: T): T {
+	return b3AddL(b3AddL(b3MulL(aX, bX), b3MulL(aY, bY)), b3MulL(aZ, bZ));
+}
+
+// One component of b3CrossW4: X is (aY, aZ, bY, bZ), Y is (aZ, aX, bZ, bX), Z is (aX, aY, bX, bY)
+@inline export function b3CrossL<T>(a1: T, a2: T, b1: T, b2: T): T {
+	return b3SubL(b3MulL(a1, b2), b3MulL(a2, b1));
+}
+
+// One row of a symmetric matrix times a vector, m0 x + (m1 y + m2 z)
+@inline export function b3MulRowL<T>(m0: T, m1: T, m2: T, x: T, y: T, z: T): T {
+	return b3AddL(b3MulL(m0, x), b3AddL(b3MulL(m1, y), b3MulL(m2, z)));
+}
+
+// Lane k of each row, one column of b3TransposeW4; v128 only
+@inline export function b3Transpose0L<T>(r0: T, r1: T, r2: T, r3: T): T {
+	return v128.shuffle<f32>(v128.shuffle<f32>(r0, r1, 0, 4, 0, 4), v128.shuffle<f32>(r2, r3, 0, 4, 0, 4), 0, 1, 4, 5);
+}
+
+@inline export function b3Transpose1L<T>(r0: T, r1: T, r2: T, r3: T): T {
+	return v128.shuffle<f32>(v128.shuffle<f32>(r0, r1, 1, 5, 1, 5), v128.shuffle<f32>(r2, r3, 1, 5, 1, 5), 0, 1, 4, 5);
+}
+
+@inline export function b3Transpose2L<T>(r0: T, r1: T, r2: T, r3: T): T {
+	return v128.shuffle<f32>(v128.shuffle<f32>(r0, r1, 2, 6, 2, 6), v128.shuffle<f32>(r2, r3, 2, 6, 2, 6), 0, 1, 4, 5);
+}
+
+@inline export function b3Transpose3L<T>(r0: T, r1: T, r2: T, r3: T): T {
+	return v128.shuffle<f32>(v128.shuffle<f32>(r0, r1, 3, 7, 3, 7), v128.shuffle<f32>(r2, r3, 3, 7, 3, 7), 0, 1, 4, 5);
+}
+
+// b3AllZeroW over four floats in memory, for decisions a lane kernel shares across lanes
+@inline export unsafe function b3AllZeroAt(p: usize): bool {
+	return load<f32>(p) == 0.0 && load<f32>(p + 4) == 0.0 && load<f32>(p + 8) == 0.0 && load<f32>(p + 12) == 0.0;
+}
