@@ -46,3 +46,16 @@ true.
 
 It keeps the body sim pointer across the wake, so the force lands in the
 sleeping set that the wake destroys.
+
+## Clip buffer overflow in b3BuildFaceAContact and b3CollideHullFace
+
+A 64 sided pyramid resting on a box, with one base vertex clipped off,
+overflows the 64 entry clip buffers in `b3ClipPolygon` (ASan:
+stack-buffer-overflow), from `b3BuildFaceAContact` for hull pairs and from
+`b3CollideHullFace` for triangle against hull with a fresh cache. The port
+sizes those buffers at 128, which gives identical results wherever C does not
+overflow. Repro in `notes/manifold.md`.
+
+## b3CollideSpheres leaves pointCount unchanged when separated
+
+Harmless, since callers reset the manifold; kept as C.

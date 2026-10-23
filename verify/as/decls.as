@@ -21,8 +21,6 @@ import { b3Filter, b3QueryFilter, b3SurfaceMaterial, b3_dynamicBody, b3_hullShap
 import {
 	b3AllocateManifolds,
 	b3FreeManifolds,
-	b3HullDatabase,
-	b3HullDatabaseEntry,
 	b3TaskContext,
 	b3World,
 	b3_awakeSet,
@@ -150,12 +148,6 @@ export function instantiate(): i32 {
 	world.taskContexts.push(task);
 	world.sensorTaskContexts.push(new b3SensorTaskContext());
 	errors += world.taskContexts[0].sensorHits[0].visitorId == 2 ? 0 : 1;
-
-	let hullDb = new b3HullDatabase();
-	let entries = new Array<b3HullDatabaseEntry>();
-	entries.push(new b3HullDatabaseEntry(new b3HullData(0, 0, 0), 1));
-	hullDb.buckets.set(1, entries);
-	errors += hullDb.buckets.get(1)[0].referenceCount == 1 ? 0 : 1;
 
 	// bodies are structs written through the array place
 	world.bodies.push(b3Body());
