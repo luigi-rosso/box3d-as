@@ -22,7 +22,35 @@ import {
 	b3World_GetProfile,
 	b3World_Step,
 	b3_dynamicBody,
+	b3Body_GetPosition,
+	b3Body_GetRotation,
+	b3Body_GetLinearVelocity,
+	b3Body_GetAngularVelocity,
 } from "./lib/box3d";
+
+// Every body in creation order, for the state hash
+const g_bodies = new Array<b3BodyId>();
+
+// FNV-1a over the float bits of each body's pose and velocities, as verify/scenes/hash.mjs reads them from a
+// native recording, so a run on any tier or artifact can be checked bit exact
+function stateHash(): u32 {
+	let h: u32 = 2166136261;
+	for (let i = 0; i < g_bodies.length; ++i) {
+		let id = g_bodies[i];
+		let p = b3Body_GetPosition(id);
+		let q = b3Body_GetRotation(id);
+		let v = b3Body_GetLinearVelocity(id);
+		let w = b3Body_GetAngularVelocity(id);
+		let words: StaticArray<f32> = [p.x, p.y, p.z, q.v.x, q.v.y, q.v.z, q.s, v.x, v.y, v.z, w.x, w.y, w.z];
+		for (let k = 0; k < words.length; ++k) {
+			let bits = reinterpret<u32>(words[k]);
+			for (let b = 0; b < 4; ++b) {
+				h = (h ^ ((bits >> (8 * <u32>b)) & 0xff)) * 16777619;
+			}
+		}
+	}
+	return h;
+}
 
 const SCENE_PYRAMID: i32 = 0;
 const SCENE_LARGE_PYRAMID: i32 = 1;
@@ -90,6 +118,7 @@ function createPyramid(worldId: b3WorldId, baseCount: i32): void {
 		let bodyDef = b3DefaultBodyDef();
 		bodyDef.position = b3Vec3(0.0, -1.0, 0.0);
 		let groundId = b3CreateBody(worldId, bodyDef);
+		g_bodies.push(groundId);
 
 		let box = b3MakeBoxHull(400.0, 1.0, 400.0);
 		let shapeDef = b3DefaultShapeDef();
@@ -116,6 +145,7 @@ function createPyramid(worldId: b3WorldId, baseCount: i32): void {
 			bodyDef.position = b3Vec3(x, y, 0.0);
 
 			let bodyId: b3BodyId = b3CreateBody(worldId, bodyDef);
+			g_bodies.push(bodyId);
 			b3CreateHullShape(bodyId, shapeDef, box.base);
 		}
 	}
@@ -140,6 +170,7 @@ function createSmallPyramid(worldId: b3WorldId, baseCount: i32, extent: f32, cen
 			bodyDef.position = b3Vec3(x, y, baseZ);
 
 			let bodyId: b3BodyId = b3CreateBody(worldId, bodyDef);
+			g_bodies.push(bodyId);
 			b3CreateHullShape(bodyId, shapeDef, box.base);
 		}
 	}
@@ -157,6 +188,7 @@ function createManyPyramids(worldId: b3WorldId): void {
 		let bodyDef = b3DefaultBodyDef();
 		bodyDef.position = b3Vec3(0.0, -1.0, 0.0);
 		let groundId = b3CreateBody(worldId, bodyDef);
+		g_bodies.push(groundId);
 
 		let shapeDef = b3DefaultShapeDef();
 		let box = b3MakeBoxHull(groundExtent, 1.0, groundExtent);
@@ -256,6 +288,7 @@ export class Main extends Layout {
 		for (let k = 0; k < STAGE_COUNT; ++k) {
 			line += " " + STAGE_NAMES[k] + "=" + formatFixed(this.stageSum[k] / <f64>timed, 4);
 		}
+		line += " hash=" + stateHash().toString();
 		console.log(line);
 	}
 }
