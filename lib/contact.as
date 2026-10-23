@@ -22,7 +22,7 @@ import {
 	b3Vec3,
 	b3WorldTransform,
 } from "./math_functions";
-import { b3LocalManifold, b3LocalManifoldPoint, b3Manifold, b3ManifoldPoint, b3SATCache, b3SimplexCache } from "./collision";
+import { b3ChildShape, b3LocalManifold, b3LocalManifoldPoint, b3Manifold, b3ManifoldPoint, b3SATCache, b3SimplexCache } from "./collision";
 import {
 	b3ContactData,
 	b3ContactEndTouchEvent,
@@ -43,7 +43,7 @@ import { b3AllocId, b3FreeId } from "./id_pool";
 import { b3Array_RemoveSwap } from "./container";
 import { b3AddKey, b3RemoveKey, b3ShapePairKey } from "./table";
 import { b3EncodeBodySimIndex, b3WakeBody, b3_enableContactRecycling } from "./body";
-import { b3GetCompoundChild } from "./compound";
+import { b3GetCompoundChild, b3GetCompoundChildInto } from "./compound";
 import { b3RemoveContactFromGraph } from "./constraint_graph";
 import {
 	b3CollideCapsuleAndSphere,
@@ -52,6 +52,7 @@ import {
 	b3CollideHullAndSphere,
 	b3CollideHullsAtWidth,
 	b3CollideSpheres,
+	b3ZeroLocalManifold,
 } from "./convex_manifold";
 import { b3UnlinkContact } from "./island";
 import { b3MakeFeatureId } from "./manifold";
@@ -66,7 +67,7 @@ import {
 	b3_staticSet,
 } from "./physics_world";
 import {
-	b3CopyShape,
+	b3CopyShapeInto,
 	b3GetShapeMaterials,
 	b3Shape,
 	b3_enableContactEvents,
@@ -646,6 +647,15 @@ export function b3DestroyContact(world: b3World, contact: b3Contact, wakeBodies:
 	}
 }
 
+// C's stack buffers for b3ComputeConvexManifold and the compound child of b3UpdateContact. Neither
+// call nests in itself, so each has one.
+const s_convexPoints = new StaticArray<b3LocalManifoldPoint>(B3_MAX_MANIFOLD_POINTS);
+const s_convexManifold = new b3LocalManifold();
+const s_contactChild = new b3ChildShape();
+const s_contactChildMaterial = new Uint16Array(1);
+const s_contactChildShape = new b3Shape();
+const s_contactChildMaterials = new StaticArray<b3SurfaceMaterial>(1);
+
 function b3ComputeConvexManifold(
 	world: b3World,
 	workerIndex: i32,
@@ -661,9 +671,10 @@ function b3ComputeConvexManifold(
 	// cache is contact.convexContact.cache
 
 	let pointCapacity = B3_MAX_MANIFOLD_POINTS;
-	let pointBuffer = new StaticArray<b3LocalManifoldPoint>(pointCapacity);
+	let pointBuffer = s_convexPoints;
 
-	let geomManifold = new b3LocalManifold();
+	let geomManifold = s_convexManifold;
+	b3ZeroLocalManifold(geomManifold);
 	geomManifold.points = pointBuffer;
 
 	let transformBtoA = b3InvMulWorldTransforms(xfA, xfB);
@@ -918,10 +929,12 @@ export function b3UpdateContact(
 
 	if (shapeA.type == b3_compoundShape) {
 		let childIndex = contact.childIndex;
-		let child = b3GetCompoundChild(shapeA.compound!, childIndex);
+		let child = s_contactChild;
+		b3GetCompoundChildInto(shapeA.compound!, childIndex, child, s_contactChildMaterial);
 
 		// Temporary child shape to match existing function signatures
-		let childShapeA = b3CopyShape(shapeA);
+		let childShapeA = s_contactChildShape;
+		b3CopyShapeInto(childShapeA, shapeA);
 
 		childShapeA.type = child.type;
 
@@ -930,7 +943,7 @@ export function b3UpdateContact(
 			let materialIndex = <i32>child.materialIndices![0];
 			if (B3_ASSERT_ENABLED) B3_ASSERT(0 <= materialIndex && materialIndex < shapeA.materialCount);
 			let parentMaterials = b3GetShapeMaterials(shapeA);
-			let childMaterials = new StaticArray<b3SurfaceMaterial>(1);
+			let childMaterials = s_contactChildMaterials;
 			childMaterials[0] = parentMaterials[materialIndex];
 			childShapeA.materials = childMaterials;
 			childShapeA.materialCount = 1;

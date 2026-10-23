@@ -167,15 +167,16 @@ export function b3GetCompoundSphere(compound: b3CompoundData, index: i32): b3Com
 	return compound.spheres[index];
 }
 
-// C points at the instance's material index; a convex child holds a one element copy.
-function b3MakeChildMaterialIndices(materialIndex: u16): Uint16Array {
-	let indices = new Uint16Array(1);
-	indices[0] = materialIndex;
-	return indices;
-}
-
-export function b3GetCompoundChild(compound: b3CompoundData, childIndex: i32): b3ChildShape {
-	let child = new b3ChildShape();
+// C returns the child by value. This fills a caller owned child so hot callers reuse one; a convex
+// child points its material indices at convexMaterial, a one element array the caller owns.
+export function b3GetCompoundChildInto(
+	compound: b3CompoundData,
+	childIndex: i32,
+	child: b3ChildShape,
+	convexMaterial: Uint16Array,
+): void {
+	child.hull = null;
+	child.mesh = null;
 
 	// Capsule?
 	if (0 <= childIndex && childIndex < compound.capsuleCount) {
@@ -183,10 +184,11 @@ export function b3GetCompoundChild(compound: b3CompoundData, childIndex: i32): b
 		let capsules = compound.capsules;
 		child.capsule = capsules[childIndex].capsule;
 		child.transform = b3Transform_identity;
-		child.materialIndices = b3MakeChildMaterialIndices(capsules[childIndex].materialIndex);
+		convexMaterial[0] = capsules[childIndex].materialIndex;
+		child.materialIndices = convexMaterial;
 		child.materialCount = 1;
 		child.type = b3_capsuleShape;
-		return child;
+		return;
 	}
 	childIndex -= compound.capsuleCount;
 
@@ -197,10 +199,11 @@ export function b3GetCompoundChild(compound: b3CompoundData, childIndex: i32): b
 		let hullOffset = hullInstances[childIndex].hullOffset;
 		child.hull = compound.hulls[<i32>hullOffset];
 		child.transform = hullInstances[childIndex].transform;
-		child.materialIndices = b3MakeChildMaterialIndices(hullInstances[childIndex].materialIndex);
+		convexMaterial[0] = hullInstances[childIndex].materialIndex;
+		child.materialIndices = convexMaterial;
 		child.materialCount = 1;
 		child.type = b3_hullShape;
-		return child;
+		return;
 	}
 	childIndex -= compound.hullCount;
 
@@ -213,7 +216,7 @@ export function b3GetCompoundChild(compound: b3CompoundData, childIndex: i32): b
 		child.materialIndices = compoundMesh.materialIndices;
 		child.materialCount = compoundMesh.materialCount;
 		child.type = b3_meshShape;
-		return child;
+		return;
 	}
 	childIndex -= compound.meshCount;
 
@@ -225,11 +228,27 @@ export function b3GetCompoundChild(compound: b3CompoundData, childIndex: i32): b
 		let spheres = compound.spheres;
 		child.sphere = spheres[childIndex].sphere;
 		child.transform = b3Transform_identity;
-		child.materialIndices = b3MakeChildMaterialIndices(spheres[childIndex].materialIndex);
+		convexMaterial[0] = spheres[childIndex].materialIndex;
+		child.materialIndices = convexMaterial;
 		child.materialCount = 1;
 		child.type = b3_sphereShape;
-		return child;
 	}
+}
+
+export function b3GetCompoundChild(compound: b3CompoundData, childIndex: i32): b3ChildShape {
+	let child = new b3ChildShape();
+	b3GetCompoundChildInto(compound, childIndex, child, new Uint16Array(1));
+	return child;
+}
+
+// The compound queries below hold their child only until the tree callback returns, and nothing
+// they call reads another compound child, so they share one.
+const s_queryChild = new b3ChildShape();
+const s_queryChildMaterial = new Uint16Array(1);
+
+@inline function b3GetQueryChild(compound: b3CompoundData, childIndex: i32): b3ChildShape {
+	b3GetCompoundChildInto(compound, childIndex, s_queryChild, s_queryChildMaterial);
+	return s_queryChild;
 }
 
 // C memcmp's the mesh blobs: the header, every section and the zero padding. This compares the same bits.
@@ -724,7 +743,7 @@ class b3CompoundOverlapContext {
 
 function b3CompoundOverlapCallback(proxyId: i32, userData: u64, overlapContext: b3CompoundOverlapContext): bool {
 	let childIndex = <i32>userData;
-	let child = b3GetCompoundChild(overlapContext.compound, childIndex);
+	let child = b3GetQueryChild(overlapContext.compound, childIndex);
 
 	let overlap = false;
 	switch (child.type) {
@@ -796,7 +815,7 @@ function b3CompoundRayCastCallback(input: b3RayCastInput, proxyId: i32, userData
 
 	let childIndex = <i32>userData;
 
-	let child = b3GetCompoundChild(compound, childIndex);
+	let child = b3GetQueryChild(compound, childIndex);
 	let materialIndices = child.materialIndices!;
 
 	// Get the input in child local space.
@@ -855,19 +874,22 @@ export function b3RayCastCompound(shape: b3CompoundData, input: b3RayCastInput):
 	return context.output;
 }
 
+// C's stack locals of the shape cast callback; as with the child, one call never nests in another
+const s_childCastInput = new b3ShapeCastInput();
+const s_childCastPoints = new StaticArray<b3Vec3>(B3_MAX_SHAPE_CAST_POINTS);
+
 function b3CompoundShapeCastCallback(input: b3BoxCastInput, proxyId: i32, userData: u64, castContext: b3CompoundCastContext): f32 {
 	let compound = castContext.compound;
 	let shapeInput = castContext.shapeInput!;
 
 	let childIndex = <i32>userData;
 
-	let child = b3GetCompoundChild(compound, childIndex);
+	let child = b3GetQueryChild(compound, childIndex);
 	let materialIndices = child.materialIndices!;
 
 	// Get the input in the child local space.
-	let localInput = new b3ShapeCastInput();
-	let localPoints = new StaticArray<b3Vec3>(B3_MAX_SHAPE_CAST_POINTS);
-	localInput.proxy = b3MakeLocalProxy(shapeInput.proxy, child.transform, localPoints);
+	let localInput = s_childCastInput;
+	localInput.proxy = b3MakeLocalProxy(shapeInput.proxy, child.transform, s_childCastPoints);
 	localInput.translation = b3InvRotateVector(child.transform.q, shapeInput.translation);
 	localInput.maxFraction = input.maxFraction;
 	localInput.canEncroach = shapeInput.canEncroach;
@@ -968,7 +990,7 @@ class b3CompoundMoverContext {
 
 function b3CompoundMoverCallback(proxyId: i32, userData: u64, moverContext: b3CompoundMoverContext): bool {
 	let childIndex = <i32>userData;
-	let child = b3GetCompoundChild(moverContext.compound, childIndex);
+	let child = b3GetQueryChild(moverContext.compound, childIndex);
 	let materialIndices = child.materialIndices!;
 
 	// Transform mover to child space

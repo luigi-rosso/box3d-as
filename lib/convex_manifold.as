@@ -1621,7 +1621,7 @@ export function b3CollideHullsAtWidth(
 }
 
 // C's b3LocalManifold edgeManifold = { 0 }
-function b3ZeroLocalManifold(m: b3LocalManifold): void {
+export function b3ZeroLocalManifold(m: b3LocalManifold): void {
 	m.normal = b3Vec3();
 	m.triangleNormal = b3Vec3();
 	m.pointOffset = 0;

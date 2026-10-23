@@ -1,6 +1,7 @@
 // Step timing for the port, the AnimaScript side of bench/native.
 // --define=SCENE=0 pyramid (base 10), 1 large_pyramid (base 100), 2 many_bodies; 3 and up run the
-// verify/scenes mirror (SCENE_NAMES below, copied in as ./scenes by run.sh); --define=STEPS=n.
+// verify/scenes mirror (SCENE_NAMES below, copied in as ./scenes by run.sh); --define=STEPS=n;
+// --define=STEPLOG logs every step; --define=DELAY=s spins s seconds before the first step.
 // One world step per frame; the scene is built in init and the result logged after the last step.
 
 import { Layout, Context } from "rive/host";
@@ -237,6 +238,14 @@ export class Main extends Layout {
 			return true;
 		}
 
+		if (isDefined(DELAY)) {
+			// Lets a profiler attach before the first step; profile.sh passes it
+			if (this.stepIndex == 0) {
+				let start = clock();
+				while (clock() - start < <f64>DELAY) {}
+			}
+		}
+
 		let t0 = clock();
 		if (this.scene >= SCENE_FIRST_MIRRORED) {
 			Scene_Step(this.mirror, this.stepIndex);
@@ -248,6 +257,15 @@ export class Main extends Layout {
 		if (this.stepIndex >= WARMUP_STEPS) {
 			this.stepMs[this.stepIndex - WARMUP_STEPS] = ms;
 			profileToArray(b3World_GetProfile(this.worldId), this.stages);
+			if (isDefined(STEPLOG)) {
+				let line = "BENCH STEP " + this.stepIndex.toString() + " ms=" + formatFixed(ms, 3);
+				for (let k = 1; k < STAGE_COUNT; ++k) {
+					if (this.stages[k] >= 0.5) {
+						line += " " + STAGE_NAMES[k] + "=" + formatFixed(this.stages[k], 2);
+					}
+				}
+				console.log(line);
+			}
 			for (let k = 0; k < STAGE_COUNT; ++k) {
 				this.stageSum[k] += this.stages[k];
 			}

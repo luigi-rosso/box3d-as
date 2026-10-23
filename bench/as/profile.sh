@@ -1,6 +1,7 @@
 #!/bin/sh
 # Time Profiler over the AOT bench, symbolized to wasm functions by tools/aotsym.py.
-#   bench/as/profile.sh [scene] [steps] [seconds]    scene 1 large_pyramid, 2 many_bodies
+#   bench/as/profile.sh [scene] [steps] [seconds]    scene 1 large_pyramid, 2 many_bodies, see main.as
+# DELAY=s (default 0) spins that long before the first step so the attach does not miss early steps.
 # The trace bundle records the environment, so it stays in OUT (default a temp dir).
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -17,7 +18,8 @@ sed 's|"\.\./\.\./lib/|"./lib/|' "$HERE/../../verify/scenes/scenes.as" > "$HERE/
 
 cd "$HERE"
 RIVE_RASC_NAMES=1 RIVE_WAMRC="$WAMRC" RIVE_WASM_AOT_SYNC=o3 RIVE_AOT_CACHE_DIR="$CACHE" \
-	"$RIVE" . --aot --bench=$((STEPS + 10)) --define=SCENE="$SCENE" --define=STEPS="$STEPS" > "$OUT/run.log" 2>&1 &
+	"$RIVE" . --aot --bench=$((STEPS + 10)) --define=SCENE="$SCENE" --define=STEPS="$STEPS" \
+	--define=DELAY="${DELAY:-0}" > "$OUT/run.log" 2>&1 &
 i=0
 until grep -q "BENCH start" "$OUT/run.log" 2>/dev/null; do
 	i=$((i + 1))

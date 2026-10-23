@@ -252,6 +252,11 @@ export class b3Shape {
 // C copies a b3Shape by value into a temporary; this is that memcpy. Arrays and geometry alias.
 export function b3CopyShape(shape: b3Shape): b3Shape {
 	let copy = new b3Shape();
+	b3CopyShapeInto(copy, shape);
+	return copy;
+}
+
+export function b3CopyShapeInto(copy: b3Shape, shape: b3Shape): void {
 	copy.id = shape.id;
 	copy.bodyId = shape.bodyId;
 	copy.prevShapeId = shape.prevShapeId;
@@ -278,7 +283,6 @@ export function b3CopyShape(shape: b3Shape): b3Shape {
 	copy.mesh = shape.mesh;
 	copy.heightField = shape.heightField;
 	copy.compound = shape.compound;
-	return copy;
 }
 
 // A single material shape keeps its material inline. Multi material meshes and compounds own a heap
