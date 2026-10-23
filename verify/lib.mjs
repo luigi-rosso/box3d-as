@@ -168,11 +168,13 @@ export async function runModule(name, drive, options = {}) {
     const i = ctx.sink.lines.length;
     if (i < expected.length) console.log(`  next c line ${i + 1}: ${expected[i]}`);
     console.log(`RESULT ${name} 0 1`);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
   const result = compareLines(name, expected, ctx.sink.lines, options);
   const nanNote = result.nanOnly > 0 ? `, ${result.nanOnly} lines differ only in NaN payloads` : '';
   console.log(`${name}: ${result.checks} lines, ${result.tokens} values, ${result.mismatches} mismatches${nanNote}`);
   console.log(`RESULT ${name} ${result.checks} ${result.mismatches}`);
-  process.exit(result.mismatches === 0 ? 0 : 1);
+  // process.exit can hang joining a busy V8 compile thread
+  process.exitCode = result.mismatches === 0 ? 0 : 1;
 }
