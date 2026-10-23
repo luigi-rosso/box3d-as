@@ -1,0 +1,22 @@
+name: box3d_demo
+main: main
+scripting: wasm
+artboard:
+  width: 1280
+  height: 800
+  background: "#151412"
+exclude:
+  # The port is mid flight and every .as in the project compiles whether or
+  # not main imports it. Drop this line once lib/ builds on its own.
+  - lib
+  - verify
+  - bench
+  - notes
+  - demo/fonts/OFL-Inter.txt
+  - CONVENTIONS.md
+  - LICENSE
+output:
+  dir: build
+logs:
+  file: build/rive.log
+  problems: build/problems.log
