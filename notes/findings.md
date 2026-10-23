@@ -103,9 +103,16 @@ let t: f32 = m == 0 ? 0.0 : m == 1 ? 1.0 : x; // cannot implicitly convert f64 t
 let u: f32 = m == 0 ? 0.0 : x;                // fine
 ```
 
-Workaround: `<f32>0.0`.
+Workaround: `<f32>0.0`. The same loss happens to a single ternary nested in
+an f32 expression: `let x: f32 = a + (c ? 0.0 : 20.0);` fails while
+`let x: f32 = c ? 5.0 : 15.0;` compiles.
 
 ## Whole struct store through a call result is refused
 
 `getM(s)[0] = m` is refused, while a leaf store `getM(s)[0].x = 1` through the
 same call compiles. Binding the array to a local first works.
+
+## `shift()` is refused on arrays of structs
+
+`E3001: 'shift' is not supported on value class arrays yet`; `push`, `pop`
+and `length` work.
