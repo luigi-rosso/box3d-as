@@ -43,7 +43,7 @@ import {
 	b3Dot,
 	b3DotQuat,
 	b3InvMulQuat,
-	b3InvMulWorldTransforms,
+	b3InvRotateVector,
 	b3InvTransformWorldPoint,
 	b3IsValidAABB,
 	b3IsValidFloat,
@@ -69,6 +69,7 @@ import {
 	b3RotateVector,
 	b3Sub,
 	b3SubPos,
+	b3Transform,
 	b3ToRelativeTransform,
 	b3ToVec3,
 	b3Transform_identity,
@@ -836,7 +837,10 @@ function b3CollideTask(startIndex: i32, endIndex: i32, workerIndex: i32, stepCon
 			let angleB = b3DotQuat(transformB.q, contact.cachedRotationB);
 			let angularDistance = b3MinFloat(angleA * angleA, angleB * angleB);
 
-			let xf = b3InvMulWorldTransforms(transformA, transformB);
+			// b3InvMulWorldTransforms in its two parts, which inline where the whole does not
+			let xf: b3Transform;
+			xf.q = b3InvMulQuat(transformA.q, transformB.q);
+			xf.p = b3InvRotateVector(transformA.q, b3SubPos(transformB.p, transformA.p));
 			let xfc = contact.cachedRelativePose;
 			let maxExtentA = b3IsStaticSimIndex(encodedA) ? b3Vec3_zero : simsA[simIndexA].maxExtent;
 			let maxExtentB = b3IsStaticSimIndex(encodedB) ? b3Vec3_zero : simsB[simIndexB].maxExtent;
@@ -909,7 +913,8 @@ function b3CollideTask(startIndex: i32, endIndex: i32, workerIndex: i32, stepCon
 		// Caching for contact recycling.
 		contact.cachedRotationA = transformA.q;
 		contact.cachedRotationB = transformB.q;
-		contact.cachedRelativePose = b3InvMulWorldTransforms(transformA, transformB);
+		contact.cachedRelativePose.q = b3InvMulQuat(transformA.q, transformB.q);
+		contact.cachedRelativePose.p = b3InvRotateVector(transformA.q, b3SubPos(transformB.p, transformA.p));
 		contact.flags |= b3_relativeTransformValid;
 
 		// This updates solid contacts
