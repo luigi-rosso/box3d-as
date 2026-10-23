@@ -68,3 +68,30 @@ constructor.
 
 `value-classes.html` lists ternaries on struct values as compile errors;
 rasc accepts them and returns correct results.
+
+## Module constants are never folded under `-O`
+
+```as
+export const A: u32 = 1 << 31;
+const E = 7;
+@inline const F: u32 = 0x80000000;
+export function f(x: u32): u32 { return (x & A) | <u32>E | (x & F); }
+// --wat -O: every constant is a global.get of an immutable global
+```
+
+asc inlines constant globals. The release bake's binaryen pass removes the
+cost; plain `rasc -O` does not.
+
+## `-O` never inlines struct constructors or struct returning functions
+
+Every `b3Vec3(...)` and helper returning a struct stays a call, `@inline` or
+not. The release bake's binaryen pass inlines them; plain `rasc -O` does not.
+
+## A function that folds to nothing stays a call
+
+Its arguments are still evaluated, so `B3_ASSERT(expensive())` costs in a
+release build; the port guards hot asserts with a constant.
+
+## `FixedArray` is capped at 255 elements
+
+C's 512 entry stack arrays cannot be locals; the port uses module statics.
