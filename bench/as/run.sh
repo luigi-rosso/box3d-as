@@ -3,6 +3,7 @@
 # Each round runs bench/native/run.sh (SIMD and scalar) and then the AnimaScript bench for each scene,
 # recording uptime before every run, since the machine may be shared; compare min over rounds.
 #   ROUNDS=3 NATIVE_REPEATS=3 bench/as/run.sh
+#   WASM_SIMD=off bench/as/run.sh   the scalar AnimaScript artifact
 # Writes out/session_<timestamp>.log and prints the table.
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -18,12 +19,20 @@ CACHE=${RIVE_AOT_CACHE_DIR:-$HERE/out/aotcache}
 mkdir -p "$HERE/out" "$CACHE"
 LOG="$HERE/out/session_$(date +%Y%m%d_%H%M%S).log"
 rsync -a --delete "$HERE/../../lib/" "$HERE/lib/"
+# WASM_SIMD=off bakes the scalar artifact from a copy of the project with wasmSimd: off
+PROJECT=$HERE
+if [ "${WASM_SIMD:-on}" = off ]; then
+	PROJECT=$HERE/out/scalar_project
+	mkdir -p "$PROJECT"
+	rsync -a --delete --exclude out --exclude build "$HERE/" "$PROJECT/"
+	echo "wasmSimd: off" >> "$PROJECT/rive.yaml"
+fi
 
 as_run() {
 	tier=$1 scene=$2 steps=$3 define=$4
 	echo "UPTIME $(uptime)"
 	echo "AS tier=$tier scene=$scene"
-	cd "$HERE"
+	cd "$PROJECT"
 	if [ "$tier" = aot ]; then
 		RIVE_WAMRC="$WAMRC" RIVE_WASM_AOT_SYNC=o3 RIVE_AOT_CACHE_DIR="$CACHE" \
 			"$RIVE" . --aot --bench=$((steps + 10)) --define=SCENE="$define" --define=STEPS="$steps" 2>&1
