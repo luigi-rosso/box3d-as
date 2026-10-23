@@ -1,0 +1,183 @@
+# perf: the solve stage
+
+Scope: `lib/simd.as`, `lib/contact_solver_wide.as`, `lib/solver.as` (step setup), with no change to
+`contact_solver.as`, `solver_set.as`, `constraint_graph.as`, `island.as` or `body.as` in the end. The
+collide task (`physics_world.as`, including `b3ResolveContactBodySim`), contacts, shapes and the tree
+belong to the collide pass. `bench/as/run.sh` and `profile.sh` gained `WASM_SIMD=off`.
+
+All of it keeps `KEEP_GOING=1 verify/run.sh` (28 modules) and `verify/traj.sh --large` (9 scenes) bit exact
+with `RASC_FLAGS=-O` and with `RASC_FLAGS="-O --enable-simd"`, checked before each commit on a snapshot of
+the worktree. The verify harness needs nothing new for SIMD: `RASC_FLAGS` reaches rasc in both scripts.
+
+## Results
+
+`bench/as/run.sh`, 3 rounds, Apple M5 Max, one worker. Before is notes/bench.md's session
+`session_20261023_133219.log` (load 16 to 34), whose bake had no SIMD code, so it stands for both
+artifacts. After are `session_20261023_151510.log` (SIMD artifact, the default `wasmSimd: on`) and
+`session_20261023_152750.log` (`WASM_SIMD=off`), both on a machine loaded 40 to 290 by other agents, so
+absolute numbers are inflated and noisy; `x scalar` divides by native scalar of the same session and is the
+number to compare.
+
+| scene | before AOT | x scalar | after AOT, SIMD | x scalar | after AOT, scalar artifact | x scalar |
+|---|---|---|---|---|---|---|
+| large_pyramid | 103.48 | 6.1 | 27.17 | 1.3 | 36.16 | 1.9 |
+| many_bodies | 194.70 | 5.6 | 46.73 | 1.1 | 68.25 | 2.4 (1.7 to 2.4 per round) |
+| pyramid | 0.868 | 6.9 | 0.234 | 1.6 | 0.271 | 2.6 |
+| pyramid, interpreter | 8.04 | 63.6 | 4.74 | 31.9 | 3.12 | 30.5 |
+
+The interpreter rows after run the scalar artifact (finding below). Native SIMD in the SIMD session:
+large_pyramid 12.83, many_bodies 27.98, pyramid 0.089 ms, so the SIMD artifact is 2.1x, 1.7x and 2.6x
+native SIMD.
+
+Per stage, large_pyramid, ms per step (native columns from the same session as the AS column):
+
+| stage | before AS | native scalar | after AS SIMD | native SIMD | native scalar | after AS scalar artifact | native scalar |
+|---|---|---|---|---|---|---|---|
+| step | 103.478 | 16.831 | 27.169 | 12.825 | 21.623 | 36.157 | 19.488 |
+| collide (not this pass) | 8.919 | 2.700 | 10.659 | 3.351 | 3.692 | 9.071 | 3.144 |
+| solve | 93.832 | 13.639 | 15.619 | 9.040 | 17.305 | 26.401 | 15.494 |
+| solverSetup | 8.078 | 0.002 | 0.013 | 0.002 | 0.002 | 0.012 | 0.002 |
+| prepareConstraints | 9.678 | 2.704 | 3.724 | 2.386 | 3.660 | 5.232 | 3.120 |
+| integrateVelocities | 0.252 | 0.140 | 0.268 | 0.164 | 0.184 | 0.211 | 0.154 |
+| warmStart | 13.768 | 1.661 | 1.327 | 0.740 | 2.101 | 2.699 | 1.859 |
+| solveImpulses (push) | 24.558 | 2.943 | 2.398 | 1.665 | 3.669 | 6.173 | 3.224 |
+| integratePositions | 0.416 | 0.245 | 0.446 | 0.283 | 0.301 | 0.388 | 0.276 |
+| relaxImpulses (solve) | 33.350 | 4.736 | 3.537 | 2.497 | 5.929 | 8.606 | 5.268 |
+| storeImpulses | 2.503 | 0.707 | 2.168 | 0.823 | 0.870 | 1.997 | 0.782 |
+| transforms (finalize) | 1.180 | 0.419 | 1.321 | 0.455 | 0.542 | 1.042 | 0.470 |
+
+The solve stage went from 6.9x native scalar to 0.9x with SIMD (1.7x native SIMD) and 1.7x on the scalar
+artifact. In a quieter moment (`profile.sh`, load about 90) the SIMD large_pyramid ran 18.9 ms per step
+with solve 9.7 ms, against native SIMD's 8.7 to 9.0 ms solve. many_bodies' SIMD solve is 28.6 ms against
+native scalar 35.3 and native SIMD 20.8.
+
+What the solve stage costs now, by kernel (the profile at load about 90, large_pyramid SIMD, share of all
+samples): prepare 15.2%, solve 13.0%, push 8.6%, warm start 5.6%, finalize bodies closure 6.4%, the block
+dispatcher with the integrations 4.6%, store impulses 3.9%. The rest of the top is the collide task:
+`b3ResolveContactBodySim` alone is 23.6% and the collide closure 10.8%.
+
+## Changes, in commit order
+
+### 1. Grow only step buffers (solverSetup 8 ms to 0.01 ms, heap growth gone)
+
+`b3Solve` allocated every per step array (`wideConstraints` and `wideManifolds`, about 6.5 MB for
+large_pyramid, the mesh arrays, the overflow constraints, stages, blocks, spans, worker contexts, the
+bullet list) where C bumps its stack allocator. They live one step on the colors and the step context, so
+they survive a frame boundary, get promoted, and the old generation grew about 6 MB per step (20315 pages
+after 200 large_pyramid steps). A module `b3SolverScratch` in solver.as now owns them, grow only
+(`count + count / 4 + 16`), shared by every world since only one `b3Solve` runs at a time. C's stack
+memory is not zeroed and every reader stays inside the counts the step writes, so stale contents past the
+counts or from an earlier step are never read: the parity checks confirm it, including the four world
+solver driver, which steps worlds of different sizes through the same scratch. The mesh prepare span keeps
+the lane order array plus a base index instead of a `subarray` view. `b3StepContext`'s default arrays are
+shared sentinels.
+
+large_pyramid, load 15 to 17, one interleaved pair: solverSetup 8.18 to 0.011 ms, step 81.8 to 74.9 ms;
+1079 wasm pages after 110 frames instead of 10588. After the rest of the changes the heap is 1071 pages
+after 20 steps and 1071 after 200: no growth per step, no accumulating references warning, and the
+multi hundred ms outlier steps are gone (max is now about twice the median, the machine noise).
+
+### 2. v128 kernels for prepare, warm start, push and solve, read in place
+
+Under `ASC_FEATURE_SIMD` each `b3FloatW4` held in registers is one `v128`; the wide constraints stay the
+same structs in memory, and the kernels read and write their fields with `v128.load` / `v128.store` at
+`offsetof` addresses, as C's SSE2 build reads them through pointers. Body states gather as C's SSE2
+`b3GatherBodies`: the 64 byte state is four rows, loaded from the raw array data and transposed with
+shuffles; the scatter transposes v and w back and stores two rows per dynamic body (the zero w lane lands
+in the padding, which nothing reads). Every lane op is the exact form of notes/containers.md: min/max/abs
+and blends are compare plus bitselect, masks stay all ones lanes inside a kernel and are stored as
+`and(mask, 1.0)` where the scalar path stores 1.0, and read back with `ne(mask, 0)`. Vector helpers that
+would return three values (cross, matrix times vector, inverse rotate) are written per component
+(`b3CrossL(a1, a2, b1, b2)`, `b3MulRowL`), so every helper returns one value and rasc -O inlines it.
+
+large_pyramid, load 80 to 150 (so only the ratios mean anything): warm start 21.6 to 2.3, push 38.8 to 3.5,
+relax 48.9 to 5.3 ms in the first pair; prepare 15.0 to 6.3 ms once it went wide too. The solve kernel's
+body went from 5741 to 1625 arm64 instructions, loads from 2260 to 238 and stores from 1482 to 76.
+
+### 3. Store impulses through raw lane loads
+
+`b3StoreImpulsesW` reads `( (const float*)&w )[lane]` as C does, a `load<f32>` at the field plus 4 lane,
+and writes the manifold through its address, instead of `b3LaneW`'s branch chain and a bounds checked
+`Array` place per field. The same code serves both artifacts. Measured 5.1 to 3.5 ms under heavy load.
+
+### 4. One kernel source for both artifacts (scalar artifact 2.9x faster)
+
+v128 cannot appear in a declaration of the scalar artifact, and a struct cannot be a generic argument, so
+the kernels became generic over a lane type `T` that is `v128` under SIMD and `f32` without it. The `L`
+helpers in `lib/simd.as` pick their body with `isFloat<T>()`, which rasc folds per instance and whose dead
+branch never compiles. An `f32` kernel runs once per lane with every wide field address offset by 4 lane
+bytes (the `FixedArray<i32, 4>` index lanes line up the same way), and reads only its lane's contact,
+sims and body states. Lanes of one wide constraint touch distinct dynamic bodies (graph coloring; static
+and kinematic bodies are never written), so running them one after the other gives the bits C's scalar
+build gives, and the parity checks agree. Decisions C takes across lanes (`b3AllZeroW` of the rolling
+resistance or restitution, the restitution `b3AnyTrueW`) read all four lanes from memory or the contacts
+before the lane loop, so every lane takes the same branch C takes. The old struct based kernels and their
+multi value helpers (`b3GatherBodies`, `b3MulMVW`, `b3InvRotateVectorW`, ...) are gone; the restitution
+kernel went generic too. The dispatch is an `if (ASC_FEATURE_SIMD)`, not a ternary, since rasc compiles
+both arms of a constant ternary.
+
+In the scalar artifact this removes every out of line helper call, entry stub and multi value return
+through memory, and keeps one lane's 26 body values in registers. large_pyramid scalar artifact, load 85
+to 140: 202.6 to 69.3 ms per step (relax 59.5 to 17.6, push 45.3 to 12.0, warm 25.7 to 5.7, prepare 19.0 to
+10.8). The interpreter (pyramid, scalar artifact) went from 9.7 to 4.1 ms per step.
+
+### 5. Inertia loaded once per constraint, empty f32 lanes skipped
+
+The six inverse inertia lanes per body load once per wide constraint instead of at each use. An f32 kernel
+skips a lane whose contact is null: such a lane writes only its own constraint lanes, which nothing reads
+(store impulses skips null contacts, and the shared decisions read values prepare writes for every lane).
+Prepare never skips, since those decisions read its stores. No measurable change on the SIMD artifact; kept
+because it is less code per use.
+
+### 6. Prepare reads contacts and manifolds through raw addresses
+
+C keeps `b3Contact*` and `b3Manifold*` lane arrays. The port stored contact and manifold array references
+into module scratch arrays, each store a `__linkSlot` write barrier, and indexed `StaticArray<b3Manifold>`
+per lane, each index check a divide by 268. They are now `FixedArray<usize, 4>` of object and manifold
+addresses, read with `load<f32>` at `offsetof` fields; nothing collects or moves during a step. Prepare
+many_bodies 9.0 to 8.1 ms (min of 3, load 60 to 140).
+
+## Raw memory and why it is in range
+
+- Body state and sim indices come from `b3PrepareConstraintL`, which takes them from the contacts' encoded
+  awake indices; 0 (or `B3_NULL_INDEX` for sims) selects `b3_identityStates` / `b3_zeroSims`.
+- Constraint `ci` and manifold `mi + k` addresses stay below the counts `b3Solve` sized the scratch with.
+- Lane offsets are below 16 bytes within a 16 byte wide field.
+- Manifold `k < contact.manifoldCount` of `contact.manifolds`, points below `B3_MAX_MANIFOLD_POINTS`.
+- `Array<V>` data is read as `load<usize>(array + offsetof<Array<i32>>("dataStart"))`, since rasc refuses
+  `dataStart` on value class arrays (notes/findings.md).
+
+## What did not help
+
+- Hoisting the inverse inertia (change 5) did not move the SIMD numbers; LLVM already kept most of them.
+- Instruction level profiles of prepare, finalize and store impulses are flat (no instruction above about
+  1% of the function's samples): what is left there is the per access bounds checks and the copies, not
+  one hot spot.
+
+## Findings (in notes/findings.md)
+
+- WAMR 2.4.5's fast interpreter traps (`invalid local type`) on `local.set` / `local.tee` of a v128 local
+  past the first 256 frame cells, so the SIMD artifact cannot run on the interpreter tier: the bench now
+  runs its interpreter scene on the scalar artifact, and a project that may fall back to the interpreter
+  needs `wasmSimd: off` until WAMR is fixed. This is the one decision to make before shipping the default
+  `wasmSimd: on` bake of this library.
+- `@inline` does not reach binaryen (no `metadata.code.inline` hint).
+- `dataStart` is refused on value class arrays.
+- `isFloat<T>()` folds per instance but is not in the docs; a constant ternary compiles both arms.
+
+## What is left
+
+- The collide task is now most of the gap: `b3ResolveContactBodySim` (physics_world.as) copies a
+  252 B sim twice per contact and is 23.6% of the AOT samples by itself; it belongs to the collide pass.
+- Store impulses (2.6x native SIMD), finalize bodies (2.9x) and prepare (1.6x) in this scope. Their
+  profiles are flat: bounds checks on every access (the ladder's `--bounds-checks=1`), the per body copies
+  of the 252 B sim and 64 B state in `b3FinalizeBodiesTask` and the integrations (C uses pointers), and
+  the `Array<b3Contact>` / `contact.manifolds` hops per lane. Raw addresses as in prepare would remove most
+  of the copies at some cost in readability.
+- `b3MulMM` and the other struct returning math helpers in finalize stay calls (math_functions.as).
+- The iteration kernels are 1.4x to 1.8x native SIMD; what remains there is the software bounds check on
+  every `v128.load` (one compare and branch per 16 bytes) and some spills around the 26 live body lanes.
+- Joints and the overflow color do not run in these scenes and were not touched; their prepare and solve
+  paths still copy joint sims and states by value.
+- Before shipping `wasmSimd: on` for this library, WAMR's interpreter needs the v128 local fix, or every
+  host that may run the interpreter tier needs `wasmSimd: off`.
