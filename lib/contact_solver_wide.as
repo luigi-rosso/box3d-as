@@ -683,6 +683,7 @@ export function b3PrepareContacts_MeshWideW4(block: b3SolverBlock, context: b3St
 
 		// This order is used to group contacts with similar manifold counts to keep the lanes full.
 		let order = spans[colorIndex].order;
+		let orderBase = spans[colorIndex].orderBase;
 
 		for (; wideIndex < colorWideEndIndex; ++wideIndex) {
 			ref c = constraints[wideIndex];
@@ -692,7 +693,7 @@ export function b3PrepareContacts_MeshWideW4(block: b3SolverBlock, context: b3St
 			for (let lane = 0; lane < 4; ++lane) {
 				let contactIndex = 4 * localWideIndex + lane;
 				if (contactIndex < colorContactCount) {
-					let spec = specs[order[contactIndex]];
+					let spec = specs[order[orderBase + contactIndex]];
 					B3_ASSERT(world.contacts[spec.contactId].contactId == spec.contactId);
 					B3_ASSERT(world.contacts[spec.contactId].manifoldCount == <i32>spec.manifoldCount);
 					contacts[lane] = spec.contactId;

@@ -284,12 +284,13 @@ export class b3ContactPrepareSpan {
 	}
 }
 
-// order is a view of the step's mesh lane order at this color's first contact.
+// C's order pointer is the step's mesh lane order from orderBase, this color's first contact.
 export class b3MeshPrepareSpan {
 	start: i32;
 	count: i32;
 	contacts: Array<b3ContactSpec>;
 	order: Int32Array;
+	orderBase: i32 = 0;
 
 	constructor(start: i32, count: i32, contacts: Array<b3ContactSpec>, order: Int32Array) {
 		this.start = start;
@@ -322,6 +323,9 @@ const b3_emptyJointPrepareSpans = new StaticArray<b3JointPrepareSpan>(0);
 const b3_emptyStages = new StaticArray<b3SolverStage>(0);
 const b3_emptyManifoldConstraints = new StaticArray<b3ManifoldConstraint>(0);
 const b3_emptyContactConstraints = new StaticArray<b3ContactConstraint>(0);
+const b3_emptyStates = new Array<b3BodyState>();
+const b3_emptySims = new Array<b3BodySim>();
+const b3_emptyStarts = new Int32Array(0);
 
 // Context for a time step. Recreated each time step.
 export class b3StepContext {
@@ -346,10 +350,10 @@ export class b3StepContext {
 	graph: b3ConstraintGraph;
 
 	// shortcut to body states from awake set
-	states: Array<b3BodyState> = new Array<b3BodyState>();
+	states: Array<b3BodyState> = b3_emptyStates;
 
 	// shortcut to body sims from awake set
-	sims: Array<b3BodySim> = new Array<b3BodySim>();
+	sims: Array<b3BodySim> = b3_emptySims;
 
 	// array of all shape ids for shapes that have enlarged AABBs
 	enlargedShapes: StaticArray<i32> = b3_emptyIndices;
@@ -381,7 +385,7 @@ export class b3StepContext {
 	// Mesh group g owns wideMeshManifolds[wideMeshManifoldStarts[g] .. wideMeshManifoldStarts[g + 1]).
 	wideMeshConstraints: StaticArray<b3ContactConstraintWide> = b3_emptyWideConstraints;
 	wideMeshManifolds: StaticArray<b3ContactManifoldWide> = b3_emptyWideManifolds;
-	wideMeshManifoldStarts: Int32Array = new Int32Array(0);
+	wideMeshManifoldStarts: Int32Array = b3_emptyStarts;
 	meshPrepareSpans: StaticArray<b3MeshPrepareSpan> = b3_emptyMeshPrepareSpans;
 	jointPrepareSpans: StaticArray<b3JointPrepareSpan> = b3_emptyJointPrepareSpans;
 
@@ -1766,6 +1770,140 @@ const b3_sentinelContactSpecs = new Array<b3ContactSpec>();
 const b3_sentinelJointSims = new Array<b3JointSim>();
 const b3_sentinelOrder = new Int32Array(0);
 
+// C takes the per step buffers from the world's stack allocator; these grow only and every reader stays
+// within the counts the step writes, so reusing them across steps and worlds keeps results.
+class b3SolverScratch {
+	bulletBodies: StaticArray<i32> = b3_emptyIndices;
+	activeColorIndices: StaticArray<i32> = new StaticArray<i32>(B3_GRAPH_COLOR_COUNT);
+	colorWideContactCounts: StaticArray<i32> = new StaticArray<i32>(B3_GRAPH_COLOR_COUNT);
+	colorMeshContactCounts: StaticArray<i32> = new StaticArray<i32>(B3_GRAPH_COLOR_COUNT);
+	colorMeshGroupCounts: StaticArray<i32> = new StaticArray<i32>(B3_GRAPH_COLOR_COUNT);
+	colorJointCounts: StaticArray<i32> = new StaticArray<i32>(B3_GRAPH_COLOR_COUNT);
+	graphWideContactDims: StaticArray<b3BlockDim> = new StaticArray<b3BlockDim>(B3_GRAPH_COLOR_COUNT);
+	graphMeshContactDims: StaticArray<b3BlockDim> = new StaticArray<b3BlockDim>(B3_GRAPH_COLOR_COUNT);
+	graphJointDims: StaticArray<b3BlockDim> = new StaticArray<b3BlockDim>(B3_GRAPH_COLOR_COUNT);
+	graphBlockCounts: StaticArray<i32> = new StaticArray<i32>(B3_GRAPH_COLOR_COUNT);
+	bucketStarts: StaticArray<i32> = b3_emptyIndices;
+	wideConstraints: StaticArray<b3ContactConstraintWide> = b3_emptyWideConstraints;
+	wideManifolds: StaticArray<b3ContactManifoldWide> = b3_emptyWideManifolds;
+	wideMeshConstraints: StaticArray<b3ContactConstraintWide> = b3_emptyWideConstraints;
+	wideMeshManifolds: StaticArray<b3ContactManifoldWide> = b3_emptyWideManifolds;
+	meshLaneOrder: Int32Array = b3_sentinelOrder;
+	meshManifoldStarts: Int32Array = b3_sentinelOrder;
+	contactConstraints: StaticArray<b3ContactConstraint> = b3_emptyContactConstraints;
+	manifoldConstraints: StaticArray<b3ManifoldConstraint> = b3_emptyManifoldConstraints;
+	widePrepareSpans: StaticArray<b3WidePrepareSpan> = new StaticArray<b3WidePrepareSpan>(B3_GRAPH_COLOR_COUNT + 1);
+	meshPrepareSpans: StaticArray<b3MeshPrepareSpan> = new StaticArray<b3MeshPrepareSpan>(B3_GRAPH_COLOR_COUNT + 1);
+	jointPrepareSpans: StaticArray<b3JointPrepareSpan> = new StaticArray<b3JointPrepareSpan>(B3_GRAPH_COLOR_COUNT + 1);
+	overflowSpans: StaticArray<b3ContactPrepareSpan> = new StaticArray<b3ContactPrepareSpan>(2);
+	stages: StaticArray<b3SolverStage> = b3_emptyStages;
+	bodyBlocks: StaticArray<b3SyncBlock> = b3_emptySyncBlocks;
+	convexBlocks: StaticArray<b3SyncBlock> = b3_emptySyncBlocks;
+	meshBlocks: StaticArray<b3SyncBlock> = b3_emptySyncBlocks;
+	jointBlocks: StaticArray<b3SyncBlock> = b3_emptySyncBlocks;
+	graphColorBlocks: StaticArray<StaticArray<b3SyncBlock>> = new StaticArray<StaticArray<b3SyncBlock>>(B3_GRAPH_COLOR_COUNT);
+	workerContexts: StaticArray<b3WorkerContext> = new StaticArray<b3WorkerContext>(0);
+	workerNames: StaticArray<string> = new StaticArray<string>(0);
+	callerContext: b3WorkerContext? = null;
+
+	constructor() {
+		for (let i = 0; i <= B3_GRAPH_COLOR_COUNT; ++i) {
+			this.widePrepareSpans[i] = new b3WidePrepareSpan(0, 0, b3_sentinelContactIds);
+			this.meshPrepareSpans[i] = new b3MeshPrepareSpan(0, 0, b3_sentinelContactSpecs, b3_sentinelOrder);
+			this.jointPrepareSpans[i] = new b3JointPrepareSpan(0, 0, b3_sentinelJointSims);
+		}
+		this.overflowSpans[0] = new b3ContactPrepareSpan(0, 0, b3_sentinelContactSpecs);
+		this.overflowSpans[1] = new b3ContactPrepareSpan(0, 0, b3_sentinelContactSpecs);
+		for (let i = 0; i < B3_GRAPH_COLOR_COUNT; ++i) {
+			this.graphColorBlocks[i] = b3_emptySyncBlocks;
+		}
+	}
+}
+
+const b3_solverScratch = new b3SolverScratch();
+
+function b3SetWidePrepareSpan(span: b3WidePrepareSpan, start: i32, count: i32, contacts: Array<i32>): void {
+	span.start = start;
+	span.count = count;
+	span.contacts = contacts;
+}
+
+function b3SetContactPrepareSpan(span: b3ContactPrepareSpan, start: i32, count: i32, contacts: Array<b3ContactSpec>): void {
+	span.start = start;
+	span.count = count;
+	span.contacts = contacts;
+}
+
+function b3SetMeshPrepareSpan(
+	span: b3MeshPrepareSpan,
+	start: i32,
+	count: i32,
+	contacts: Array<b3ContactSpec>,
+	order: Int32Array,
+	orderBase: i32
+): void {
+	span.start = start;
+	span.count = count;
+	span.contacts = contacts;
+	span.order = order;
+	span.orderBase = orderBase;
+}
+
+function b3SetJointPrepareSpan(span: b3JointPrepareSpan, start: i32, count: i32, joints: Array<b3JointSim>): void {
+	span.start = start;
+	span.count = count;
+	span.joints = joints;
+}
+
+@inline function b3GrowCapacity(count: i32): i32 {
+	return count + (count >> 2) + 16;
+}
+
+function b3ReserveIndices(a: StaticArray<i32>, count: i32): StaticArray<i32> {
+	return a.length >= count ? a : new StaticArray<i32>(b3GrowCapacity(count));
+}
+
+function b3ReserveInt32Array(a: Int32Array, count: i32): Int32Array {
+	return a.length >= count ? a : new Int32Array(b3GrowCapacity(count));
+}
+
+function b3ReserveSyncBlocks(a: StaticArray<b3SyncBlock>, count: i32): StaticArray<b3SyncBlock> {
+	return a.length >= count ? a : new StaticArray<b3SyncBlock>(b3GrowCapacity(count));
+}
+
+function b3ReserveWideConstraints(
+	a: StaticArray<b3ContactConstraintWide>,
+	count: i32
+): StaticArray<b3ContactConstraintWide> {
+	return a.length >= count ? a : new StaticArray<b3ContactConstraintWide>(b3GrowCapacity(count));
+}
+
+function b3ReserveWideManifolds(a: StaticArray<b3ContactManifoldWide>, count: i32): StaticArray<b3ContactManifoldWide> {
+	return a.length >= count ? a : new StaticArray<b3ContactManifoldWide>(b3GrowCapacity(count));
+}
+
+function b3ReserveContactConstraints(a: StaticArray<b3ContactConstraint>, count: i32): StaticArray<b3ContactConstraint> {
+	return a.length >= count ? a : new StaticArray<b3ContactConstraint>(b3GrowCapacity(count));
+}
+
+function b3ReserveManifoldConstraints(
+	a: StaticArray<b3ManifoldConstraint>,
+	count: i32
+): StaticArray<b3ManifoldConstraint> {
+	return a.length >= count ? a : new StaticArray<b3ManifoldConstraint>(b3GrowCapacity(count));
+}
+
+function b3ReserveStages(a: StaticArray<b3SolverStage>, count: i32): StaticArray<b3SolverStage> {
+	if (a.length >= count) {
+		return a;
+	}
+	let stages = new StaticArray<b3SolverStage>(b3GrowCapacity(count));
+	for (let i = 0; i < stages.length; ++i) {
+		stages[i] = i < a.length ? a[i] : new b3SolverStage();
+	}
+	return stages;
+}
+
 function b3MakeJointEventId(index1: i32, world0: u16, generation: u16): b3JointId {
 	let id = b3JointId();
 	id.index1 = index1;
@@ -1794,7 +1932,9 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 
 		// Prepare buffers for continuous collision (fast bodies)
 		b3AtomicStoreInt(stepContext.bulletBodyCount, 0);
-		stepContext.bulletBodies = new StaticArray<i32>(awakeBodyCount);
+		let scratch = b3_solverScratch;
+		scratch.bulletBodies = b3ReserveIndices(scratch.bulletBodies, awakeBodyCount);
+		stepContext.bulletBodies = scratch.bulletBodies;
 
 		let graph = world.constraintGraph;
 		let colors = graph.colors;
@@ -1828,14 +1968,14 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 
 		// Configure blocks for tasks parallel-for each active graph color
 		// The blocks are a mix of convex contact, mesh contact, and joint blocks
-		let activeColorIndices = new StaticArray<i32>(B3_GRAPH_COLOR_COUNT);
-		let colorWideContactCounts = new StaticArray<i32>(B3_GRAPH_COLOR_COUNT);
-		let colorMeshContactCounts = new StaticArray<i32>(B3_GRAPH_COLOR_COUNT);
-		let colorMeshGroupCounts = new StaticArray<i32>(B3_GRAPH_COLOR_COUNT);
-		let colorJointCounts = new StaticArray<i32>(B3_GRAPH_COLOR_COUNT);
-		let graphWideContactDims = new StaticArray<b3BlockDim>(B3_GRAPH_COLOR_COUNT);
-		let graphMeshContactDims = new StaticArray<b3BlockDim>(B3_GRAPH_COLOR_COUNT);
-		let graphJointDims = new StaticArray<b3BlockDim>(B3_GRAPH_COLOR_COUNT);
+		let activeColorIndices = scratch.activeColorIndices;
+		let colorWideContactCounts = scratch.colorWideContactCounts;
+		let colorMeshContactCounts = scratch.colorMeshContactCounts;
+		let colorMeshGroupCounts = scratch.colorMeshGroupCounts;
+		let colorJointCounts = scratch.colorJointCounts;
+		let graphWideContactDims = scratch.graphWideContactDims;
+		let graphMeshContactDims = scratch.graphMeshContactDims;
+		let graphJointDims = scratch.graphJointDims;
 		let graphBlockCount = 0;
 
 		// c is the active color index
@@ -1889,11 +2029,15 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 		let jointPrepareDim = b3ComputeBlockCount(jointCount, minJointsPerBlock, maxBlockCount);
 
 		// C's interleaved stream is split into parallel constraint and manifold arrays.
-		let wideConstraints = new StaticArray<b3ContactConstraintWide>(wideContactCount);
-		let wideManifolds = new StaticArray<b3ContactManifoldWide>(wideContactCount);
+		scratch.wideConstraints = b3ReserveWideConstraints(scratch.wideConstraints, wideContactCount);
+		scratch.wideManifolds = b3ReserveWideManifolds(scratch.wideManifolds, wideContactCount);
+		let wideConstraints = scratch.wideConstraints;
+		let wideManifolds = scratch.wideManifolds;
 
-		let meshLaneOrder = new Int32Array(meshContactCount);
-		let meshManifoldStarts = new Int32Array(meshGroupCount + 1);
+		scratch.meshLaneOrder = b3ReserveInt32Array(scratch.meshLaneOrder, meshContactCount);
+		scratch.meshManifoldStarts = b3ReserveInt32Array(scratch.meshManifoldStarts, meshGroupCount + 1);
+		let meshLaneOrder = scratch.meshLaneOrder;
+		let meshManifoldStarts = scratch.meshManifoldStarts;
 
 		// Sort mesh contacts by manifold count so that contacts with more manifolds are solved
 		// together keeping the SIMD lanes fuller and less ragged.
@@ -1909,7 +2053,8 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 				}
 			}
 
-			let bucketStarts = new StaticArray<i32>(maxManifoldCount + 1);
+			scratch.bucketStarts = b3ReserveIndices(scratch.bucketStarts, maxManifoldCount + 1);
+			let bucketStarts = scratch.bucketStarts;
 
 			let orderBase = 0;
 			let groupBase = 0;
@@ -1960,8 +2105,10 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 			meshManifoldStarts[meshGroupCount] = meshSlotCount;
 		}
 
-		let wideMeshConstraints = new StaticArray<b3ContactConstraintWide>(meshGroupCount);
-		let wideMeshManifolds = new StaticArray<b3ContactManifoldWide>(meshSlotCount);
+		scratch.wideMeshConstraints = b3ReserveWideConstraints(scratch.wideMeshConstraints, meshGroupCount);
+		scratch.wideMeshManifolds = b3ReserveWideManifolds(scratch.wideMeshManifolds, meshSlotCount);
+		let wideMeshConstraints = scratch.wideMeshConstraints;
+		let wideMeshManifolds = scratch.wideMeshManifolds;
 
 		let overflow = colors[B3_OVERFLOW_INDEX];
 		let overflowCount = overflow.contacts.length;
@@ -1971,15 +2118,17 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 			overflowManifoldCount += <i32>overflow.contacts[i].manifoldCount;
 		}
 
-		overflow.contactConstraints = new StaticArray<b3ContactConstraint>(overflowCount);
-		overflow.manifoldConstraints = new StaticArray<b3ManifoldConstraint>(overflowManifoldCount);
+		scratch.contactConstraints = b3ReserveContactConstraints(scratch.contactConstraints, overflowCount);
+		scratch.manifoldConstraints = b3ReserveManifoldConstraints(scratch.manifoldConstraints, overflowManifoldCount);
+		overflow.contactConstraints = scratch.contactConstraints;
+		overflow.manifoldConstraints = scratch.manifoldConstraints;
 
 		// Build the span table for the flat prepare/store parallel-for while I slice the
 		// wide constraint buffer across colors. One entry per active color plus a sentinel
 		// at wideContactCount.
-		let widePrepareSpans = new StaticArray<b3WidePrepareSpan>(activeColorCount + 1);
-		let meshPrepareSpans = new StaticArray<b3MeshPrepareSpan>(activeColorCount + 1);
-		let jointPrepareSpans = new StaticArray<b3JointPrepareSpan>(activeColorCount + 1);
+		let widePrepareSpans = scratch.widePrepareSpans;
+		let meshPrepareSpans = scratch.meshPrepareSpans;
+		let jointPrepareSpans = scratch.jointPrepareSpans;
 
 		// Distribute transient constraints to each graph color and prepare spans
 		{
@@ -1992,7 +2141,7 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 				let color = colors[j];
 
 				let colorConvexContactCount = color.convexContacts.length;
-				widePrepareSpans[i] = new b3WidePrepareSpan(wideBase, colorConvexContactCount, color.convexContacts);
+				b3SetWidePrepareSpan(widePrepareSpans[i], wideBase, colorConvexContactCount, color.convexContacts);
 
 				if (colorConvexContactCount == 0) {
 					color.wideConstraints = b3_emptyWideConstraints;
@@ -2010,12 +2159,7 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 				}
 
 				let colorContactCount = color.contacts.length;
-				meshPrepareSpans[i] = new b3MeshPrepareSpan(
-					meshGroupBase,
-					colorContactCount,
-					color.contacts,
-					meshLaneOrder.subarray(contactBase)
-				);
+				b3SetMeshPrepareSpan(meshPrepareSpans[i], meshGroupBase, colorContactCount, color.contacts, meshLaneOrder, contactBase);
 
 				if (colorContactCount == 0) {
 					color.wideMeshConstraints = b3_emptyWideConstraints;
@@ -2034,26 +2178,26 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 					contactBase += colorContactCount;
 				}
 
-				jointPrepareSpans[i] = new b3JointPrepareSpan(jointBase, color.jointSims.length, color.jointSims);
+				b3SetJointPrepareSpan(jointPrepareSpans[i], jointBase, color.jointSims.length, color.jointSims);
 				jointBase += color.jointSims.length;
 			}
 
 			// Sentinels
-			widePrepareSpans[activeColorCount] = new b3WidePrepareSpan(wideContactCount, 0, b3_sentinelContactIds);
+			b3SetWidePrepareSpan(widePrepareSpans[activeColorCount], wideContactCount, 0, b3_sentinelContactIds);
 			B3_ASSERT(wideBase == wideContactCount);
 
-			meshPrepareSpans[activeColorCount] = new b3MeshPrepareSpan(meshGroupCount, 0, b3_sentinelContactSpecs, b3_sentinelOrder);
+			b3SetMeshPrepareSpan(meshPrepareSpans[activeColorCount], meshGroupCount, 0, b3_sentinelContactSpecs, b3_sentinelOrder, 0);
 			B3_ASSERT(contactBase == meshContactCount);
 			B3_ASSERT(meshGroupBase == meshGroupCount);
 
-			jointPrepareSpans[activeColorCount] = new b3JointPrepareSpan(jointCount, 0, b3_sentinelJointSims);
+			b3SetJointPrepareSpan(jointPrepareSpans[activeColorCount], jointCount, 0, b3_sentinelJointSims);
 			B3_ASSERT(jointBase == jointCount);
 		}
 
 		//// Special span for overflow to allow for function re-use
-		let overflowSpans = new StaticArray<b3ContactPrepareSpan>(2);
-		overflowSpans[0] = new b3ContactPrepareSpan(0, overflow.contacts.length, overflow.contacts);
-		overflowSpans[1] = new b3ContactPrepareSpan(overflow.contacts.length, 0, b3_sentinelContactSpecs);
+		let overflowSpans = scratch.overflowSpans;
+		b3SetContactPrepareSpan(overflowSpans[0], 0, overflow.contacts.length, overflow.contacts);
+		b3SetContactPrepareSpan(overflowSpans[1], overflow.contacts.length, 0, b3_sentinelContactSpecs);
 
 		let stageCount = 0;
 
@@ -2080,14 +2224,16 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 		// b3_stageStoreImpulses
 		stageCount += 1;
 
-		let stages = new StaticArray<b3SolverStage>(stageCount);
-		for (let i = 0; i < stageCount; ++i) {
-			stages[i] = new b3SolverStage();
-		}
-		let bodyBlocks = new StaticArray<b3SyncBlock>(bodyDim.count);
-		let convexBlocks = new StaticArray<b3SyncBlock>(convexPrepareDim.count);
-		let meshBlocks = new StaticArray<b3SyncBlock>(meshPrepareDim.count);
-		let jointBlocks = new StaticArray<b3SyncBlock>(jointPrepareDim.count);
+		scratch.stages = b3ReserveStages(scratch.stages, stageCount);
+		scratch.bodyBlocks = b3ReserveSyncBlocks(scratch.bodyBlocks, bodyDim.count);
+		scratch.convexBlocks = b3ReserveSyncBlocks(scratch.convexBlocks, convexPrepareDim.count);
+		scratch.meshBlocks = b3ReserveSyncBlocks(scratch.meshBlocks, meshPrepareDim.count);
+		scratch.jointBlocks = b3ReserveSyncBlocks(scratch.jointBlocks, jointPrepareDim.count);
+		let stages = scratch.stages;
+		let bodyBlocks = scratch.bodyBlocks;
+		let convexBlocks = scratch.convexBlocks;
+		let meshBlocks = scratch.meshBlocks;
+		let jointBlocks = scratch.jointBlocks;
 
 		// Split an awake island. This modifies:
 		// - stack allocator
@@ -2122,12 +2268,12 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 
 		// Prepare graph work blocks. Each color gets joint blocks followed by contact blocks.
 		// C slices one graph block buffer per color; here each color owns its blocks.
-		let graphColorBlocks = new StaticArray<StaticArray<b3SyncBlock>>(activeColorCount);
-		let graphBlockCounts = new StaticArray<i32>(B3_GRAPH_COLOR_COUNT);
+		let graphColorBlocks = scratch.graphColorBlocks;
+		let graphBlockCounts = scratch.graphBlockCounts;
 		let graphBlockTotal = 0;
 		for (let i = 0; i < activeColorCount; ++i) {
 			let colorBlockCount = graphJointDims[i].count + graphWideContactDims[i].count + graphMeshContactDims[i].count;
-			let colorBlocks = new StaticArray<b3SyncBlock>(colorBlockCount);
+			let colorBlocks = b3ReserveSyncBlocks(graphColorBlocks[i], colorBlockCount);
 			graphColorBlocks[i] = colorBlocks;
 
 			let colorIndex = <u8>activeColorIndices[i];
@@ -2206,7 +2352,18 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 		B3_ASSERT(stage == stageCount);
 
 		B3_ASSERT(workerCount <= B3_MAX_WORKERS);
-		let workerContext = new StaticArray<b3WorkerContext>(workerCount);
+		if (scratch.workerContexts.length < workerCount) {
+			let contexts = new StaticArray<b3WorkerContext>(workerCount);
+			let names = new StaticArray<string>(workerCount);
+			for (let i = 0; i < workerCount; ++i) {
+				contexts[i] = new b3WorkerContext(stepContext, i);
+				names[i] = "solve[" + i.toString() + "]";
+			}
+			scratch.workerContexts = contexts;
+			scratch.workerNames = names;
+			scratch.callerContext = new b3WorkerContext(stepContext, 0);
+		}
+		let workerContext = scratch.workerContexts;
 
 		stepContext.graph = graph;
 		stepContext.activeColorCount = activeColorCount;
@@ -2239,15 +2396,15 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 			b3SetBitCountAndClear(taskContext.hitEventBitSet, <u32>contactIdCapacity);
 			taskContext.hasHitEvents = false;
 
-			let worker = new b3WorkerContext(stepContext, i);
-			workerContext[i] = worker;
+			let worker = workerContext[i];
+			worker.context = stepContext;
 
 			if (world.taskCount < B3_MAX_TASKS) {
 				worker.userTask = world.enqueueTaskFcn(
 					(taskContext: u64): void => b3SolverTask(worker),
 					0,
 					world.userTaskContext,
-					"solve[" + i.toString() + "]"
+					scratch.workerNames[i]
 				);
 				world.taskCount += 1;
 				world.activeTaskCount += worker.userTask == 0 ? 0 : 1;
@@ -2263,7 +2420,9 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 		// threads than workerCount, or invert priority by parking the calling thread in finishTaskFcn.
 		// Whoever wins the CAS becomes the orchestrator; the loser returns and lets the spinner-only
 		// path handle workers >0.
-		let callerContext = new b3WorkerContext(stepContext, 0);
+		let callerContext = scratch.callerContext!;
+		callerContext.context = stepContext;
+		callerContext.userTask = 0;
 		b3SolverTask(callerContext);
 
 		// Finish constraint solve
