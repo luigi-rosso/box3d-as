@@ -44,7 +44,7 @@ import {
 	b3AllZeroAt,
 	b3Vec3W,
 } from "./simd";
-import { b3BodySim, b3BodyState, b3DecodeAwakeIndex, b3_dynamicFlag, b3_identityBodyState } from "./body";
+import { b3ArrayData, b3BodySim, b3BodyState, b3DecodeAwakeIndex, b3_dynamicFlag, b3_identityBodyState } from "./body";
 import { b3Contact, b3_simEnableHitEvent } from "./contact";
 import { b3SolverBlock, b3StepContext } from "./solver";
 import {
@@ -125,6 +125,12 @@ const BS_DP = offsetof<b3BodyState>("deltaPosition");
 const BS_FLAGS = offsetof<b3BodyState>("flags");
 const BS_DQ = offsetof<b3BodyState>("deltaRotation");
 const CT_FRICTION = offsetof<b3Contact>("friction");
+const CT_MANIFOLDS = offsetof<b3Contact>("manifolds");
+const CT_MANIFOLDCOUNT = offsetof<b3Contact>("manifoldCount");
+const CT_FLAGS = offsetof<b3Contact>("flags");
+const CT_CONTACTID = offsetof<b3Contact>("contactId");
+const CT_ENCODEDBODYSIMA = offsetof<b3Contact>("encodedBodySimA");
+const CT_ENCODEDBODYSIMB = offsetof<b3Contact>("encodedBodySimB");
 const CT_RESTITUTION = offsetof<b3Contact>("restitution");
 const CT_ROLLINGRESISTANCE = offsetof<b3Contact>("rollingResistance");
 const CT_TANGENTVELOCITY = offsetof<b3Contact>("tangentVelocity");
@@ -139,6 +145,7 @@ const MP_ANCHORB = offsetof<b3ManifoldPoint>("anchorB");
 const MP_SEPARATION = offsetof<b3ManifoldPoint>("separation");
 const MP_NORMALIMPULSE = offsetof<b3ManifoldPoint>("normalImpulse");
 const MP_NORMALVELOCITY = offsetof<b3ManifoldPoint>("normalVelocity");
+const MP_TOTALNORMALIMPULSE = offsetof<b3ManifoldPoint>("totalNormalImpulse");
 const BSIM_INVMASS = offsetof<b3BodySim>("invMass");
 const BSIM_INVINERTIA = offsetof<b3BodySim>("invInertiaWorld");
 const M3_CX = offsetof<b3Matrix3>("cx");
@@ -301,6 +308,7 @@ unsafe function b3PrepareConstraintL<T>(
 	let invTau: f32 = <f32>1.0 / B3_SPECULATIVE_DISTANCE();
 
 	// C's pointer lanes: each lane's contact object and its manifold data, which stay put during the step
+	let contactData = b3ArrayData(world.contacts);
 	let zeroContact = changetype<usize>(b3_zeroContact);
 	let zeroManifold = changetype<usize>(b3_zeroManifolds);
 	let contactLanes: FixedArray<usize, 4>;
@@ -317,23 +325,24 @@ unsafe function b3PrepareConstraintL<T>(
 		store<i32>(c0 + CW_CONTACTS + <usize>lane * 4, contactId);
 
 		if (contactId != B3_NULL_INDEX) {
-			let contact = world.contacts[contactId];
-			let indexA = b3DecodeAwakeIndex(contact.encodedBodySimA);
-			let indexB = b3DecodeAwakeIndex(contact.encodedBodySimB);
+			let contact = load<usize>(contactData + <usize>contactId * sizeof<usize>());
+			let indexA = b3DecodeAwakeIndex(load<i32>(contact + CT_ENCODEDBODYSIMA));
+			let indexB = b3DecodeAwakeIndex(load<i32>(contact + CT_ENCODEDBODYSIMB));
+			let contactManifoldCount = load<i32>(contact + CT_MANIFOLDCOUNT);
 
 			store<i32>(c0 + CW_INDEXA + <usize>lane * 4, indexA + 1);
 			store<i32>(c0 + CW_INDEXB + <usize>lane * 4, indexB + 1);
-			manifoldCounts[lane] = contact.manifoldCount;
+			manifoldCounts[lane] = contactManifoldCount;
 
-			contactLanes[lane] = changetype<usize>(contact);
-			laneManifolds[lane] = changetype<usize>(contact.manifolds);
+			contactLanes[lane] = contact;
+			laneManifolds[lane] = load<usize>(contact + CT_MANIFOLDS);
 			simLanesA[lane] = indexA;
 			simLanesB[lane] = indexB;
-			hitEventLanes |= (contact.flags & b3_simEnableHitEvent) != 0 ? 1 << lane : 0;
-			maxManifoldCount = b3MaxInt(maxManifoldCount, contact.manifoldCount);
+			hitEventLanes |= (load<u32>(contact + CT_FLAGS) & b3_simEnableHitEvent) != 0 ? 1 << lane : 0;
+			maxManifoldCount = b3MaxInt(maxManifoldCount, contactManifoldCount);
 
 			// b3AllZeroW( c->rollingResistance ) == false, which the lanes share
-			anyRolling = anyRolling || contact.rollingResistance != 0.0;
+			anyRolling = anyRolling || load<f32>(contact + CT_ROLLINGRESISTANCE) != 0.0;
 		} else {
 			store<i32>(c0 + CW_INDEXA + <usize>lane * 4, 0);
 			store<i32>(c0 + CW_INDEXB + <usize>lane * 4, 0);
@@ -1955,6 +1964,7 @@ unsafe function b3StoreImpulsesW(
 	let negHitThreshold = -world.hitEventThreshold;
 	let constraintData = changetype<usize>(constraints);
 	let manifoldData = changetype<usize>(manifolds);
+	let contactData = b3ArrayData(world.contacts);
 
 	let ci = constraintBase + block.startIndex;
 	let mi = fixedManifoldCount > 0 ? ci : manifoldStarts[block.startIndex];
@@ -1962,17 +1972,27 @@ unsafe function b3StoreImpulsesW(
 		let c = constraintData + <usize>ci * sizeof<b3ContactConstraintWide>();
 		let manifoldCount = fixedManifoldCount > 0 ? fixedManifoldCount : load<i32>(c + CW_MANIFOLDCOUNT);
 
+		// Pay the cache misses up front. Contact ids come from prepare; 0 stands for C's NULL contact.
+		let contactLanes: FixedArray<usize, 4>;
+		let laneManifoldData: FixedArray<usize, 4>;
 		for (let lane = 0; lane < 4; ++lane) {
 			let contactId = load<i32>(c + CW_CONTACTS + <usize>lane * 4);
-			if (contactId == B3_NULL_INDEX) {
+			let contact = contactId != B3_NULL_INDEX ? load<usize>(contactData + <usize>contactId * sizeof<usize>()) : 0;
+			contactLanes[lane] = contact;
+			laneManifoldData[lane] = contact != 0 ? load<usize>(contact + CT_MANIFOLDS) : 0;
+		}
+
+		for (let lane = 0; lane < 4; ++lane) {
+			let contact = contactLanes[lane];
+			if (contact == 0) {
 				continue;
 			}
 
-			let contact = world.contacts[contactId];
-			let laneManifolds = changetype<usize>(contact.manifolds);
+			let laneManifolds = laneManifoldData[lane];
+			let contactManifoldCount = load<i32>(contact + CT_MANIFOLDCOUNT);
 
-			let laneManifoldCount = fixedManifoldCount > 0 ? fixedManifoldCount : contact.manifoldCount;
-			B3_ASSERT(laneManifoldCount == contact.manifoldCount && laneManifoldCount <= manifoldCount);
+			let laneManifoldCount = fixedManifoldCount > 0 ? fixedManifoldCount : contactManifoldCount;
+			B3_ASSERT(laneManifoldCount == contactManifoldCount && laneManifoldCount <= manifoldCount);
 
 			let laneOffset = <usize>lane * 4;
 			for (let manifoldIndex = 0; manifoldIndex < laneManifoldCount; ++manifoldIndex) {
@@ -2001,17 +2021,20 @@ unsafe function b3StoreImpulsesW(
 				}
 			}
 
-			if ((contact.flags & b3_simEnableHitEvent) != 0) {
-				let contactManifolds = contact.manifolds;
+			if ((load<u32>(contact + CT_FLAGS) & b3_simEnableHitEvent) != 0) {
 				let flagged = false;
 				for (let manifoldIndex = 0; manifoldIndex < laneManifoldCount && flagged == false; ++manifoldIndex) {
-					ref m = contactManifolds[manifoldIndex];
-					for (let pointIndex = 0; pointIndex < m.pointCount; ++pointIndex) {
-						ref mp = m.points[pointIndex];
+					let m = laneManifolds + <usize>manifoldIndex * sizeof<b3Manifold>();
+					let pointCount = load<i32>(m + M_POINTCOUNT);
+					for (let pointIndex = 0; pointIndex < pointCount; ++pointIndex) {
+						let mp = m + M_POINTS + <usize>pointIndex * sizeof<b3ManifoldPoint>();
 
 						// Need to check total impulse because the point may be speculative and not colliding
-						if (mp.normalVelocity < negHitThreshold && mp.totalNormalImpulse > 0.0) {
-							b3SetBit(hitEventBitSet, <u32>contact.contactId);
+						if (
+							load<f32>(mp + MP_NORMALVELOCITY) < negHitThreshold &&
+							load<f32>(mp + MP_TOTALNORMALIMPULSE) > 0.0
+						) {
+							b3SetBit(hitEventBitSet, <u32>load<i32>(contact + CT_CONTACTID));
 							hasHitEvents = true;
 							flagged = true;
 							break;

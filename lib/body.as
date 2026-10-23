@@ -316,6 +316,12 @@ function b3MakeIdentityBodyState(): b3BodyState {
 // Identity body state, notice the deltaRotation is identity
 export const b3_identityBodyState: b3BodyState = b3MakeIdentityBodyState();
 
+// The element data of an Array of structs, for the solver's pointer walks; rasc refuses dataStart on value class
+// arrays. The address holds until the array grows, which no solver stage does.
+@inline export unsafe function b3ArrayData<A>(a: A): usize {
+	return load<usize>(changetype<usize>(a) + offsetof<Array<i32>>("dataStart"));
+}
+
 // Body simulation data used for integration of position and velocity
 // Transform data used for collision and solver preparation.
 export struct b3BodySim {

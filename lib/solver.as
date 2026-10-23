@@ -40,11 +40,11 @@ import {
 	b3LerpPosition,
 	b3MakeMatrixFromQuat,
 	b3Matrix3,
+	b3Quat,
 	b3MaxFloat,
 	b3MaxInt,
 	b3MinInt,
 	b3MulAdd,
-	b3MulMM,
 	b3MulMV,
 	b3MulQuat,
 	b3MulSV,
@@ -60,7 +60,6 @@ import {
 	b3Sub,
 	b3Transform,
 	b3TransformPoint,
-	b3Transpose,
 	b3Vec3,
 	b3Vec3_zero,
 } from "./math_functions";
@@ -82,6 +81,7 @@ import { b3Sweep } from "./collision";
 import {
 	B3_DEFAULT_MASK_BITS,
 	b3BodyId,
+	b3BodyMoveEvent,
 	b3ContactHitEvent,
 	b3ContactId,
 	b3JointEvent,
@@ -99,6 +99,8 @@ import {
 import { b3DynamicTree_EnlargeProxy, b3DynamicTree_Query, b3DynamicTree_Refit } from "./dynamic_tree";
 import { b3DynamicTree_GetAABB } from "./collision";
 import {
+	b3ArrayData,
+	b3Body,
 	b3BodySim,
 	b3BodyState,
 	b3GetBodySim,
@@ -499,20 +501,63 @@ class b3WorkerContext {
 	}
 }
 
+// The integrations and finalize walk the state, sim, body and move event arrays through pointers as C does, with
+// these field offsets. Their indices stay below the awake counts and the move event count b3Solve sized, and
+// bodyId is a live body.
+const FS_V = offsetof<b3BodyState>("linearVelocity");
+const FS_W = offsetof<b3BodyState>("angularVelocity");
+const FS_DP = offsetof<b3BodyState>("deltaPosition");
+const FS_FLAGS = offsetof<b3BodyState>("flags");
+const FS_DQ = offsetof<b3BodyState>("deltaRotation");
+const FSIM_P = offsetof<b3BodySim>("transform") + offsetof<b3Transform>("p");
+const FSIM_Q = offsetof<b3BodySim>("transform") + offsetof<b3Transform>("q");
+const FSIM_TRANSFORM = offsetof<b3BodySim>("transform");
+const FSIM_CENTER = offsetof<b3BodySim>("center");
+const FSIM_FLAGS = offsetof<b3BodySim>("flags");
+const FSIM_MINEXTENT = offsetof<b3BodySim>("minExtent");
+const FSIM_MAXEXTENT = offsetof<b3BodySim>("maxExtent");
+const FSIM_ROTATION0 = offsetof<b3BodySim>("rotation0");
+const FSIM_CENTER0 = offsetof<b3BodySim>("center0");
+const FSIM_LOCALCENTER = offsetof<b3BodySim>("localCenter");
+const FSIM_FORCE = offsetof<b3BodySim>("force");
+const FSIM_TORQUE = offsetof<b3BodySim>("torque");
+const FSIM_INVINERTIALOCAL = offsetof<b3BodySim>("invInertiaLocal");
+const FSIM_INVINERTIAWORLD = offsetof<b3BodySim>("invInertiaWorld");
+const FSIM_INVMASS = offsetof<b3BodySim>("invMass");
+const FSIM_INERTIA = offsetof<b3BodySim>("inertia");
+const FSIM_LINEARDAMPING = offsetof<b3BodySim>("linearDamping");
+const FSIM_ANGULARDAMPING = offsetof<b3BodySim>("angularDamping");
+const FSIM_GRAVITYSCALE = offsetof<b3BodySim>("gravityScale");
+const FSIM_BODYID = offsetof<b3BodySim>("bodyId");
+const FB_USERDATA = offsetof<b3Body>("userData");
+const FB_HEADSHAPEID = offsetof<b3Body>("headShapeId");
+const FB_ISLANDID = offsetof<b3Body>("islandId");
+const FB_SLEEPTHRESHOLD = offsetof<b3Body>("sleepThreshold");
+const FB_SLEEPTIME = offsetof<b3Body>("sleepTime");
+const FB_SLEEPVELOCITY = offsetof<b3Body>("sleepVelocity");
+const FB_SAFETYFACTOR = offsetof<b3Body>("safetyFactor");
+const FB_BODYMOVEINDEX = offsetof<b3Body>("bodyMoveIndex");
+const FB_FLAGS = offsetof<b3Body>("flags");
+const FB_TYPE = offsetof<b3Body>("type");
+const FB_GENERATION = offsetof<b3Body>("generation");
+
 // Integrate velocities, apply damping, and gyroscopic torque
-function b3IntegrateVelocitiesTask(block: b3SolverBlock, context: b3StepContext): void {
-	let states = context.states;
-	let sims = context.sims;
+// Through state and sim pointers as C; i is below the awake body count the body blocks cover.
+unsafe function b3IntegrateVelocitiesTask(block: b3SolverBlock, context: b3StepContext): void {
+	let states = b3ArrayData(context.states);
+	let sims = b3ArrayData(context.sims);
 
 	let gravity = context.world.gravity;
 	let h = context.h;
 
 	let endIndex = block.startIndex + <i32>block.count;
 	for (let i = block.startIndex; i < endIndex; ++i) {
-		let sim = sims[i];
+		let sim = sims + <usize>i * sizeof<b3BodySim>();
+		let state = states + <usize>i * sizeof<b3BodyState>();
 
-		let v = states[i].linearVelocity;
-		let w = states[i].angularVelocity;
+		let v = load<b3Vec3>(state + FS_V);
+		let w = load<b3Vec3>(state + FS_W);
+		let invMass = load<f32>(sim + FSIM_INVMASS);
 
 		// Damping math
 		// Differential equation: dv/dt + c * v = 0
@@ -521,16 +566,16 @@ function b3IntegrateVelocitiesTask(block: b3SolverBlock, context: b3StepContext)
 		// v2 = exp(-c * dt) * v1
 		// Pade approximation:
 		// v2 = v1 * 1 / (1 + c * dt)
-		let linearDamping: f32 = 1.0 / (1.0 + h * sim.linearDamping);
-		let angularDamping: f32 = 1.0 / (1.0 + h * sim.angularDamping);
+		let linearDamping: f32 = 1.0 / (1.0 + h * load<f32>(sim + FSIM_LINEARDAMPING));
+		let angularDamping: f32 = 1.0 / (1.0 + h * load<f32>(sim + FSIM_ANGULARDAMPING));
 
 		// Gravity scale will be zero for kinematic bodies
-		let gravityScale: f32 = sim.invMass > 0.0 ? sim.gravityScale : <f32>0.0;
+		let gravityScale: f32 = invMass > 0.0 ? load<f32>(sim + FSIM_GRAVITYSCALE) : <f32>0.0;
 
-		let linearVelocityDelta = b3Blend2(h * sim.invMass, sim.force, h * gravityScale, gravity);
+		let linearVelocityDelta = b3Blend2(h * invMass, load<b3Vec3>(sim + FSIM_FORCE), h * gravityScale, gravity);
 		v = b3MulAdd(linearVelocityDelta, linearDamping, v);
 
-		let angularVelocityDelta = b3MulSV(h, b3MulMV(sim.invInertiaWorld, sim.torque));
+		let angularVelocityDelta = b3MulSV(h, b3MulMV(load<b3Matrix3>(sim + FSIM_INVINERTIAWORLD), load<b3Vec3>(sim + FSIM_TORQUE)));
 		w = b3MulAdd(angularVelocityDelta, angularDamping, w);
 
 		// Gyroscopic torque by solving this nonlinear equation using Newton-Raphson.
@@ -539,22 +584,22 @@ function b3IntegrateVelocitiesTask(block: b3SolverBlock, context: b3StepContext)
 		// This improves the simulation of long skinny bodies.
 		// If the principal inertia values of I are roughly equal (isotropic) then
 		// cross(w2, I * w2) ~= 0, so this can be skipped.
-		if ((sim.flags & b3_enableGyroscopicTorque) != 0) {
+		if ((load<u32>(sim + FSIM_FLAGS) & b3_enableGyroscopicTorque) != 0) {
 			// Get current rotation.
-			let q0 = sim.transform.q;
-			let q = b3MulQuat(states[i].deltaRotation, q0);
+			let q0 = load<b3Quat>(sim + FSIM_Q);
+			let q = b3MulQuat(load<b3Quat>(state + FS_DQ), q0);
 
 			// Compute local angular velocity
 			let omega1 = b3InvRotateVector(q, w);
 			let omega2 = omega1;
 
 			// Symmetric inertia tensor: 6 unique entries (column-major)
-			let i00 = sim.inertia.cx.x;
-			let i01 = sim.inertia.cy.x;
-			let i02 = sim.inertia.cz.x;
-			let i11 = sim.inertia.cy.y;
-			let i12 = sim.inertia.cz.y;
-			let i22 = sim.inertia.cz.z;
+			let i00 = load<f32>(sim + FSIM_INERTIA + 0);
+			let i01 = load<f32>(sim + FSIM_INERTIA + 12);
+			let i02 = load<f32>(sim + FSIM_INERTIA + 24);
+			let i11 = load<f32>(sim + FSIM_INERTIA + 16);
+			let i12 = load<f32>(sim + FSIM_INERTIA + 28);
+			let i22 = load<f32>(sim + FSIM_INERTIA + 32);
 
 			for (let gyroIteration = 0; gyroIteration < B3_GYROSCOPIC_ITERATIONS; ++gyroIteration) {
 				let w1 = omega2.x;
@@ -601,13 +646,13 @@ function b3IntegrateVelocitiesTask(block: b3SolverBlock, context: b3StepContext)
 			w = b3RotateVector(q, omega2);
 		}
 
-		states[i].linearVelocity = v;
-		states[i].angularVelocity = w;
+		store<b3Vec3>(state + FS_V, v);
+		store<b3Vec3>(state + FS_W, w);
 	}
 }
 
-function b3IntegratePositionsTask(block: b3SolverBlock, context: b3StepContext): void {
-	let states = context.states;
+unsafe function b3IntegratePositionsTask(block: b3SolverBlock, context: b3StepContext): void {
+	let states = b3ArrayData(context.states);
 	let h = context.h;
 	let maxLinearSpeed = context.maxLinearVelocity;
 	let maxAngularSpeed = B3_MAX_ROTATION * context.inv_dt;
@@ -616,7 +661,7 @@ function b3IntegratePositionsTask(block: b3SolverBlock, context: b3StepContext):
 
 	let endIndex = block.startIndex + <i32>block.count;
 	for (let i = block.startIndex; i < endIndex; ++i) {
-		let state = states[i];
+		let state = load<b3BodyState>(states + <usize>i * sizeof<b3BodyState>());
 
 		let v = state.linearVelocity;
 		let w = state.angularVelocity;
@@ -647,7 +692,7 @@ function b3IntegratePositionsTask(block: b3SolverBlock, context: b3StepContext):
 		state.angularVelocity = w;
 		state.deltaPosition = b3MulAdd(state.deltaPosition, h, v);
 		state.deltaRotation = b3IntegrateRotation(state.deltaRotation, b3MulSV(h, w));
-		states[i] = state;
+		store<b3BodyState>(states + <usize>i * sizeof<b3BodyState>(), state);
 	}
 }
 
@@ -1077,11 +1122,33 @@ function b3MakeBodyMoveId(index1: i32, world0: u16, generation: u16): b3BodyId {
 }
 
 // Implements b3ParallelForCallback
-function b3FinalizeBodiesTask(startIndex: i32, endIndex: i32, workerIndex: i32, stepContext: b3StepContext): void {
+// b3MulMM( b3MulMM( r, i ), b3Transpose( r ) ) with each b3MulMV sum in C's order, stored into dst
+@inline unsafe function b3StoreWorldInertia(dst: usize, r: b3Matrix3, i: b3Matrix3): void {
+	let axx = r.cx.x * i.cx.x + r.cy.x * i.cx.y + r.cz.x * i.cx.z;
+	let axy = r.cx.y * i.cx.x + r.cy.y * i.cx.y + r.cz.y * i.cx.z;
+	let axz = r.cx.z * i.cx.x + r.cy.z * i.cx.y + r.cz.z * i.cx.z;
+	let ayx = r.cx.x * i.cy.x + r.cy.x * i.cy.y + r.cz.x * i.cy.z;
+	let ayy = r.cx.y * i.cy.x + r.cy.y * i.cy.y + r.cz.y * i.cy.z;
+	let ayz = r.cx.z * i.cy.x + r.cy.z * i.cy.y + r.cz.z * i.cy.z;
+	let azx = r.cx.x * i.cz.x + r.cy.x * i.cz.y + r.cz.x * i.cz.z;
+	let azy = r.cx.y * i.cz.x + r.cy.y * i.cz.y + r.cz.y * i.cz.z;
+	let azz = r.cx.z * i.cz.x + r.cy.z * i.cz.y + r.cz.z * i.cz.z;
+	store<f32>(dst + 0, axx * r.cx.x + ayx * r.cy.x + azx * r.cz.x);
+	store<f32>(dst + 4, axy * r.cx.x + ayy * r.cy.x + azy * r.cz.x);
+	store<f32>(dst + 8, axz * r.cx.x + ayz * r.cy.x + azz * r.cz.x);
+	store<f32>(dst + 12, axx * r.cx.y + ayx * r.cy.y + azx * r.cz.y);
+	store<f32>(dst + 16, axy * r.cx.y + ayy * r.cy.y + azy * r.cz.y);
+	store<f32>(dst + 20, axz * r.cx.y + ayz * r.cy.y + azz * r.cz.y);
+	store<f32>(dst + 24, axx * r.cx.z + ayx * r.cy.z + azx * r.cz.z);
+	store<f32>(dst + 28, axy * r.cx.z + ayy * r.cy.z + azy * r.cz.z);
+	store<f32>(dst + 32, axz * r.cx.z + ayz * r.cy.z + azz * r.cz.z);
+}
+
+unsafe function b3FinalizeBodiesTask(startIndex: i32, endIndex: i32, workerIndex: i32, stepContext: b3StepContext): void {
 	let world = stepContext.world;
-	let bodies = world.bodies;
-	let sims = stepContext.sims;
-	let states = stepContext.states;
+	let bodies = b3ArrayData(world.bodies);
+	let sims = b3ArrayData(stepContext.sims);
+	let states = b3ArrayData(stepContext.states);
 
 	B3_ASSERT(endIndex <= world.bodyMoveEvents.length);
 
@@ -1092,7 +1159,7 @@ function b3FinalizeBodiesTask(startIndex: i32, endIndex: i32, workerIndex: i32, 
 	let worldId = world.worldId;
 
 	// The body move event array has should already have the correct size
-	let moveEvents = world.bodyMoveEvents;
+	let moveEvents = b3ArrayData(world.bodyMoveEvents);
 
 	let taskContext = world.taskContexts[workerIndex];
 	let awakeIslandBitSet = taskContext.awakeIslandBitSet;
@@ -1100,115 +1167,127 @@ function b3FinalizeBodiesTask(startIndex: i32, endIndex: i32, workerIndex: i32, 
 	let speculativeScalar = B3_SPECULATIVE_DISTANCE();
 
 	for (let simIndex = startIndex; simIndex < endIndex; ++simIndex) {
-		// Copies; the state is stored before continuous collision, the sim around it and at the end.
-		let state = states[simIndex];
-		let sim = sims[simIndex];
+		let state = states + <usize>simIndex * sizeof<b3BodyState>();
+		let sim = sims + <usize>simIndex * sizeof<b3BodySim>();
 
-		let v = state.linearVelocity;
-		let w = state.angularVelocity;
-		let localOmega = b3InvRotateVector(sim.transform.q, w);
-		let localDeltaRotation = b3InvRotateVector(sim.transform.q, state.deltaRotation.v);
+		let v = load<b3Vec3>(state + FS_V);
+		let w = load<b3Vec3>(state + FS_W);
+		let deltaPosition = load<b3Vec3>(state + FS_DP);
+		let deltaRotation = load<b3Quat>(state + FS_DQ);
+		let q = load<b3Quat>(sim + FSIM_Q);
+		let localOmega = b3InvRotateVector(q, w);
+		let localDeltaRotation = b3InvRotateVector(q, deltaRotation.v);
+		let bodyId = load<i32>(sim + FSIM_BODYID);
 
 		if (b3IsValidVec3(v) == false || b3IsValidVec3(w) == false) {
-			let name = b3FindNameWithDefault(world.names, bodies[sim.bodyId].nameId, "NULL");
+			let name = b3FindNameWithDefault(world.names, world.bodies[bodyId].nameId, "NULL");
 			b3Log("unstable: " + name);
 		}
 
 		B3_ASSERT(b3IsValidVec3(v));
 		B3_ASSERT(b3IsValidVec3(w));
 
-		sim.center = b3OffsetPos(sim.center, state.deltaPosition);
-		sim.transform.q = b3NormalizeQuat(b3MulQuat(state.deltaRotation, sim.transform.q));
+		let center = b3OffsetPos(load<b3Vec3>(sim + FSIM_CENTER), deltaPosition);
+		store<b3Vec3>(sim + FSIM_CENTER, center);
+		q = b3NormalizeQuat(b3MulQuat(deltaRotation, q));
+		store<b3Quat>(sim + FSIM_Q, q);
 
 		// Use the velocity of the farthest point on the body to account for rotation.
-		let velocityArc = b3ModifiedCross(b3Abs(localOmega), sim.maxExtent);
+		let maxExtent = load<b3Vec3>(sim + FSIM_MAXEXTENT);
+		let velocityArc = b3ModifiedCross(b3Abs(localOmega), maxExtent);
 		let maxVelocity = b3Length(v) + b3Length(velocityArc);
 
 		// Sleep needs to observe position correction as well as true velocity.
 		// q = [sin(theta/2) * v, cos(theta/2)]
 		// for small angles abs(theta) ~= 2 * length(sin(theta/2) * v)
-		let rotationArc = b3ModifiedCross(b3Abs(localDeltaRotation), sim.maxExtent);
-		let maxDeltaPosition: f32 = b3Length(state.deltaPosition) + 2.0 * b3Length(rotationArc);
+		let rotationArc = b3ModifiedCross(b3Abs(localDeltaRotation), maxExtent);
+		let maxDeltaPosition: f32 = b3Length(deltaPosition) + 2.0 * b3Length(rotationArc);
 
 		// Position correction is not as important for sleep as true velocity.
 		let positionSleepFactor: f32 = 0.5;
 		let sleepVelocity = b3MaxFloat(maxVelocity, positionSleepFactor * invTimeStep * maxDeltaPosition);
 
 		// reset state deltas
-		state.deltaPosition = b3Vec3_zero;
-		state.deltaRotation = b3Quat_identity;
+		store<b3Vec3>(state + FS_DP, b3Vec3_zero);
+		store<b3Quat>(state + FS_DQ, b3Quat_identity);
 
-		sim.transform.p = b3OffsetPos(sim.center, b3Neg(b3RotateVector(sim.transform.q, sim.localCenter)));
+		let p = b3OffsetPos(center, b3Neg(b3RotateVector(q, load<b3Vec3>(sim + FSIM_LOCALCENTER))));
+		store<b3Vec3>(sim + FSIM_P, p);
 
 		// cache miss here, however I need the shape list below
-		let bodyId = sim.bodyId;
-		bodies[bodyId].bodyMoveIndex = simIndex;
-		bodies[bodyId].sleepVelocity = sleepVelocity;
+		let body = bodies + <usize>bodyId * sizeof<b3Body>();
+		store<i32>(body + FB_BODYMOVEINDEX, simIndex);
+		store<f32>(body + FB_SLEEPVELOCITY, sleepVelocity);
 
-		moveEvents[simIndex].userData = bodies[bodyId].userData;
-		moveEvents[simIndex].transform = sim.transform;
-		moveEvents[simIndex].bodyId = b3MakeBodyMoveId(bodyId + 1, worldId, bodies[bodyId].generation);
-		moveEvents[simIndex].fellAsleep = false;
+		let moveEvent = b3BodyMoveEvent();
+		moveEvent.userData = load<u64>(body + FB_USERDATA);
+		moveEvent.transform = b3Transform(p, q);
+		moveEvent.bodyId = b3MakeBodyMoveId(bodyId + 1, worldId, load<u16>(body + FB_GENERATION));
+		moveEvent.fellAsleep = false;
+		store<b3BodyMoveEvent>(moveEvents + <usize>simIndex * sizeof<b3BodyMoveEvent>(), moveEvent);
 
 		// reset applied force and torque
-		sim.force = b3Vec3_zero;
-		sim.torque = b3Vec3_zero;
+		store<b3Vec3>(sim + FSIM_FORCE, b3Vec3_zero);
+		store<b3Vec3>(sim + FSIM_TORQUE, b3Vec3_zero);
 
 		// If you hit this then it means you deferred mass computation but never called b3Body_ApplyMassFromShapes
 		// or b3Body_SetMassData.
-		B3_ASSERT((bodies[bodyId].flags & b3_dirtyMass) == 0);
+		B3_ASSERT((load<u32>(body + FB_FLAGS) & b3_dirtyMass) == 0);
 
 		// Clear the transient flags (fast, speed capped, had TOI). These flags are conditionally set
 		// as part of the code below.
-		bodies[bodyId].flags &= ~b3_bodyTransientFlags;
-		sim.flags &= ~(b3_isFast | b3_bodyTransientFlags);
+		let stateFlags = load<u32>(state + FS_FLAGS);
+		let bodyFlags = (load<u32>(body + FB_FLAGS) & ~b3_bodyTransientFlags) | (stateFlags & b3_isSpeedCapped);
+		store<u32>(body + FB_FLAGS, bodyFlags);
+		let simFlags = load<u32>(sim + FSIM_FLAGS) & ~(b3_isFast | b3_bodyTransientFlags);
 
 		// The body state flag knows about speed capping (used for debug draw).
-		bodies[bodyId].flags |= state.flags & b3_isSpeedCapped;
-		state.flags &= ~b3_bodyTransientFlags;
+		store<u32>(state + FS_FLAGS, stateFlags & ~b3_bodyTransientFlags);
 
-		states[simIndex] = state;
-
-		let bodyFlags = bodies[bodyId].flags;
-		if (enableSleep == false || (bodyFlags & b3_enableSleep) == 0 || sleepVelocity > bodies[bodyId].sleepThreshold) {
+		if (enableSleep == false || (bodyFlags & b3_enableSleep) == 0 || sleepVelocity > load<f32>(body + FB_SLEEPTHRESHOLD)) {
 			// Body is not sleepy
-			bodies[bodyId].sleepTime = 0.0;
+			store<f32>(body + FB_SLEEPTIME, 0.0);
 
-			let safetyFactor = bodies[bodyId].safetyFactor;
+			let safetyFactor = load<f32>(body + FB_SAFETYFACTOR);
 			let maxMotion = b3MaxFloat(maxDeltaPosition, maxVelocity * timeStep);
-			if (bodies[bodyId].type == b3_dynamicBody && enableContinuous && maxMotion > safetyFactor * sim.minExtent) {
+			if (
+				load<i32>(body + FB_TYPE) == b3_dynamicBody &&
+				enableContinuous &&
+				maxMotion > safetyFactor * load<f32>(sim + FSIM_MINEXTENT)
+			) {
 				// This flag is used for debug draw and contact recycling.
-				sim.flags |= b3_isFast;
+				simFlags |= b3_isFast;
+				store<u32>(sim + FSIM_FLAGS, simFlags);
 
 				// Store in fast array for the continuous collision stage
 				// This is deterministic because the order of TOI sweeps doesn't matter
-				if ((sim.flags & b3_isBullet) != 0) {
+				if ((simFlags & b3_isBullet) != 0) {
 					let bulletIndex = b3AtomicFetchAddInt(stepContext.bulletBodyCount, 1);
 					stepContext.bulletBodies[bulletIndex] = simIndex;
 				} else {
-					sims[simIndex] = sim;
 					b3SolveContinuous(world, simIndex, taskContext, timeStep);
-					sim = sims[simIndex];
 				}
 			} else {
 				// Body is safe to advance
-				sim.center0 = sim.center;
-				sim.rotation0 = sim.transform.q;
+				store<u32>(sim + FSIM_FLAGS, simFlags);
+				store<b3Vec3>(sim + FSIM_CENTER0, center);
+				store<b3Quat>(sim + FSIM_ROTATION0, q);
 			}
 		} else {
 			// Body is safe to advance and is falling asleep
-			sim.center0 = sim.center;
-			sim.rotation0 = sim.transform.q;
-			bodies[bodyId].sleepTime += timeStep;
+			store<u32>(sim + FSIM_FLAGS, simFlags);
+			store<b3Vec3>(sim + FSIM_CENTER0, center);
+			store<b3Quat>(sim + FSIM_ROTATION0, q);
+			store<f32>(body + FB_SLEEPTIME, load<f32>(body + FB_SLEEPTIME) + timeStep);
 		}
 
-		// Update world space inverse inertia tensor.
-		let rotationMatrix = b3MakeMatrixFromQuat(sim.transform.q);
-		sim.invInertiaWorld = b3MulMM(b3MulMM(rotationMatrix, sim.invInertiaLocal), b3Transpose(rotationMatrix));
+		// Update world space inverse inertia tensor. The sweep may have moved the body.
+		let rotationMatrix = b3MakeMatrixFromQuat(load<b3Quat>(sim + FSIM_Q));
+		b3StoreWorldInertia(sim + FSIM_INVINERTIAWORLD, rotationMatrix, load<b3Matrix3>(sim + FSIM_INVINERTIALOCAL));
 
 		// Any single body in an island can keep it awake
-		let sleepTime = bodies[bodyId].sleepTime;
-		let islandId = bodies[bodyId].islandId;
+		let sleepTime = load<f32>(body + FB_SLEEPTIME);
+		let islandId = load<i32>(body + FB_ISLANDID);
 		let island = world.islands[islandId];
 		if (sleepTime < B3_TIME_TO_SLEEP) {
 			// keep island awake
@@ -1231,9 +1310,9 @@ function b3FinalizeBodiesTask(startIndex: i32, endIndex: i32, workerIndex: i32, 
 		// Update shapes AABBs
 		// For fast non-bullet bodies the AABB has already been updated in b3SolveContinuous
 		// For fast bullet bodies the AABB will be updated at a later stage
-		if ((sim.flags & b3_isFast) == 0) {
-			let transform = sim.transform;
-			let shapeId = bodies[bodyId].headShapeId;
+		if ((load<u32>(sim + FSIM_FLAGS) & b3_isFast) == 0) {
+			let transform = load<b3Transform>(sim + FSIM_TRANSFORM);
+			let shapeId = load<i32>(body + FB_HEADSHAPEID);
 			while (shapeId != B3_NULL_INDEX) {
 				let shape = world.shapes[shapeId];
 
@@ -1250,8 +1329,6 @@ function b3FinalizeBodiesTask(startIndex: i32, endIndex: i32, workerIndex: i32, 
 				shapeId = shape.nextShapeId;
 			}
 		}
-
-		sims[simIndex] = sim;
 	}
 }
 
