@@ -12,3 +12,13 @@ A debug build asserts at hull.c:544 (`twin->twin == edge`, reached from
 hull.c:1093 (`b3CheckConsistency` after `ConnectFaces`). In the hangs
 `ConnectEdges` merges a face with itself. Repro and seeds in `notes/hull.md`.
 Anyone building hulls from user or asset data can hit it.
+
+## Joint force getters that look wrong
+
+- `b3GetWheelJointForce` sums `lowerSuspensionLimit + upperSuspensionImpulse +
+  suspensionSpringImpulse`, adding a limit (a length) to impulses; the lower
+  suspension impulse was probably meant.
+- `b3GetPrismaticJointForce` adds `upperImpulse` where the other joints
+  subtract the upper limit impulse.
+
+Both only affect the reported force, not the simulation.
