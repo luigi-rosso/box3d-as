@@ -27,6 +27,8 @@ import {
 	b3Body_GetLinearVelocity,
 	b3Body_GetAngularVelocity,
 } from "./lib/box3d";
+// run.sh copies verify/scenes/scenes.as here, the mirror of the native bench's scenes.c
+import { Scene, Scene_Create, Scene_Step } from "./scenes/scenes";
 
 // Every body in creation order, for the state hash
 const g_bodies = new Array<b3BodyId>();
@@ -55,6 +57,9 @@ function stateHash(): u32 {
 const SCENE_PYRAMID: i32 = 0;
 const SCENE_LARGE_PYRAMID: i32 = 1;
 const SCENE_MANY_BODIES: i32 = 2;
+// Built by verify/scenes, as the native bench builds them
+const SCENE_CHAINS: i32 = 3;
+const SCENE_PLANK_PILE: i32 = 4;
 const STAGE_COUNT: i32 = 23;
 const WARMUP_STEPS: i32 = 1;
 const SUBSTEP_COUNT: i32 = 4;
@@ -74,14 +79,26 @@ function sceneIndex(): i32 {
 }
 
 function sceneName(scene: i32): string {
-	return scene == SCENE_PYRAMID ? "pyramid" : scene == SCENE_LARGE_PYRAMID ? "large_pyramid" : "many_bodies";
+	if (scene == SCENE_PYRAMID) {
+		return "pyramid";
+	}
+	if (scene == SCENE_LARGE_PYRAMID) {
+		return "large_pyramid";
+	}
+	if (scene == SCENE_CHAINS) {
+		return "chains";
+	}
+	if (scene == SCENE_PLANK_PILE) {
+		return "plank_pile";
+	}
+	return "many_bodies";
 }
 
 function stepCount(scene: i32): i32 {
 	if (isDefined(STEPS)) {
 		return STEPS;
 	}
-	return scene == SCENE_MANY_BODIES ? 100 : 200;
+	return scene == SCENE_MANY_BODIES ? 100 : scene >= SCENE_CHAINS ? 300 : 200;
 }
 
 function profileToArray(p: b3Profile, out: Float64Array): void {
@@ -221,8 +238,10 @@ export class Main extends Layout {
 	worldId: b3WorldId = b3WorldId();
 	stepMs: Float64Array = new Float64Array(0);
 	stageSum: Float64Array = new Float64Array(STAGE_COUNT);
+	stageMin: Float64Array = new Float64Array(STAGE_COUNT);
 	stages: Float64Array = new Float64Array(STAGE_COUNT);
 	createMs: f64 = 0;
+	sceneData: Scene = new Scene();
 
 	override init(context: Context): bool {
 		this.scene = sceneIndex();
@@ -230,15 +249,23 @@ export class Main extends Layout {
 		this.stepMs = new Float64Array(this.steps - WARMUP_STEPS);
 
 		let t0 = clock();
-		let worldDef = b3DefaultWorldDef();
-		worldDef.workerCount = 1;
-		this.worldId = b3CreateWorld(worldDef);
-		if (this.scene == SCENE_PYRAMID) {
-			createPyramid(this.worldId, 10);
-		} else if (this.scene == SCENE_LARGE_PYRAMID) {
-			createPyramid(this.worldId, 100);
+		if (this.scene >= SCENE_CHAINS) {
+			Scene_Create(this.sceneData, sceneName(this.scene), 1);
+			this.worldId = this.sceneData.worldId;
+			for (let i = 0; i < this.sceneData.bodies.length; ++i) {
+				g_bodies.push(this.sceneData.bodies[i]);
+			}
 		} else {
-			createManyPyramids(this.worldId);
+			let worldDef = b3DefaultWorldDef();
+			worldDef.workerCount = 1;
+			this.worldId = b3CreateWorld(worldDef);
+			if (this.scene == SCENE_PYRAMID) {
+				createPyramid(this.worldId, 10);
+			} else if (this.scene == SCENE_LARGE_PYRAMID) {
+				createPyramid(this.worldId, 100);
+			} else {
+				createManyPyramids(this.worldId);
+			}
 		}
 		this.createMs = (clock() - t0) * 1000.0;
 		console.log("BENCH start scene=" + sceneName(this.scene) + " steps=" + this.steps.toString() +
@@ -252,7 +279,11 @@ export class Main extends Layout {
 		}
 
 		let t0 = clock();
-		b3World_Step(this.worldId, 1.0 / 60.0, SUBSTEP_COUNT);
+		if (this.scene >= SCENE_CHAINS) {
+			Scene_Step(this.sceneData, this.stepIndex);
+		} else {
+			b3World_Step(this.worldId, 1.0 / 60.0, SUBSTEP_COUNT);
+		}
 		let ms = (clock() - t0) * 1000.0;
 
 		if (this.stepIndex >= WARMUP_STEPS) {
@@ -260,6 +291,7 @@ export class Main extends Layout {
 			profileToArray(b3World_GetProfile(this.worldId), this.stages);
 			for (let k = 0; k < STAGE_COUNT; ++k) {
 				this.stageSum[k] += this.stages[k];
+				this.stageMin[k] = this.stepIndex == WARMUP_STEPS ? this.stages[k] : Math.min(this.stageMin[k], this.stages[k]);
 			}
 		}
 
@@ -287,6 +319,10 @@ export class Main extends Layout {
 			" median=" + formatFixed(median(sorted), 4) + " max=" + formatFixed(sorted[timed - 1], 4);
 		for (let k = 0; k < STAGE_COUNT; ++k) {
 			line += " " + STAGE_NAMES[k] + "=" + formatFixed(this.stageSum[k] / <f64>timed, 4);
+		}
+		// Per stage minimum over the timed steps, which a loaded machine disturbs least
+		for (let k = 0; k < STAGE_COUNT; ++k) {
+			line += " min_" + STAGE_NAMES[k] + "=" + formatFixed(this.stageMin[k], 4);
 		}
 		line += " hash=" + stateHash().toString();
 		console.log(line);

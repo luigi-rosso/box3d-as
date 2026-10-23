@@ -13,7 +13,7 @@
 
 static const char* s_sceneNames[] = {
 	"pyramid",	   "large_pyramid", "card_house", "chains",		 "capsule_mesh",
-	"heightfield", "bullets",		"mover",	  "many_bodies",
+	"heightfield", "bullets",		"mover",	  "many_bodies", "plank_pile",
 };
 
 int Scene_GetCount( void )
@@ -1418,6 +1418,75 @@ static void CreateManyPyramids( Scene* scene )
 	}
 }
 
+// Not a sample: two layers of 16 x 16 boxes, each under a dynamic plank that touches all 256, so the plank's
+// contacts overflow the graph colors, plus a hub with 40 distance joint spokes that overflows the joint colors.
+// Sleep is off so every step solves the whole pile.
+static void CreatePlankPile( Scene* scene )
+{
+	b3World_EnableSleeping( scene->worldId, false );
+	Scene_AddGroundBox( scene, 30.0f );
+
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	b3BoxHull box = b3MakeBoxHull( 0.4f, 0.4f, 0.4f );
+	b3BoxHull plank = b3MakeBoxHull( 8.2f, 0.25f, 8.2f );
+
+	float y = 0.4f;
+	for ( int layer = 0; layer < 2; ++layer )
+	{
+		for ( int i = 0; i < 16; ++i )
+		{
+			for ( int j = 0; j < 16; ++j )
+			{
+				b3BodyDef bodyDef = b3DefaultBodyDef();
+				bodyDef.type = b3_dynamicBody;
+				bodyDef.position = (b3Pos){ -7.5f + 1.0f * (float)i, y, -7.5f + 1.0f * (float)j };
+				b3BodyId bodyId = Scene_AddBody( scene, &bodyDef );
+				b3CreateHullShape( bodyId, &shapeDef, &box.base );
+			}
+		}
+
+		y += 0.4f + 0.25f;
+		b3BodyDef bodyDef = b3DefaultBodyDef();
+		bodyDef.type = b3_dynamicBody;
+		bodyDef.position = (b3Pos){ 0.0f, y, 0.0f };
+		b3BodyId plankId = Scene_AddBody( scene, &bodyDef );
+		b3CreateHullShape( plankId, &shapeDef, &plank.base );
+		y += 0.25f + 0.4f;
+	}
+
+	b3BodyDef hubDef = b3DefaultBodyDef();
+	hubDef.type = b3_dynamicBody;
+	hubDef.position = (b3Pos){ 0.0f, 10.0f, 15.0f };
+	hubDef.gravityScale = 0.0f;
+	hubDef.angularVelocity = (b3Vec3){ 0.0f, 1.0f, 0.2f };
+	b3BodyId hubId = Scene_AddBody( scene, &hubDef );
+	b3Sphere hubSphere = { { 0.0f, 0.0f, 0.0f }, 0.5f };
+	b3CreateSphereShape( hubId, &shapeDef, &hubSphere );
+
+	for ( int i = 0; i < 40; ++i )
+	{
+		float angle = 2.0f * B3_PI * (float)i / 40.0f;
+		b3CosSin cs = b3ComputeCosSin( angle );
+
+		b3BodyDef bodyDef = b3DefaultBodyDef();
+		bodyDef.type = b3_dynamicBody;
+		bodyDef.position = (b3Pos){ 3.0f * cs.cosine, 10.0f + 0.1f * (float)( i % 3 ), 15.0f + 3.0f * cs.sine };
+		bodyDef.gravityScale = 0.0f;
+		b3BodyId bodyId = Scene_AddBody( scene, &bodyDef );
+		b3Sphere sphere = { { 0.0f, 0.0f, 0.0f }, 0.15f };
+		b3CreateSphereShape( bodyId, &shapeDef, &sphere );
+
+		b3DistanceJointDef jointDef = b3DefaultDistanceJointDef();
+		jointDef.base.bodyIdA = hubId;
+		jointDef.base.bodyIdB = bodyId;
+		jointDef.length = 3.0f;
+		jointDef.enableSpring = ( i % 2 ) == 0;
+		jointDef.hertz = 2.0f;
+		jointDef.dampingRatio = 0.3f;
+		b3CreateDistanceJoint( scene->worldId, &jointDef );
+	}
+}
+
 bool Scene_Create( Scene* scene, const char* name, int workerCount )
 {
 	memset( scene, 0, sizeof( Scene ) );
@@ -1463,6 +1532,10 @@ bool Scene_Create( Scene* scene, const char* name, int workerCount )
 	else if ( strcmp( name, "many_bodies" ) == 0 )
 	{
 		CreateManyPyramids( scene );
+	}
+	else if ( strcmp( name, "plank_pile" ) == 0 )
+	{
+		CreatePlankPile( scene );
 	}
 	else
 	{

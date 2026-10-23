@@ -14,6 +14,7 @@ OUT=${OUT:-$(mktemp -d)}
 CACHE=${RIVE_AOT_CACHE_DIR:-$OUT/aotcache}
 mkdir -p "$OUT" "$CACHE"
 rsync -a --delete "$HERE/../../lib/" "$HERE/lib/"
+mkdir -p "$HERE/scenes" && sed "s|\"../../lib/|\"../lib/|" "$HERE/../../verify/scenes/scenes.as" > "$HERE/scenes/scenes.as"
 # WASM_SIMD=off bakes the scalar artifact from a copy of the project with wasmSimd: off
 PROJECT=$HERE
 if [ "${WASM_SIMD:-on}" = off ]; then

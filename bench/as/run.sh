@@ -12,13 +12,14 @@ WAMRC=${RIVE_WAMRC:-$HOME/Projects/tools/wamrc}
 ROUNDS=${ROUNDS:-3}
 NATIVE_REPEATS=${NATIVE_REPEATS:-3}
 # scene:steps:define, run on the AOT tier
-AOT_SCENES=${AOT_SCENES:-large_pyramid:200:1 many_bodies:100:2 pyramid:200:0}
+AOT_SCENES=${AOT_SCENES:-large_pyramid:200:1 many_bodies:100:2 pyramid:200:0 chains:300:3 plank_pile:300:4}
 # run on the interpreter
 INTERP_SCENES=${INTERP_SCENES:-pyramid:200:0}
 CACHE=${RIVE_AOT_CACHE_DIR:-$HERE/out/aotcache}
 mkdir -p "$HERE/out" "$CACHE"
 LOG="$HERE/out/session_$(date +%Y%m%d_%H%M%S).log"
 rsync -a --delete "$HERE/../../lib/" "$HERE/lib/"
+mkdir -p "$HERE/scenes" && sed "s|\"../../lib/|\"../lib/|" "$HERE/../../verify/scenes/scenes.as" > "$HERE/scenes/scenes.as"
 # The scalar artifact bakes from a copy of the project with wasmSimd: off, outside it so the CLI does not
 # compile the copy as part of the project. WASM_SIMD=off runs every scene on it.
 SCALAR_PROJECT=${TMPDIR:-/tmp}/box3d_bench_scalar_project
