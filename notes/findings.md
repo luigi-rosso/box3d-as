@@ -95,3 +95,12 @@ release build; the port guards hot asserts with a constant.
 ## `FixedArray` is capped at 255 elements
 
 C's 512 entry stack arrays cannot be locals; the port uses module statics.
+
+## A float literal in a nested ternary types as f64
+
+```as
+let t: f32 = m == 0 ? 0.0 : m == 1 ? 1.0 : x; // cannot implicitly convert f64 to f32
+let u: f32 = m == 0 ? 0.0 : x;                // fine
+```
+
+Workaround: `<f32>0.0`.
