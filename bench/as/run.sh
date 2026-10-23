@@ -20,7 +20,7 @@ mkdir -p "$HERE/out" "$CACHE"
 LOG="$HERE/out/session_$(date +%Y%m%d_%H%M%S).log"
 rsync -a --delete "$HERE/../../lib/" "$HERE/lib/"
 # The scalar artifact bakes from a copy of the project with wasmSimd: off, outside it so the CLI does not
-# compile the copy as part of the project. WASM_SIMD=off runs the AOT scenes on it too.
+# compile the copy as part of the project. WASM_SIMD=off runs every scene on it.
 SCALAR_PROJECT=${TMPDIR:-/tmp}/box3d_bench_scalar_project
 mkdir -p "$SCALAR_PROJECT"
 rsync -a --delete --exclude out --exclude build "$HERE/" "$SCALAR_PROJECT/"
@@ -32,15 +32,13 @@ as_run() {
 	tier=$1 scene=$2 steps=$3 define=$4
 	echo "UPTIME $(uptime)"
 	echo "AS tier=$tier scene=$scene"
+	cd "$PROJECT"
 	if [ "$tier" = aot ]; then
-		cd "$PROJECT"
 		RIVE_WAMRC="$WAMRC" RIVE_WASM_AOT_SYNC=o3 RIVE_AOT_CACHE_DIR="$CACHE" \
 			"$RIVE" . --aot --bench=$((steps + 10)) --define=SCENE="$define" --define=STEPS="$steps" 2>&1
 	else
-		# WAMR's fast interpreter traps on the SIMD artifact (notes/findings.md), so it runs the scalar one
-		cd "$SCALAR_PROJECT"
 		env -u RIVE_WAMRC "$RIVE" . --bench=$((steps + 10)) --define=SCENE="$define" --define=STEPS="$steps" 2>&1
-	fi | grep -E "script tier|BENCH RESULT|bench memory"
+	fi | grep -E "script tier|BENCH RESULT|bench memory|trapped"
 }
 
 {
@@ -67,3 +65,8 @@ as_run() {
 } | tee "$LOG"
 
 python3 "$HERE/table.py" "$LOG"
+
+# The interpreter runs the SIMD artifact only while every v128 local stays below frame cell 256
+if [ "${WASM_SIMD:-on}" != off ]; then
+	python3 "$HERE/tools/v128cells.py" "$(ls -t "$CACHE"/*/*.wasm | head -1)" 240 || true
+fi
