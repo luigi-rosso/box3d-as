@@ -97,6 +97,11 @@ export class b3BroadPhase {
 	// todo pairSet can grow quite large on the first time step and remain large
 	pairSet: b3HashSet = new b3HashSet();
 
+	// C's per step stack buffers, kept and grown across steps
+	siblingBuffer: StaticArray<i32> = b3_emptySiblings;
+	pairKeyBuffer: StaticArray<u64> = new StaticArray<u64>(0);
+	pairContexts: Array<b3PairContext> = new Array<b3PairContext>();
+
 	constructor() {
 		for (let i = 0; i < b3_bodyTypeCount; ++i) {
 			this.trees[i] = new b3DynamicTree();
@@ -301,26 +306,27 @@ function b3ShouldCreatePair(world: b3World, shapeIdA: i32, shapeIdB: i32): bool 
 	return true;
 }
 
+// The child query runs no user code, so one context serves every compound pair and the tree
+// callback captures nothing
 class b3CompoundPairContext {
-	pairContext: b3PairContext;
-	pairSet: b3HashSet;
-	compoundShapeId: i32;
-	otherShapeId: i32;
+	pairContext: b3PairContext? = null;
+	pairSet: b3HashSet? = null;
+	compoundShapeId: i32 = 0;
+	otherShapeId: i32 = 0;
+}
 
-	constructor(pairContext: b3PairContext, pairSet: b3HashSet, compoundShapeId: i32, otherShapeId: i32) {
-		this.pairContext = pairContext;
-		this.pairSet = pairSet;
-		this.compoundShapeId = compoundShapeId;
-		this.otherShapeId = otherShapeId;
-	}
+const s_compoundPairContext = new b3CompoundPairContext();
+
+function b3CompoundChildTreeCallback(proxyId: i32, userData: u64): bool {
+	return b3CompoundChildCallback(proxyId, userData, s_compoundPairContext);
 }
 
 function b3CompoundChildCallback(_proxyId: i32, userData: u64, compoundContext: b3CompoundPairContext): bool {
 	let childIndex = <i32>userData;
 
 	let key = b3ShapePairKey(compoundContext.compoundShapeId, compoundContext.otherShapeId, childIndex);
-	if (b3ContainsKey(compoundContext.pairSet, key) == false) {
-		compoundContext.pairContext.pairKeys.push(key);
+	if (b3ContainsKey(compoundContext.pairSet!, key) == false) {
+		compoundContext.pairContext!.pairKeys.push(key);
 	}
 
 	return true;
@@ -343,14 +349,16 @@ function b3EmitCompoundPairs(context: b3PairContext, compoundShapeId: i32, other
 	let compoundTransform = b3ToRelativeTransform(b3GetBodyTransform(world, compoundShape.bodyId), b3Pos_zero);
 	let localAABB = b3AABB_Transform(b3InvertTransform(compoundTransform), otherAABB);
 
-	let compoundContext = new b3CompoundPairContext(context, world.broadPhase.pairSet, compoundShapeId, otherShapeId);
+	let compoundContext = s_compoundPairContext;
+	compoundContext.pairContext = context;
+	compoundContext.pairSet = world.broadPhase.pairSet;
+	compoundContext.compoundShapeId = compoundShapeId;
+	compoundContext.otherShapeId = otherShapeId;
 
 	let startCount = context.pairKeys.length;
 
 	let view = b3GetCompoundTreeView(compoundShape.compound!);
-	b3TreeView_Query(view, localAABB, B3_DEFAULT_MASK_BITS, false, (proxyId: i32, userData: u64): bool =>
-		b3CompoundChildCallback(proxyId, userData, compoundContext),
-	);
+	b3TreeView_Query(view, localAABB, B3_DEFAULT_MASK_BITS, false, b3CompoundChildTreeCallback);
 
 	if (context.pairKeys.length > startCount && b3ShouldCreatePair(world, compoundShapeId, otherShapeId) == false) {
 		b3Array_Resize(context.pairKeys, startCount);
@@ -546,13 +554,28 @@ function b3CollideCrossPairs(
 }
 
 // This takes moved internal nodes and collides their sub-trees against each other.
+// One pair context per worker, reset for each task
+function b3AcquirePairContext(world: b3World, workerIndex: i32): b3PairContext {
+	let contexts = world.broadPhase.pairContexts;
+	while (contexts.length <= workerIndex) {
+		contexts.push(new b3PairContext(world, world.taskContexts[contexts.length].pairKeys));
+	}
+
+	let context = contexts[workerIndex];
+	context.world = world;
+	context.pairKeys = world.taskContexts[workerIndex].pairKeys;
+	context.batchCount = 0;
+	context.checkCompounds = false;
+	return context;
+}
+
 function b3SelfPairsTask(startIndex: i32, endIndex: i32, workerIndex: i32, world: b3World): void {
 	let bp = world.broadPhase;
 	let tree = bp.trees[b3_dynamicBody];
 	let nodes = tree.nodes;
 	let siblingIndices = bp.movedSiblings;
 
-	let pairContext = new b3PairContext(world, world.taskContexts[workerIndex].pairKeys);
+	let pairContext = b3AcquirePairContext(world, workerIndex);
 
 	for (let i = startIndex; i < endIndex; ++i) {
 		let nodeIndex = siblingIndices[i];
@@ -563,6 +586,10 @@ function b3SelfPairsTask(startIndex: i32, endIndex: i32, workerIndex: i32, world
 }
 
 const B3_CROSS_SEED_COUNT: i32 = 64;
+
+// C's stack buffers for the cross seeds and their search queue
+const s_crossQueue = new StaticArray<b3NodePair>(2 * B3_CROSS_SEED_COUNT);
+const s_crossSeeds = new StaticArray<b3NodePair>(2 * B3_CROSS_SEED_COUNT);
 
 // This does a serial cross-tree breadth first search until the queue is full. Then it returns
 // the queue pairs as seeds for a parallel search. C's seeds pointer is seeds plus seedBase.
@@ -577,7 +604,7 @@ function b3GatherCrossSeeds(
 
 	// Breadth-first search from the two roots as one pair. An empty tree has a sentinel root that
 	// survives nothing.
-	let queue = new StaticArray<b3NodePair>(2 * B3_CROSS_SEED_COUNT);
+	let queue = s_crossQueue;
 	let mask = 2 * B3_CROSS_SEED_COUNT - 1;
 	let head = 0;
 	let tail = 0;
@@ -643,7 +670,7 @@ function b3CrossPairsTask(startIndex: i32, endIndex: i32, workerIndex: i32, cros
 	let kinematicNodes = bp.trees[b3_kinematicBody].nodes;
 	let dynamicNodes = bp.trees[b3_dynamicBody].nodes;
 
-	let pairContext = new b3PairContext(world, world.taskContexts[workerIndex].pairKeys);
+	let pairContext = b3AcquirePairContext(world, workerIndex);
 
 	// Static seeds come first, so the two passes are contiguous sub-ranges. The batch is drained
 	// between them because only the static pass can meet a compound.
@@ -689,11 +716,7 @@ function b3EnqueueTreeUpdate(world: b3World): void {
 }
 
 class b3PairKeySorter {
-	pairKeys: StaticArray<u64>;
-
-	constructor(pairKeys: StaticArray<u64>) {
-		this.pairKeys = pairKeys;
-	}
+	pairKeys: StaticArray<u64> = new StaticArray<u64>(0);
 
 	@inline less(i: i32, j: i32): bool {
 		return this.pairKeys[i] < this.pairKeys[j];
@@ -705,6 +728,8 @@ class b3PairKeySorter {
 		this.pairKeys[j] = tmp_;
 	}
 }
+
+const s_pairKeySorter = new b3PairKeySorter();
 
 export function b3UpdateBroadPhasePairs(world: b3World): void {
 	let bp = world.broadPhase;
@@ -727,11 +752,14 @@ export function b3UpdateBroadPhasePairs(world: b3World): void {
 		// Get the sibling pairs of the dynamic body tree that have moved.
 		let dynamicTree = bp.trees[b3_dynamicBody];
 		let pairCapacity = b3MaxInt(dynamicTree.nodeEnd / 2, 1);
-		bp.movedSiblings = new StaticArray<i32>(pairCapacity);
+		if (bp.siblingBuffer.length < pairCapacity) {
+			bp.siblingBuffer = new StaticArray<i32>(b3MaxInt(pairCapacity, 2 * bp.siblingBuffer.length));
+		}
+		bp.movedSiblings = bp.siblingBuffer;
 		let dynamicMoveCount = b3GatherMovedSiblings(dynamicTree, bp.movedSiblings);
 
 		// Get seeds for colliding against the static and kinematic trees.
-		let crossSeeds = new StaticArray<b3NodePair>(2 * B3_CROSS_SEED_COUNT);
+		let crossSeeds = s_crossSeeds;
 		let staticSeedCount = b3GatherCrossSeeds(dynamicTree, bp.trees[b3_staticBody], crossSeeds, 0);
 		B3_ASSERT(staticSeedCount <= B3_CROSS_SEED_COUNT);
 		let kinematicSeedCount = b3GatherCrossSeeds(dynamicTree, bp.trees[b3_kinematicBody], crossSeeds, staticSeedCount);
@@ -772,7 +800,10 @@ export function b3UpdateBroadPhasePairs(world: b3World): void {
 		pairCount += world.taskContexts[i].pairKeys.length;
 	}
 
-	let pairKeys = new StaticArray<u64>(b3MaxInt(pairCount, 1));
+	if (bp.pairKeyBuffer.length < pairCount) {
+		bp.pairKeyBuffer = new StaticArray<u64>(b3MaxInt(pairCount, 2 * bp.pairKeyBuffer.length));
+	}
+	let pairKeys = bp.pairKeyBuffer;
 	let keyCount = 0;
 	for (let i = 0; i < world.workerCount; ++i) {
 		let workerKeys = world.taskContexts[i].pairKeys;
@@ -786,7 +817,8 @@ export function b3UpdateBroadPhasePairs(world: b3World): void {
 	B3_ASSERT(keyCount == pairCount);
 
 	if (pairCount > 1) {
-		Q_LOOP<b3PairKeySorter>(pairCount, new b3PairKeySorter(pairKeys));
+		s_pairKeySorter.pairKeys = pairKeys;
+		Q_LOOP<b3PairKeySorter>(pairCount, s_pairKeySorter);
 	}
 
 	for (let i = 0; i < keyCount; ++i) {

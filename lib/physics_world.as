@@ -308,6 +308,9 @@ export class b3World {
 
 	// Per thread storage
 	taskContexts: Array<b3TaskContext> = new Array<b3TaskContext>();
+
+	// C's per step stack buffer of awake contact indices for the collide task, kept across steps
+	collideContactIndices: StaticArray<i32> = new StaticArray<i32>(0);
 	sensorTaskContexts: Array<b3SensorTaskContext> = new Array<b3SensorTaskContext>();
 
 	bodyMoveEvents: Array<b3BodyMoveEvent> = new Array<b3BodyMoveEvent>();
@@ -1020,7 +1023,10 @@ function b3Collide(context: b3StepContext): void {
 		return;
 	}
 
-	let contactIndices = new StaticArray<i32>(contactCount);
+	if (world.collideContactIndices.length < contactCount) {
+		world.collideContactIndices = new StaticArray<i32>(b3MaxInt(contactCount, 2 * world.collideContactIndices.length));
+	}
+	let contactIndices = world.collideContactIndices;
 
 	let contactIndex = 0;
 	for (let i = 0; i < B3_GRAPH_COLOR_COUNT; ++i) {

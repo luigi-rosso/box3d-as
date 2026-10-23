@@ -42,7 +42,7 @@ import { b3ParallelFor } from "./parallel_for";
 import { b3World, b3_disabledSet } from "./physics_world";
 import {
 	b3IsConvex,
-	b3MakeShapeProxy,
+	b3SetShapeProxy,
 	b3Shape,
 	b3ShouldShapesCollide,
 	b3_enableCustomFiltering,
@@ -83,27 +83,27 @@ export class b3SensorTaskContext {
 
 // functions from sensor.c follow
 
+// C's per sensor stack context. The sensor task never nests, so one context serves every sensor
+// and the tree callback captures nothing.
 class b3SensorQueryContext {
-	world: b3World;
-	taskContext: b3SensorTaskContext;
-	sensor: b3Sensor;
-	sensorShape: b3Shape;
-	transform: b3Transform;
-
-	constructor(
-		world: b3World,
-		taskContext: b3SensorTaskContext,
-		sensor: b3Sensor,
-		sensorShape: b3Shape,
-		transform: b3Transform,
-	) {
-		this.world = world;
-		this.taskContext = taskContext;
-		this.sensor = sensor;
-		this.sensorShape = sensorShape;
-		this.transform = transform;
-	}
+	world: b3World? = null;
+	taskContext: b3SensorTaskContext? = null;
+	sensor: b3Sensor? = null;
+	sensorShape: b3Shape? = null;
+	transform: b3Transform = b3Transform();
 }
+
+const s_sensorQueryContext = new b3SensorQueryContext();
+
+function b3SensorTreeCallback(proxyId: i32, userData: u64): bool {
+	return b3SensorQueryCallback(proxyId, userData, s_sensorQueryContext);
+}
+
+// C's stack proxies of b3OverlapSensor, which never nests
+const s_visitorPoints = new StaticArray<b3Vec3>(2);
+const s_visitorProxy = new b3ShapeProxy();
+const s_sensorLocalPoints = new StaticArray<b3Vec3>(B3_MAX_SHAPE_CAST_POINTS);
+const s_sensorLocalProxy = new b3ShapeProxy();
 
 function b3OverlapSensor(
 	sensorShape: b3Shape,
@@ -113,13 +113,13 @@ function b3OverlapSensor(
 ): bool {
 	let type = sensorShape.type;
 
-	let proxy = b3MakeShapeProxy(visitorShape);
+	let proxy = b3SetShapeProxy(s_visitorProxy, visitorShape, s_visitorPoints);
 
 	// Get the visitor shape in the frame of the sensor
 	let relativeTransform = b3InvMulTransforms(sensorTransform, visitorTransform);
 
-	let localPoints = new StaticArray<b3Vec3>(B3_MAX_SHAPE_CAST_POINTS);
-	let localProxy = new b3ShapeProxy();
+	let localPoints = s_sensorLocalPoints;
+	let localProxy = s_sensorLocalProxy;
 
 	localProxy.count = b3MinInt(proxy.count, B3_MAX_SHAPE_CAST_POINTS);
 	for (let i = 0; i < localProxy.count; ++i) {
@@ -173,14 +173,14 @@ function b3OverlapSensor(
 function b3SensorQueryCallback(_proxyId: i32, userData: u64, queryContext: b3SensorQueryContext): bool {
 	let shapeId = <i32>userData;
 
-	let sensorShape = queryContext.sensorShape;
+	let sensorShape = queryContext.sensorShape!;
 	let sensorShapeId = sensorShape.id;
 
 	if (shapeId == sensorShapeId) {
 		return true;
 	}
 
-	let world = queryContext.world;
+	let world = queryContext.world!;
 	let otherShape = world.shapes[shapeId];
 
 	// Visitors must be convex.
@@ -205,7 +205,7 @@ function b3SensorQueryCallback(_proxyId: i32, userData: u64, queryContext: b3Sen
 
 	// Custom user filter
 	if ((sensorShape.flags & b3_enableCustomFiltering) != 0 || (otherShape.flags & b3_enableCustomFiltering) != 0) {
-		let customFilterFcn = queryContext.world.customFilterFcn;
+		let customFilterFcn = world.customFilterFcn;
 		if (customFilterFcn != null) {
 			let idA = b3ShapeId();
 			idA.index1 = sensorShapeId + 1;
@@ -230,7 +230,7 @@ function b3SensorQueryCallback(_proxyId: i32, userData: u64, queryContext: b3Sen
 	}
 
 	// Record the overlap
-	let sensor = queryContext.sensor;
+	let sensor = queryContext.sensor!;
 	let shapeRef = b3Array_Emplace(sensor.overlaps2);
 	sensor.overlaps2[shapeRef].shapeId = shapeId;
 	sensor.overlaps2[shapeRef].generation = otherShape.generation;
@@ -241,11 +241,7 @@ function b3SensorQueryCallback(_proxyId: i32, userData: u64, queryContext: b3Sen
 // b3CompareVisitors never returns 0, so it is the less than below. libc qsort breaks ties its own
 // way, which only shows when two visitors share a shape id but not a generation.
 class b3VisitorSorter {
-	visitors: Array<b3Visitor>;
-
-	constructor(visitors: Array<b3Visitor>) {
-		this.visitors = visitors;
-	}
+	visitors: Array<b3Visitor> = new Array<b3Visitor>();
 
 	@inline less(i: i32, j: i32): bool {
 		return this.visitors[i].shapeId < this.visitors[j].shapeId;
@@ -257,6 +253,8 @@ class b3VisitorSorter {
 		this.visitors[j] = tmp;
 	}
 }
+
+const s_visitorSorter = new b3VisitorSorter();
 
 function b3SensorTask(startIndex: i32, endIndex: i32, workerIndex: i32, world: b3World): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(workerIndex < world.workerCount);
@@ -292,12 +290,17 @@ function b3SensorTask(startIndex: i32, endIndex: i32, workerIndex: i32, world: b
 
 		let transform = b3ToRelativeTransform(b3GetBodyTransformQuick(world, sensorShape.bodyId), b3Pos_zero);
 
-		let queryContext = new b3SensorQueryContext(world, taskContext, sensor, sensorShape, transform);
+		let queryContext = s_sensorQueryContext;
+		queryContext.world = world;
+		queryContext.taskContext = taskContext;
+		queryContext.sensor = sensor;
+		queryContext.sensorShape = sensorShape;
+		queryContext.transform = transform;
 
 		if (B3_ASSERT_ENABLED) B3_ASSERT(sensorShape.sensorIndex == sensorIndex);
 		let queryBounds = sensorShape.aabb;
 
-		let callback = (proxyId: i32, userData: u64): bool => b3SensorQueryCallback(proxyId, userData, queryContext);
+		let callback = b3SensorTreeCallback;
 
 		// Query all trees
 		b3DynamicTree_Query(trees[0], queryBounds, sensorShape.filter.maskBits, false, callback);
@@ -306,7 +309,8 @@ function b3SensorTask(startIndex: i32, endIndex: i32, workerIndex: i32, world: b
 
 		// Sort the overlaps to enable finding begin and end events.
 		if (sensor.overlaps2.length > 1) {
-			Q_LOOP<b3VisitorSorter>(sensor.overlaps2.length, new b3VisitorSorter(sensor.overlaps2));
+			s_visitorSorter.visitors = sensor.overlaps2;
+			Q_LOOP<b3VisitorSorter>(sensor.overlaps2.length, s_visitorSorter);
 		}
 
 		// Remove duplicates from overlaps2 (sorted). Duplicates are possible due to the hit events appended earlier.
