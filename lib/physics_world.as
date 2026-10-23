@@ -729,25 +729,36 @@ export function b3GetMaxWorldCount(): i32 {
 	return b3_maxWorldCount;
 }
 
-// Returns a copy; the collide task only reads the sim.
-function b3ResolveContactBodySim(
+// C returns a pointer to the sim; here the sim array and the index within it, so the collide
+// task reads only the fields it needs.
+function b3ResolveContactBodySims(
 	world: b3World,
 	awakeSims: Array<b3BodySim>,
 	staticSims: Array<b3BodySim>,
 	encodedIndex: i32,
 	bodyId: i32,
-): b3BodySim {
+): Array<b3BodySim> {
 	if (encodedIndex >= 0) {
-		return awakeSims[encodedIndex];
+		return awakeSims;
 	}
 
 	if (b3IsStaticSimIndex(encodedIndex)) {
-		return staticSims[-encodedIndex - 2];
+		return staticSims;
 	}
 
-	let body = world.bodies[bodyId];
-	let set = world.solverSets[body.setIndex];
-	return set.bodySims[body.localIndex];
+	return world.solverSets[world.bodies[bodyId].setIndex].bodySims;
+}
+
+@inline function b3ResolveContactBodySimIndex(world: b3World, encodedIndex: i32, bodyId: i32): i32 {
+	if (encodedIndex >= 0) {
+		return encodedIndex;
+	}
+
+	if (b3IsStaticSimIndex(encodedIndex)) {
+		return -encodedIndex - 2;
+	}
+
+	return world.bodies[bodyId].localIndex;
 }
 
 function b3CollideTask(startIndex: i32, endIndex: i32, workerIndex: i32, stepContext: b3StepContext): void {
@@ -792,15 +803,19 @@ function b3CollideTask(startIndex: i32, endIndex: i32, workerIndex: i32, stepCon
 		// Update contact respecting shape/body order (A,B)
 		let encodedA = contact.encodedBodySimA;
 		let encodedB = contact.encodedBodySimB;
-		let bodySimA = b3ResolveContactBodySim(world, awakeSims, staticSims, encodedA, contact.edges[0].bodyId);
-		let bodySimB = b3ResolveContactBodySim(world, awakeSims, staticSims, encodedB, contact.edges[1].bodyId);
+		let bodyIdA = contact.edges[0].bodyId;
+		let bodyIdB = contact.edges[1].bodyId;
+		let simsA = b3ResolveContactBodySims(world, awakeSims, staticSims, encodedA, bodyIdA);
+		let simsB = b3ResolveContactBodySims(world, awakeSims, staticSims, encodedB, bodyIdB);
+		let simIndexA = b3ResolveContactBodySimIndex(world, encodedA, bodyIdA);
+		let simIndexB = b3ResolveContactBodySimIndex(world, encodedB, bodyIdB);
 
 		let wasTouching = (contact.flags & b3_simTouchingFlag) != 0;
 
-		let transformA = bodySimA.transform;
-		let transformB = bodySimB.transform;
+		let transformA = simsA[simIndexA].transform;
+		let transformB = simsB[simIndexB].transform;
 
-		let isFast = ((bodySimA.flags | bodySimB.flags) & b3_isFast) != 0;
+		let isFast = ((simsA[simIndexA].flags | simsB[simIndexB].flags) & b3_isFast) != 0;
 
 		let recycleTolerance = wasTouching ? recycleDistance : recycleDistanceNonTouching;
 
@@ -823,8 +838,8 @@ function b3CollideTask(startIndex: i32, endIndex: i32, workerIndex: i32, stepCon
 
 			let xf = b3InvMulWorldTransforms(transformA, transformB);
 			let xfc = contact.cachedRelativePose;
-			let maxExtentA = b3IsStaticSimIndex(encodedA) ? b3Vec3_zero : bodySimA.maxExtent;
-			let maxExtentB = b3IsStaticSimIndex(encodedB) ? b3Vec3_zero : bodySimB.maxExtent;
+			let maxExtentA = b3IsStaticSimIndex(encodedA) ? b3Vec3_zero : simsA[simIndexA].maxExtent;
+			let maxExtentB = b3IsStaticSimIndex(encodedB) ? b3Vec3_zero : simsB[simIndexB].maxExtent;
 			let maxExtent = b3Max(maxExtentA, maxExtentB);
 
 			// Variation of Conservative Advancement
@@ -857,7 +872,7 @@ function b3CollideTask(startIndex: i32, endIndex: i32, workerIndex: i32, stepCon
 					let matrixB = b3MakeMatrixFromQuat(dqB);
 
 					// Minimize round-off
-					let dc = b3SubPos(bodySimB.center, bodySimA.center);
+					let dc = b3SubPos(simsB[simIndexB].center, simsA[simIndexA].center);
 
 					let manifoldCount = contact.manifoldCount;
 					for (let manifoldIndex = 0; manifoldIndex < manifoldCount; ++manifoldIndex) {
@@ -903,10 +918,10 @@ function b3CollideTask(startIndex: i32, endIndex: i32, workerIndex: i32, stepCon
 			workerIndex,
 			contact,
 			shapeA,
-			bodySimA.localCenter,
+			simsA[simIndexA].localCenter,
 			transformA,
 			shapeB,
-			bodySimB.localCenter,
+			simsB[simIndexB].localCenter,
 			transformB,
 			isFast,
 		);
