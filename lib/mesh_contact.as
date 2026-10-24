@@ -321,6 +321,10 @@ struct b3FoundVertices {
 	count: i32 = 0;
 }
 
+// The found edges and vertices of b3ComputeMeshManifolds, which does not nest
+let s_foundEdges = b3FoundEdges();
+let s_foundVertices = b3FoundVertices();
+
 @inline function b3AddVertex(vertices: ref b3FoundVertices, vertex: i32): bool {
 	let key = vertex;
 
@@ -862,10 +866,9 @@ export unsafe function b3ComputeMeshManifolds(
 	let tentativeTriangles = s_tentativeTriangles;
 	let tentativeTriangleCount = 0;
 
-	let foundEdges: b3FoundEdges;
-	let foundVertices: b3FoundVertices;
-	foundEdges.count = 0;
-	foundVertices.count = 0;
+	// C's uninitialized stack arrays; a local struct would zero all 128 keys on every call
+	s_foundEdges.count = 0;
+	s_foundVertices.count = 0;
 
 	// This transform converts from mesh frame into the shapeB frame
 	let transformAtoB = b3InvMulWorldTransforms(xfB, xfA);
@@ -1031,24 +1034,24 @@ export unsafe function b3ComputeMeshManifolds(
 			manifold.i3 = triangle.i3;
 
 			if (manifold.feature == b3_featureTriangleFace || B3_FORCE_GHOST_COLLISIONS != 0) {
-				b3AddEdge(foundEdges, triangle.i1, triangle.i2);
-				b3AddEdge(foundEdges, triangle.i2, triangle.i3);
-				b3AddEdge(foundEdges, triangle.i3, triangle.i1);
-				b3AddVertex(foundVertices, triangle.i1);
-				b3AddVertex(foundVertices, triangle.i2);
-				b3AddVertex(foundVertices, triangle.i3);
+				b3AddEdge(s_foundEdges, triangle.i1, triangle.i2);
+				b3AddEdge(s_foundEdges, triangle.i2, triangle.i3);
+				b3AddEdge(s_foundEdges, triangle.i3, triangle.i1);
+				b3AddVertex(s_foundVertices, triangle.i1);
+				b3AddVertex(s_foundVertices, triangle.i2);
+				b3AddVertex(s_foundVertices, triangle.i3);
 
 				acceptedManifolds[acceptedManifoldCount] = manifoldCount - 1;
 				acceptedManifoldCount += 1;
 			} else if (manifold.feature == b3_featureHullFace) {
 				let cosNormalAngle = b3Dot(manifold.triangleNormal, manifold.normal);
 				if (cosNormalAngle > 0.5) {
-					b3AddEdge(foundEdges, triangle.i1, triangle.i2);
-					b3AddEdge(foundEdges, triangle.i2, triangle.i3);
-					b3AddEdge(foundEdges, triangle.i3, triangle.i1);
-					b3AddVertex(foundVertices, triangle.i1);
-					b3AddVertex(foundVertices, triangle.i2);
-					b3AddVertex(foundVertices, triangle.i3);
+					b3AddEdge(s_foundEdges, triangle.i1, triangle.i2);
+					b3AddEdge(s_foundEdges, triangle.i2, triangle.i3);
+					b3AddEdge(s_foundEdges, triangle.i3, triangle.i1);
+					b3AddVertex(s_foundVertices, triangle.i1);
+					b3AddVertex(s_foundVertices, triangle.i2);
+					b3AddVertex(s_foundVertices, triangle.i3);
 
 					acceptedManifolds[acceptedManifoldCount] = manifoldCount - 1;
 					acceptedManifoldCount += 1;
@@ -1060,12 +1063,12 @@ export unsafe function b3ComputeMeshManifolds(
 
 					if (minSeparation < -2.0 * linearSlop) {
 						// Deep overlap
-						b3AddEdge(foundEdges, triangle.i1, triangle.i2);
-						b3AddEdge(foundEdges, triangle.i2, triangle.i3);
-						b3AddEdge(foundEdges, triangle.i3, triangle.i1);
-						b3AddVertex(foundVertices, triangle.i1);
-						b3AddVertex(foundVertices, triangle.i2);
-						b3AddVertex(foundVertices, triangle.i3);
+						b3AddEdge(s_foundEdges, triangle.i1, triangle.i2);
+						b3AddEdge(s_foundEdges, triangle.i2, triangle.i3);
+						b3AddEdge(s_foundEdges, triangle.i3, triangle.i1);
+						b3AddVertex(s_foundVertices, triangle.i1);
+						b3AddVertex(s_foundVertices, triangle.i2);
+						b3AddVertex(s_foundVertices, triangle.i3);
 						acceptedManifolds[acceptedManifoldCount] = manifoldCount - 1;
 						acceptedManifoldCount += 1;
 					} else {
@@ -1104,12 +1107,12 @@ export unsafe function b3ComputeMeshManifolds(
 			let tentativeIndex = tentativeManifolds[tentativeTriangles[i].index];
 			let m = manifoldBuffer[tentativeIndex];
 
-			let addedEdge1 = b3AddEdge(foundEdges, m.i1, m.i2);
-			let addedEdge2 = b3AddEdge(foundEdges, m.i2, m.i3);
-			let addedEdge3 = b3AddEdge(foundEdges, m.i3, m.i1);
-			let addedVertex1 = b3AddVertex(foundVertices, m.i1);
-			let addedVertex2 = b3AddVertex(foundVertices, m.i2);
-			let addedVertex3 = b3AddVertex(foundVertices, m.i3);
+			let addedEdge1 = b3AddEdge(s_foundEdges, m.i1, m.i2);
+			let addedEdge2 = b3AddEdge(s_foundEdges, m.i2, m.i3);
+			let addedEdge3 = b3AddEdge(s_foundEdges, m.i3, m.i1);
+			let addedVertex1 = b3AddVertex(s_foundVertices, m.i1);
+			let addedVertex2 = b3AddVertex(s_foundVertices, m.i2);
+			let addedVertex3 = b3AddVertex(s_foundVertices, m.i3);
 
 			let feature: b3TriangleFeature = m.feature;
 			let shouldCollide = false;
@@ -1166,19 +1169,19 @@ export unsafe function b3ComputeMeshManifolds(
 			}
 
 			if ((triangleFlags & b3_flatEdge1) == b3_flatEdge1) {
-				if (b3FindEdge(foundEdges, m.i1, m.i2)) {
+				if (b3FindEdge(s_foundEdges, m.i1, m.i2)) {
 					continue;
 				}
 			}
 
 			if ((triangleFlags & b3_flatEdge2) == b3_flatEdge2) {
-				if (b3FindEdge(foundEdges, m.i2, m.i3)) {
+				if (b3FindEdge(s_foundEdges, m.i2, m.i3)) {
 					continue;
 				}
 			}
 
 			if ((triangleFlags & b3_flatEdge3) == b3_flatEdge3) {
-				if (b3FindEdge(foundEdges, m.i3, m.i1)) {
+				if (b3FindEdge(s_foundEdges, m.i3, m.i1)) {
 					continue;
 				}
 			}
