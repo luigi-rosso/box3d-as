@@ -227,7 +227,7 @@ large_pyramid by stage, SIMD session, ms per step:
 
 On a quiet machine the gaps are wider than round 1's loaded sessions showed: native's caches and memory
 bandwidth were the contended resource there. The SIMD solve stage is 1.9x native SIMD and about native
-scalar; collide is now 69% of the AS step's excess over native.
+scalar; collide is now 54% of the AS step's excess over native SIMD.
 
 ## 1. The SIMD artifact on WAMR's fast interpreter
 
