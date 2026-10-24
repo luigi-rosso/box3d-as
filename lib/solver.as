@@ -104,7 +104,8 @@ import {
 	b3BodySim,
 	b3BodyState,
 	b3GetBodySim,
-	b3MakeRelativeSweep,
+	b3GetBodySimAddress,
+	b3MakeRelativeSweepAt,
 	b3ShouldBodiesCollide,
 	b3_allowFastRotation,
 	b3_bodyTransientFlags,
@@ -773,9 +774,10 @@ const B2_MAX_CONTINUOUS_SENSOR_HITS: i32 = 8;
 const b3_noShape = new b3Shape();
 
 class b3ContinuousContext {
-	world: b3World;
-	// A copy: the query only reads the flags and body id, which do not change during the sweep.
-	fastBodySim: b3BodySim = b3BodySim();
+	world: b3World? = null;
+	// The fast body sim's flags and body id, all the query reads of it; neither changes during the sweep.
+	fastBodySimFlags: u32 = 0;
+	fastBodyId: i32 = 0;
 	fastShape: b3Shape = b3_noShape;
 	centroid1: b3Vec3 = b3Vec3();
 	centroid2: b3Vec3 = b3Vec3();
@@ -792,9 +794,6 @@ class b3ContinuousContext {
 	pushBackIterations: i32 = 0;
 	rootIterations: i32 = 0;
 
-	constructor(world: b3World) {
-		this.world = world;
-	}
 }
 
 function b3MakeShapeId(index1: i32, world0: u16, generation: u16): b3ShapeId {
@@ -810,8 +809,8 @@ function b3ContinuousQueryCallback(proxyId: i32, userData: u64, continuousContex
 	let shapeId = <i32>userData;
 
 	let fastShape = continuousContext.fastShape;
-	let fastBodySimFlags = continuousContext.fastBodySim.flags;
-	let fastBodyId = continuousContext.fastBodySim.bodyId;
+	let fastBodySimFlags = continuousContext.fastBodySimFlags;
+	let fastBodyId = continuousContext.fastBodyId;
 
 	B3_ASSERT(fastShape.sensorIndex == B3_NULL_INDEX);
 
@@ -820,7 +819,7 @@ function b3ContinuousQueryCallback(proxyId: i32, userData: u64, continuousContex
 		return true;
 	}
 
-	let world = continuousContext.world;
+	let world = continuousContext.world!;
 	let shape = world.shapes[shapeId];
 
 	// Skip same body
@@ -842,7 +841,7 @@ function b3ContinuousQueryCallback(proxyId: i32, userData: u64, continuousContex
 
 	let bodyId = shape.bodyId;
 
-	let bodySim = b3GetBodySim(world, bodyId);
+	let bodySim = b3GetBodySimAddress(world, bodyId);
 	B3_ASSERT(world.bodies[bodyId].type == b3_staticBody || (fastBodySimFlags & b3_isBullet) != 0);
 
 	// Skip bullets
@@ -870,7 +869,7 @@ function b3ContinuousQueryCallback(proxyId: i32, userData: u64, continuousContex
 	}
 
 	// todo does having a sweep on shapeA help with bullets?
-	let sweepA = b3MakeRelativeSweep(bodySim, continuousContext.base);
+	let sweepA = b3MakeRelativeSweepAt(bodySim, continuousContext.base);
 
 	// Time of impact versus shape. Supports all shape types
 	let output = b3ShapeTimeOfImpact(shape, fastShape, sweepA, continuousContext.sweep, continuousContext.fraction);
@@ -908,6 +907,13 @@ function b3ContinuousQueryCallback(proxyId: i32, userData: u64, continuousContex
 	return true;
 }
 
+const s_continuousContext = new b3ContinuousContext();
+
+// The tree callback of b3SolveContinuous, which does not nest
+function b3ContinuousTreeCallback(proxyId: i32, userData: u64): bool {
+	return b3ContinuousQueryCallback(proxyId, userData, s_continuousContext);
+}
+
 function b3IsShapeFast(shape: b3Shape, centroid1: b3Vec3, centroid2: b3Vec3, rotationChord: f32, safetyFactor: f32): bool {
 	let radius: f32;
 	switch (shape.type) {
@@ -935,17 +941,15 @@ function b3IsShapeFast(shape: b3Shape, centroid1: b3Vec3, centroid2: b3Vec3, rot
 }
 
 // Continuous collision of dynamic versus static
-function b3SolveContinuous(world: b3World, bodySimIndex: i32, taskContext: b3TaskContext, dt: f32): void {
+unsafe function b3SolveContinuous(world: b3World, bodySimIndex: i32, taskContext: b3TaskContext, dt: f32): void {
 	let awakeSet = world.solverSets[b3_awakeSet];
-
-	// Written back to the set at the end; nothing else writes this sim during the sweep.
-	let fastBodySim = awakeSet.bodySims[bodySimIndex];
-	B3_ASSERT((fastBodySim.flags & b3_isFast) != 0);
+	let fastBodySim = b3ArrayData(awakeSet.bodySims) + <usize>bodySimIndex * sizeof<b3BodySim>();
+	B3_ASSERT((load<u32>(fastBodySim + FSIM_FLAGS) & b3_isFast) != 0);
 
 	// Re-center the sweep on the fast body so the TOI and the swept query stay in float precision
-	let base = fastBodySim.center0;
+	let base = load<b3Vec3>(fastBodySim + FSIM_CENTER0);
 
-	let sweep = b3MakeRelativeSweep(fastBodySim, base);
+	let sweep = b3MakeRelativeSweepAt(fastBodySim, base);
 
 	let xf1 = b3Transform();
 	xf1.q = sweep.q1;
@@ -958,17 +962,25 @@ function b3SolveContinuous(world: b3World, bodySimIndex: i32, taskContext: b3Tas
 	let staticTree = world.broadPhase.trees[b3_staticBody];
 	let kinematicTree = world.broadPhase.trees[b3_kinematicBody];
 	let dynamicTree = world.broadPhase.trees[b3_dynamicBody];
-	let fastBodyId = fastBodySim.bodyId;
+	let fastBodyId = load<i32>(fastBodySim + FSIM_BODYID);
+	let fastBodySimFlags = load<u32>(fastBodySim + FSIM_FLAGS);
 
-	let context = new b3ContinuousContext(world);
+	// C's zeroed stack context; the fields not reset here are written before they are read
+	let context = s_continuousContext;
+	context.world = world;
 	context.sweep = sweep;
 	context.base = base;
-	context.fastBodySim = fastBodySim;
+	context.fastBodySimFlags = fastBodySimFlags;
+	context.fastBodyId = fastBodyId;
 	context.fraction = 1.0;
+	context.sensorCount = 0;
+	context.distanceIterations = 0;
+	context.pushBackIterations = 0;
+	context.rootIterations = 0;
 
-	let callback = (proxyId: i32, userData: u64): bool => b3ContinuousQueryCallback(proxyId, userData, context);
+	let callback = b3ContinuousTreeCallback;
 
-	let isBullet = (fastBodySim.flags & b3_isBullet) != 0;
+	let isBullet = (fastBodySimFlags & b3_isBullet) != 0;
 	let safetyFactor = world.bodies[fastBodyId].safetyFactor;
 	let rotationChord: f32 = 2.0 * b3Length(b3InvMulQuat(sweep.q1, sweep.q2).v);
 
@@ -1026,24 +1038,24 @@ function b3SolveContinuous(world: b3World, bodySimIndex: i32, taskContext: b3Tas
 		// Advance body
 		let transform = b3Transform(b3OffsetPos(base, origin), q);
 		let center = b3OffsetPos(base, c);
-		fastBodySim.transform = transform;
-		fastBodySim.center = center;
-		fastBodySim.rotation0 = q;
-		fastBodySim.center0 = center;
-		fastBodySim.flags |= b3_hadTimeOfImpact;
+		store<b3Transform>(fastBodySim + FSIM_TRANSFORM, transform);
+		store<b3Vec3>(fastBodySim + FSIM_CENTER, center);
+		store<b3Quat>(fastBodySim + FSIM_ROTATION0, q);
+		store<b3Vec3>(fastBodySim + FSIM_CENTER0, center);
+		store<u32>(fastBodySim + FSIM_FLAGS, load<u32>(fastBodySim + FSIM_FLAGS) | b3_hadTimeOfImpact);
 
 		// Timeloss means there is a lost gravity contribution. Other forces and torques are ignored for now.
 		let stateFlags = awakeSet.bodyStates[bodySimIndex].flags;
 		let v = awakeSet.bodyStates[bodySimIndex].linearVelocity;
 		let timeLoss = (1.0 - context.fraction) * dt;
-		let dv = b3MulSV(-timeLoss * fastBodySim.gravityScale, world.gravity);
+		let dv = b3MulSV(-timeLoss * load<f32>(fastBodySim + FSIM_GRAVITYSCALE), world.gravity);
 		dv.x = (stateFlags & b3_lockLinearX) != 0 ? <f32>0.0 : dv.x;
 		dv.y = (stateFlags & b3_lockLinearY) != 0 ? <f32>0.0 : dv.y;
 		dv.z = (stateFlags & b3_lockLinearZ) != 0 ? <f32>0.0 : dv.z;
 		awakeSet.bodyStates[bodySimIndex].linearVelocity = b3Add(v, dv);
 
 		// The move event was written before CCD, so correct it with the impact pose
-		world.bodyMoveEvents[bodySimIndex].transform = fastBodySim.transform;
+		world.bodyMoveEvents[bodySimIndex].transform = transform;
 
 		// Prepare AABBs for broad-phase.
 		// Even though a body is fast, it may not move much. So the AABB may not need enlargement.
@@ -1064,7 +1076,7 @@ function b3SolveContinuous(world: b3World, bodySimIndex: i32, taskContext: b3Tas
 				if (isBullet == false) {
 					b3BroadPhase_MarkProxyMoved(world.broadPhase, shape.proxyKey, world.fatAABBs[shapeId]);
 				} else {
-					fastBodySim.flags |= b3_enlargeBulletBounds;
+					store<u32>(fastBodySim + FSIM_FLAGS, load<u32>(fastBodySim + FSIM_FLAGS) | b3_enlargeBulletBounds);
 				}
 			}
 
@@ -1074,8 +1086,8 @@ function b3SolveContinuous(world: b3World, bodySimIndex: i32, taskContext: b3Tas
 		// No time of impact event
 
 		// Advance body
-		fastBodySim.rotation0 = fastBodySim.transform.q;
-		fastBodySim.center0 = fastBodySim.center;
+		store<b3Quat>(fastBodySim + FSIM_ROTATION0, load<b3Quat>(fastBodySim + FSIM_Q));
+		store<b3Vec3>(fastBodySim + FSIM_CENTER0, load<b3Vec3>(fastBodySim + FSIM_CENTER));
 
 		// Prepare AABBs for broad-phase
 		shapeId = world.bodies[fastBodyId].headShapeId;
@@ -1090,15 +1102,13 @@ function b3SolveContinuous(world: b3World, bodySimIndex: i32, taskContext: b3Tas
 				if (isBullet == false) {
 					b3BroadPhase_MarkProxyMoved(world.broadPhase, shape.proxyKey, world.fatAABBs[shapeId]);
 				} else {
-					fastBodySim.flags |= b3_enlargeBulletBounds;
+					store<u32>(fastBodySim + FSIM_FLAGS, load<u32>(fastBodySim + FSIM_FLAGS) | b3_enlargeBulletBounds);
 				}
 			}
 
 			shapeId = shape.nextShapeId;
 		}
 	}
-
-	awakeSet.bodySims[bodySimIndex] = fastBodySim;
 
 	// Push sensor hits on the the task context for serial processing.
 	for (let i = 0; i < context.sensorCount; ++i) {

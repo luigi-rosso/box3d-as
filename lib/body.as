@@ -428,6 +428,17 @@ export function b3MakeRelativeSweep(bodySim: b3BodySim, base: b3Pos): b3Sweep {
 	return s;
 }
 
+// b3MakeRelativeSweep over the sim at address sim
+@inline export unsafe function b3MakeRelativeSweepAt(sim: usize, base: b3Pos): b3Sweep {
+	let s: b3Sweep;
+	s.c1 = b3SubPos(load<b3Vec3>(sim + offsetof<b3BodySim>("center0")), base);
+	s.c2 = b3SubPos(load<b3Vec3>(sim + offsetof<b3BodySim>("center")), base);
+	s.q1 = load<b3Quat>(sim + offsetof<b3BodySim>("rotation0"));
+	s.q2 = load<b3Quat>(sim + offsetof<b3BodySim>("transform") + offsetof<b3Transform>("q"));
+	s.localCenter = load<b3Vec3>(sim + offsetof<b3BodySim>("localCenter"));
+	return s;
+}
+
 // functions from body.c follow
 
 // Get a validated body from a world using an id.
@@ -462,6 +473,14 @@ export function b3MakeBodyId(world: b3World, bodyId: i32): b3BodyId {
 export function b3GetBodySim(world: b3World, bodyId: i32): b3BodySim {
 	let set = world.solverSets[world.bodies[bodyId].setIndex];
 	return set.bodySims[world.bodies[bodyId].localIndex];
+}
+
+// The address of the sim b3GetBodySim returns, where C returns its pointer
+export unsafe function b3GetBodySimAddress(world: b3World, bodyId: i32): usize {
+	let set = world.solverSets[world.bodies[bodyId].setIndex];
+	let localIndex = world.bodies[bodyId].localIndex;
+	if (B3_ASSERT_ENABLED) B3_ASSERT(0 <= localIndex && localIndex < set.bodySims.length);
+	return b3ArrayData(set.bodySims) + <usize>localIndex * sizeof<b3BodySim>();
 }
 
 // Returns the index into the awake set's body states, B3_NULL_INDEX where C returns NULL.

@@ -466,9 +466,6 @@ unsafe function b3PrepareConstraintL<T>(
 		for (let manifoldIndex = 0; manifoldIndex < manifoldCount; ++manifoldIndex) {
 			let cm0 = manifoldData + <usize>(manifoldBase + manifoldIndex) * sizeof<b3ContactManifoldWide>();
 			let cm = cm0 + <usize>lane * 4;
-			let tangentVelocityX = b3GatherXL<T>(cl0, cl1, cl2, cl3, CT_TANGENTVELOCITY);
-			let tangentVelocityY = b3GatherYL<T>(cl0, cl1, cl2, cl3, CT_TANGENTVELOCITY);
-			let tangentVelocityZ = b3GatherZL<T>(cl0, cl1, cl2, cl3, CT_TANGENTVELOCITY);
 
 			let manifoldLanes: FixedArray<usize, 4>;
 			let activeLanes: FixedArray<i32, 4>;
@@ -536,6 +533,9 @@ unsafe function b3PrepareConstraintL<T>(
 			b3StoreL<T>(cm + MW_TANGENT2 + V_X, tangent2X);
 			b3StoreL<T>(cm + MW_TANGENT2 + V_Y, tangent2Y);
 			b3StoreL<T>(cm + MW_TANGENT2 + V_Z, tangent2Z);
+			let tangentVelocityX = b3GatherXL<T>(cl0, cl1, cl2, cl3, CT_TANGENTVELOCITY);
+			let tangentVelocityY = b3GatherYL<T>(cl0, cl1, cl2, cl3, CT_TANGENTVELOCITY);
+			let tangentVelocityZ = b3GatherZL<T>(cl0, cl1, cl2, cl3, CT_TANGENTVELOCITY);
 			b3StoreL<T>(cm + MW_TANGENTVELOCITY1, b3DotL(tangentVelocityX, tangentVelocityY, tangentVelocityZ, tangent1X, tangent1Y, tangent1Z));
 			b3StoreL<T>(cm + MW_TANGENTVELOCITY2, b3DotL(tangentVelocityX, tangentVelocityY, tangentVelocityZ, tangent2X, tangent2Y, tangent2Z));
 
@@ -670,6 +670,13 @@ unsafe function b3PrepareConstraintL<T>(
 			}
 
 			{
+				// Reloaded rather than kept live across the point loops, which keeps the interpreter's frame small
+				let tangent1X = b3LoadL<T>(cm + MW_TANGENT1 + V_X);
+				let tangent1Y = b3LoadL<T>(cm + MW_TANGENT1 + V_Y);
+				let tangent1Z = b3LoadL<T>(cm + MW_TANGENT1 + V_Z);
+				let tangent2X = b3LoadL<T>(cm + MW_TANGENT2 + V_X);
+				let tangent2Y = b3LoadL<T>(cm + MW_TANGENT2 + V_Y);
+				let tangent2Z = b3LoadL<T>(cm + MW_TANGENT2 + V_Z);
 				let rtA1X = b3CrossL(centerAY, centerAZ, tangent1Y, tangent1Z);
 				let rtA1Y = b3CrossL(centerAZ, centerAX, tangent1Z, tangent1X);
 				let rtA1Z = b3CrossL(centerAX, centerAY, tangent1X, tangent1Y);
