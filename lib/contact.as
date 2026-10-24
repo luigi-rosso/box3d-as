@@ -208,16 +208,16 @@ export class b3Contact {
 	cachedRelativePose: b3Transform = b3Transform();
 
 	// Mixed friction and restitution
+	// The solver gathers friction, restitution and rolling resistance as one row, so they stay in this order.
 	friction: f32 = 0;
+	restitution: f32 = 0;
+	rollingResistance: f32 = 0;
+	tangentVelocity: b3Vec3 = b3Vec3();
 
 	// Usage determined by b3_simMeshContact in simFlags
 	// The C union becomes one field per member.
 	convexContact: b3ConvexContact = b3ConvexContact();
 	meshContact: b3MeshContact = new b3MeshContact();
-
-	restitution: f32 = 0;
-	rollingResistance: f32 = 0;
-	tangentVelocity: b3Vec3 = b3Vec3();
 
 	// This is monotonically advanced when a contact is allocated in this slot
 	// Used to check for invalid b3ContactId
