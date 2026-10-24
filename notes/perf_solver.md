@@ -182,3 +182,135 @@ many_bodies 9.0 to 8.1 ms (min of 3, load 60 to 140).
   paths still copy joint sims and states by value.
 - Before shipping `wasmSimd: on` for this library, WAMR's interpreter needs the v128 local fix, or every
   host that may run the interpreter tier needs `wasmSimd: off`.
+
+# Round 2
+
+Commits 08300d9 to b4898b6. Gates as in round 1, now 10 trajectory scenes (`plank_pile` added) in both
+artifacts, plus the bench's state hash (below) on every tier: SIMD AOT, SIMD interpreter, scalar AOT and
+scalar interpreter all print the native recording's hash for pyramid (200 steps), large_pyramid (200; 20 on
+the interpreter), many_bodies (100), chains (300) and plank_pile (300; 50 on the interpreter).
+
+## Measurement
+
+The machine was quiet for the final sessions (load 8 to 30), unlike round 1. `bench/as/out/session_*`:
+SIMD artifact with native interleaved, 3 rounds; scalar artifact, 2 rounds. The bench now also prints the
+per stage minimum over the timed steps (`min_<stage>`), which a loaded machine disturbs least, and
+`hash=`: FNV-1a over every body's pose and velocity bits, which `verify/scenes/hash.mjs <recording>
+<steps>` computes from a native recording.
+
+| scene | native SIMD | native scalar | AS SIMD artifact | x native SIMD | AS scalar artifact | x native scalar |
+|---|---|---|---|---|---|---|
+| large_pyramid | 4.371 | 7.169 | 11.477 | 2.6 | 22.70 | 2.2 |
+| many_bodies | 12.974 | 19.092 | 20.859 | 1.6 | 47.62 | 1.8 |
+| pyramid | 0.042 | 0.077 | 0.100 | 2.4 | 0.255 | 2.9 |
+| chains | 0.071 | 0.073 | 0.101 | 1.4 | 0.180 | 1.8 |
+| plank_pile | 0.892 | 0.962 | 1.698 | 1.9 | 2.486 | 1.9 |
+| pyramid, interpreter | | 0.077 | 1.489 | | 3.312 | |
+
+(The scalar artifact columns come from the second session, whose native scalar was 10.35 and 27.11 ms on
+the two big scenes; the ratio uses that session.)
+
+large_pyramid by stage, SIMD session, ms per step:
+
+| stage | native SIMD | native scalar | AS SIMD | x native SIMD |
+|---|---|---|---|---|
+| collide (not this pass) | 0.666 | 0.741 | 4.503 | 6.8 |
+| solve | 3.474 | 6.207 | 6.551 | 1.9 |
+| prepareConstraints | 0.559 | 0.862 | 1.667 | 3.0 |
+| integrateVelocities | 0.068 | 0.068 | 0.118 | 1.7 |
+| warmStart | 0.359 | 0.705 | 0.534 | 1.5 |
+| solveImpulses (push) | 0.753 | 1.589 | 1.154 | 1.5 |
+| integratePositions | 0.107 | 0.102 | 0.170 | 1.6 |
+| relaxImpulses (solve) | 1.096 | 2.319 | 1.673 | 1.5 |
+| storeImpulses | 0.303 | 0.343 | 0.864 | 2.9 |
+| transforms (finalize) | 0.207 | 0.206 | 0.340 | 1.6 |
+
+On a quiet machine the gaps are wider than round 1's loaded sessions showed: native's caches and memory
+bandwidth were the contended resource there. The SIMD solve stage is 1.9x native SIMD and about native
+scalar; collide is now 69% of the AS step's excess over native.
+
+## 1. The SIMD artifact on WAMR's fast interpreter
+
+`bench/as/tools/v128cells.py <bake.wasm>` lists each function's frame offset of its last v128 local (binaryen
+writes v128 locals after the scalar ones; WAMR 2.4.5 traps at 256, notes/findings.md). Before and after, in
+the release bake:
+
+| kernel | before | after |
+|---|---|---|
+| b3SolveContactsL<v128> | 310 (73 v128) | 238 (53) |
+| b3PushContactsL<v128> | 306 (72) | 237 (53) |
+| b3ApplyRestitutionL<v128> | 283 (66) | 196 (42) |
+| b3PrepareConstraintL<v128> | 273 (54) | 225 (43) |
+| b3WarmStartContactsL<v128> | 139 (30) | 139 (30) |
+
+What moved them: the inverse inertia lanes load at each use again (undoing round 1's change 5, which had not
+helped); delta position and rotation gather inside the manifold loop instead of living across it (convex
+constraints have one manifold, so the loads are the same count); splatted constants are made at their use
+(LLVM hoists them under AOT); in prepare `invIA + invIB` is recomputed where used and the tangent velocity
+lanes are set per manifold. No function was split. `bench/as/run.sh` runs the cell check after a SIMD session
+and warns from 240.
+
+AOT before and after, large_pyramid, 3 interleaved rounds (load 30 to 100): step 23.54 and 23.66 ms (min of
+means); stage minima within 5% (prepare 3.44 and 3.61, relax 2.82 and 2.98, push 2.10 and 2.08), which is
+the noise. The interpreter now runs the SIMD artifact bit exact: pyramid 1.49 ms per step against the scalar
+artifact's 3.31 on the interpreter.
+
+## 2. Pointer walks for the remaining stages
+
+- `b3FinalizeBodiesTask`, `b3IntegrateVelocitiesTask` and `b3IntegratePositionsTask` reach states, sims,
+  bodies and move events through addresses (`b3ArrayData`, body.as) and the `FS_` / `FSIM_` / `FB_` field
+  offsets, reading only the fields C reads and writing through as C's pointers do, so `b3SolveContinuous`
+  sees the stores without the store and reload around it. `invInertiaWorld` is `R I Rᵀ` written out per
+  element in `b3MulMM`'s order (`b3StoreWorldInertia`), so no `b3MulMM` / `b3Transpose` calls remain.
+- Store impulses and prepare read lane contacts through `world.contacts`' data and `offsetof<b3Contact>`
+  fields; store impulses loads the four lanes' contact and manifold addresses up front, as C does.
+- Joints (all eight types) and the overflow contact kernels take states through `b3StateAddress` (the
+  identity state for a static end) and store velocities with `b3StoreStateVelocities`, instead of a struct
+  ternary over `b3_identityBodyState` and checked `Array` places.
+
+Per stage minima, large_pyramid, before (3b0092d) and after (d639beb), 3 rounds: transforms 0.86 to 0.49,
+store impulses 1.29 to 1.01, prepare 2.32 to 2.16, integrate velocities 0.18 to 0.17, positions 0.28 to
+0.24, solve stage 10.17 to 9.63. Joints and overflow (e54c7d9), plank_pile: solve minimum 0.707 to 0.681,
+relax 0.312 to 0.294; chains within noise.
+
+## 3. Joints and the overflow color: chains and plank_pile
+
+`plank_pile` (verify/scenes/scenes.c and the scenes.as mirror) is two layers of 16 x 16 boxes, each under a
+dynamic plank touching all 256, plus a hub with 40 distance joints: 748 constraints in the overflow color
+every step. Its native recording comes from `NATIVE=1 verify/traj.sh plank_pile` (recordings are not
+committed). The AS bench builds chains (`SCENE=3`) and plank_pile (`SCENE=4`) from the same scene mirror,
+which `run.sh` copies into `bench/as/scenes/`. They are 1.4x and 1.9x native SIMD (table above).
+plank_pile's AS solve is 1.39 ms against 0.85 native: overflow push and relax 0.41 and 0.55 against 0.29 and
+0.40, prepare 0.14 against 0.06. In the profile the overflow kernels are inlined into `b3SolverTask` (26%
+of plank_pile's samples, scalar code, 442 index checks in 6584 instructions) and the joint solves into
+`b3SolveJoint` (12297 instructions, all helpers inlined); what is left there is per access checking and
+scalar math, not calls or copies. Collide is plank_pile's biggest gap (0.30 against 0.04 ms).
+
+## 4. What if: WAMR hardware bounds checks
+
+`RIVE_OUT=out/release_hw ./build.sh release --wasm_hw_bounds` in packages/rive-cli of ~/Projects/rive-master
+is a build flag only (it defines `RIVE_WASM_HW_BOUNDS`; the ladder then compiles a `.hw.aot` with
+`--bounds-checks=0 --stack-bounds-checks=1` and runs it under the guard page handler). The binary is at
+`packages/rive-cli/out/release_hw/rive`, from the same source as `out/release`. large_pyramid, same lib, bit
+exact (hash checked):
+
+| run | sw step | hw step | note |
+|---|---|---|---|
+| 3 rounds, load 95 to 110 | 19.56 (min step) | 15.27 | hw 22% faster, every stage faster (prepare 36%) |
+| 3 rounds, load 18 to 25 | 13.43 (min of means) | 13.57 | equal |
+| 4 rounds, load 16 to 20 | 9.23 (min step), 11.57 mean | 10.47, 11.84 | sw no slower; medians 12.84 and 11.07 |
+
+So on a quiet M5 Max the software bounds checks cost nothing measurable in this workload (predicted
+branches beside memory bound loops), while under heavy contention removing them bought about 20%. The
+iteration kernels' 1.5x against native SIMD is not the bounds checks.
+
+## What is left after round 2
+
+- Collide: 4.5 against 0.67 ms on large_pyramid and 0.30 against 0.04 on plank_pile; `b3ResolveContactBodySim`
+  and the collide closure top the profiles. The collide pass's.
+- Prepare (3.0x) and store impulses (2.9x): both walk four scattered contacts and their manifold arrays per
+  wide constraint; the port's contacts are separate objects with separately allocated manifold arrays, where
+  C keeps them in one array and block allocator. A data layout change in contact.as would be the next step.
+- Iteration kernels 1.5x native SIMD with bounds checks ruled out: spills around the 26 live body lanes and
+  the per lane gather pointer selects are what remains.
+- Joints and overflow: about 1.5x native per kernel; scalar math as C, through checked joint sim fields.
