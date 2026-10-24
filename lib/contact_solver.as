@@ -178,6 +178,9 @@ export struct b3ContactManifoldW4 {
 
 	pointCount: i32 = 0;
 
+	// C's SIMD builds align the wide fields to 16 bytes; the padding keeps the points and the next manifold there
+	padding: FixedArray<i32, 3>;
+
 	points: FixedArray<b3ContactConstraintPointW4, 4>;
 }
 
@@ -200,6 +203,9 @@ export struct b3ContactConstraintW4 {
 	restitution: b3FloatW4 = b3FloatW4();
 
 	manifoldCount: i32 = 0;
+
+	// Keeps the next constraint's wide fields on 16 byte boundaries, as C's SIMD builds align them
+	padding: FixedArray<i32, 3>;
 }
 
 // wide version of b3BodyState

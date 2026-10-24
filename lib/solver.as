@@ -54,14 +54,12 @@ import {
 	b3OffsetAABB,
 	b3OffsetPos,
 	b3Pos,
-	b3Quat_identity,
 	b3RotateVector,
 	b3Solve3,
 	b3Sub,
 	b3Transform,
 	b3TransformPoint,
 	b3Vec3,
-	b3Vec3_zero,
 } from "./math_functions";
 import { b3IntegrateRotation, b3ModifiedCross } from "./math_internal";
 import { b3StoreRow } from "./simd";

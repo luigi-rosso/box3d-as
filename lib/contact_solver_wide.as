@@ -141,7 +141,6 @@ const M_POINTCOUNT = offsetof<b3Manifold>("pointCount");
 const MP_ANCHORA = offsetof<b3ManifoldPoint>("anchorA");
 const MP_ANCHORB = offsetof<b3ManifoldPoint>("anchorB");
 const MP_NORMALVELOCITY = offsetof<b3ManifoldPoint>("normalVelocity");
-const MP_NORMALIMPULSE = offsetof<b3ManifoldPoint>("normalImpulse");
 const MP_TOTALNORMALIMPULSE = offsetof<b3ManifoldPoint>("totalNormalImpulse");
 const BSIM_INVMASS = offsetof<b3BodySim>("invMass");
 const BSIM_INVINERTIA = offsetof<b3BodySim>("invInertiaWorld");
