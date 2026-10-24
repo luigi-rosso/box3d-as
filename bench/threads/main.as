@@ -1,7 +1,9 @@
 // Step timing with Box3D's tasks on lanes, the threaded side of bench/native; bench/as/main.as with lanes.
-// --define=LANES=n runs the solver stages on n partitions, partition 0 on the main lane (0, the default, leaves
-// the serial path); --define=BACKEND=1 takes jobs, 2 (the default) workers. --define=HASHLOG logs the state hash
-// after every step, outside the timing, for the parity gate.
+// LANES=n runs the tasks on n partitions, partition 0 on the main lane (0, the default, leaves the serial path);
+// TASKS is a mask of 1 collide, 2 solve and 4 the tree rebuild, 3 (the default) collide and solve; BACKEND=1 jobs, 2 (the default) workers; HASHLOG=1 logs the
+// state hash after every step, outside the timing, for verify/threads.sh; REPLICA=1 with LANES=1 sends the main
+// lane's solver partition through the serialized path. Each option comes from the options blob run1.sh writes,
+// so every run shares one bake and its compiled code, or else from a --define of the same name.
 // --define=SCENE=0 pyramid (base 10), 1 large_pyramid (base 100), 2 many_bodies, built here; 3 and up are
 // built by the verify/scenes mirror (SCENE_NAMES below, copied in as ./scenes/scenes.as by run.sh):
 // 3 chains, 4 plank_pile, 5 mesh_drop, 6 village, 7 queries, 8 capsule_mesh, 9 heightfield, 10 mover,
@@ -33,6 +35,7 @@ import {
 	b3Body_GetRotation,
 	b3Body_GetLinearVelocity,
 	b3Body_GetAngularVelocity,
+	b3Body_IsValid,
 } from "./lib/box3d";
 // run.sh copies verify/scenes/scenes.as here, the mirror of the native bench's scenes.c
 import { Scene, Scene_Create, Scene_Step, SCENE_QUERY_KIND_COUNT } from "./scenes/scenes";
@@ -43,37 +46,78 @@ const LANE_TIME_NAMES: StaticArray<string> = [
 	"store", "exchange", "firstWait", "output",
 ];
 
-function laneCount(): i32 {
-	if (isDefined(LANES)) {
-		return LANES;
+const g_options = new Map<string, i32>();
+
+function loadOptions(context: Context): void {
+	let bytes = context.blob("options");
+	if (bytes == null) {
+		return;
 	}
-	return 0;
+	let words = String.UTF8.decode(bytes).replaceAll("\n", " ").split(" ");
+	for (let i = 0; i < words.length; ++i) {
+		let word = words[i];
+		let equals = word.indexOf("=");
+		if (equals > 0) {
+			g_options.set(word.substring(0, equals), I32.parseInt(word.substring(equals + 1)));
+		}
+	}
 }
 
-// --define=TASKS=1 collide only, 2 solve only, 3 (the default) both
+function option(name: string, fallback: i32): i32 {
+	return g_options.has(name) ? g_options.get(name) : fallback;
+}
+
+function laneCount(): i32 {
+	if (isDefined(LANES)) {
+		return option("LANES", LANES);
+	}
+	return option("LANES", 0);
+}
+
 function laneTasks(): i32 {
 	if (isDefined(TASKS)) {
-		return TASKS;
+		return option("TASKS", TASKS);
 	}
-	return b3_laneCollide | b3_laneSolve;
+	return option("TASKS", b3_laneCollide | b3_laneSolve);
 }
 
 function laneBackend(): i32 {
 	if (isDefined(BACKEND)) {
-		return BACKEND;
+		return option("BACKEND", BACKEND);
 	}
-	return b3_laneBackendWorkers;
+	return option("BACKEND", b3_laneBackendWorkers);
+}
+
+function hashLog(): bool {
+	if (isDefined(HASHLOG)) {
+		return true;
+	}
+	return option("HASHLOG", 0) != 0;
+}
+
+function replicaOnMain(): bool {
+	if (isDefined(REPLICA)) {
+		return true;
+	}
+	return option("REPLICA", 0) != 0;
 }
 
 // Every body in creation order, for the state hash
 const g_bodies = new Array<b3BodyId>();
 
 // FNV-1a over the float bits of each body's pose and velocities, as verify/scenes/hash.mjs reads them from a
-// native recording, so a run on any tier or artifact can be checked bit exact
-function stateHash(): u32 {
+// native recording, so a run on any tier or artifact can be checked bit exact. A destroyed body counts as zeros,
+// as the recording writes it.
+function stateHash(bodies: Array<b3BodyId>): u32 {
 	let h: u32 = 2166136261;
-	for (let i = 0; i < g_bodies.length; ++i) {
-		let id = g_bodies[i];
+	for (let i = 0; i < bodies.length; ++i) {
+		let id = bodies[i];
+		if (!b3Body_IsValid(id)) {
+			for (let k = 0; k < 13 * 4; ++k) {
+				h = h * 16777619;
+			}
+			continue;
+		}
 		let p = b3Body_GetPosition(id);
 		let q = b3Body_GetRotation(id);
 		let v = b3Body_GetLinearVelocity(id);
@@ -112,9 +156,9 @@ const STAGE_NAMES: StaticArray<string> = [
 
 function sceneIndex(): i32 {
 	if (isDefined(SCENE)) {
-		return SCENE;
+		return option("SCENE", SCENE);
 	}
-	return SCENE_LARGE_PYRAMID;
+	return option("SCENE", SCENE_LARGE_PYRAMID);
 }
 
 function sceneName(scene: i32): string {
@@ -132,9 +176,9 @@ function sceneName(scene: i32): string {
 
 function stepCount(scene: i32): i32 {
 	if (isDefined(STEPS)) {
-		return STEPS;
+		return option("STEPS", STEPS);
 	}
-	return scene == SCENE_MANY_BODIES ? 100 : scene >= SCENE_CHAINS ? 300 : 200;
+	return option("STEPS", scene == SCENE_MANY_BODIES ? 100 : scene >= SCENE_CHAINS ? 300 : 200);
 }
 
 function profileToArray(p: b3Profile, out: Float64Array): void {
@@ -279,8 +323,16 @@ export class Main extends Layout {
 	createMs: f64 = 0;
 	sceneData: Scene = new Scene();
 	lanes: b3LaneTasks? = null;
+	hashLog: bool = false;
+
+	// The scene's body list follows bodies it creates and destroys as it steps
+	hashBodies(): Array<b3BodyId> {
+		return this.scene >= SCENE_CHAINS ? this.sceneData.bodies : g_bodies;
+	}
 
 	override init(context: Context): bool {
+		loadOptions(context);
+		this.hashLog = hashLog();
 		this.scene = sceneIndex();
 		this.steps = stepCount(this.scene);
 		this.stepMs = new Float64Array(this.steps - WARMUP_STEPS);
@@ -307,10 +359,7 @@ export class Main extends Layout {
 		this.createMs = (clock() - t0) * 1000.0;
 		if (laneCount() > 0) {
 			this.lanes = b3World_EnableLanes(this.worldId, laneCount(), laneBackend(), laneTasks());
-			// --define=REPLICA with LANES=1 sends the main lane's partition through the serialized path
-			if (isDefined(REPLICA)) {
-				this.lanes!.replicaOnMain = true;
-			}
+			this.lanes!.replicaOnMain = replicaOnMain();
 		}
 		console.log("BENCH start scene=" + sceneName(this.scene) + " steps=" + this.steps.toString() +
 			" create=" + formatFixed(this.createMs, 2) + "ms");
@@ -337,8 +386,8 @@ export class Main extends Layout {
 			b3World_Step(this.worldId, 1.0 / 60.0, SUBSTEP_COUNT);
 		}
 		let ms = (clock() - t0) * 1000.0;
-		if (isDefined(HASHLOG)) {
-			console.log("HASH step=" + this.stepIndex.toString() + " hash=" + stateHash().toString());
+		if (this.hashLog) {
+			console.log("HASH step=" + this.stepIndex.toString() + " hash=" + stateHash(this.hashBodies()).toString());
 		}
 
 		if (this.stepIndex >= WARMUP_STEPS) {
@@ -397,7 +446,7 @@ export class Main extends Layout {
 				line += " " + QUERY_NAMES[k] + "Hash=" + hash.toString(16).padStart(8, "0");
 			}
 		}
-		line += " hash=" + stateHash().toString();
+		line += " hash=" + stateHash(this.hashBodies()).toString();
 		line += " lanes=" + laneCount().toString() + " backend=" + laneBackend().toString() + " tasks=" + laneTasks().toString();
 		let lanes = this.lanes;
 		if (lanes != null) {
@@ -405,6 +454,8 @@ export class Main extends Layout {
 			let n = <f64>max(1, s.solves);
 			line += " solves=" + s.solves.toString() + " fallbacks=" + s.fallbacks.toString();
 			line += " lanePack=" + formatFixed(s.pack / n, 4) + " laneBlob=" + formatFixed(s.blob / n, 4);
+			line += " packMasks=" + formatFixed(s.packMasks / n, 4) + " packNeeds=" + formatFixed(s.packNeeds / n, 4);
+			line += " packContacts=" + formatFixed(s.packContacts / n, 4) + " packBodies=" + formatFixed(s.packBodies / n, 4);
 			line += " lanePartition0=" + formatFixed(s.partition0 / n, 4) + " laneWait=" + formatFixed(s.wait / n, 4);
 			line += " laneApply=" + formatFixed(s.apply / n, 4);
 			line += " laneMBin=" + formatFixed(s.bytesIn / n / 1048576.0, 3) + " laneMBout=" + formatFixed(s.bytesOut / n / 1048576.0, 3);
@@ -421,6 +472,10 @@ export class Main extends Layout {
 			line += " collidePack=" + formatFixed(c.pack / cn, 4) + " collidePartition0=" + formatFixed(c.partition0 / cn, 4);
 			line += " collideWait=" + formatFixed(c.wait / cn, 4) + " collideApply=" + formatFixed(c.apply / cn, 4);
 			line += " collideMBin=" + formatFixed(c.bytesIn / cn / 1048576.0, 3) + " collideMBout=" + formatFixed(c.bytesOut / cn / 1048576.0, 3);
+			let tree = lanes.tree;
+			let tn = <f64>max(1, tree.tasks);
+			line += " treeTasks=" + tree.tasks.toString() + " treePack=" + formatFixed(tree.pack / tn, 4) + " treeWait=" + formatFixed(tree.wait / tn, 4);
+			line += " treeApply=" + formatFixed(tree.apply / tn, 4) + " treeMB=" + formatFixed(tree.bytes / tn / 1048576.0, 3);
 		}
 		console.log(line);
 	}

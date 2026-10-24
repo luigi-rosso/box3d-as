@@ -73,6 +73,18 @@ function barrierArrive(region: SharedRegion, participants: u32): void {
 	}
 }
 
+// Locks the region and copies 64 bytes out, rounds times, as an exchange read does
+@worker export async function lockWorker(region: SharedRegion, start: SharedRegion, rounds: i32): Promise<void> {
+	let out = new Float32Array(16);
+	while (start.atomicLoad(0) == 0) {}
+	for (let r = 0; r < rounds; ++r) {
+		region.exclusive((view) => {
+			view.readInto(0, out);
+		});
+	}
+	start.atomicAdd(4, 1);
+}
+
 @worker export async function echoWorker(requests: Port<i32>, replies: Port<i32>): Promise<void> {
 	while (true) {
 		let request = await requests.receive();
@@ -124,25 +136,36 @@ export class Main extends Layout {
 		} else if (this.frame == 8) {
 			this.naps();
 		} else if (this.frame == 9) {
+			this.locks(true);
+		} else if (this.frame == 10) {
+			this.locks(false);
+		} else if (this.frame == 11) {
 			console.log("MICRO done");
 		}
 		return true;
 	}
 
 	unsafe copies(): void {
-		let words = MB / 4;
+		this.copiesOf(1);
+		this.copiesOf(8);
+	}
+
+	unsafe copiesOf(megabytes: i32): void {
+		let tag = "_" + megabytes.toString() + "MB";
+		let bytes = megabytes * MB;
+		let words = bytes / 4;
 		let data = new Float32Array(words);
 		for (let i = 0; i < words; ++i) {
 			data[i] = <f32>i;
 		}
 		let other = new Float32Array(words);
-		let reps = 50;
+		let reps = megabytes == 1 ? 50 : 10;
 
 		let t0 = clock();
 		for (let r = 0; r < reps; ++r) {
-			memory.copy(other.dataStart, data.dataStart, <usize>MB);
+			memory.copy(other.dataStart, data.dataStart, <usize>bytes);
 		}
-		report("memory.copy_1MB", clock() - t0, reps);
+		report("memory.copy" + tag, (clock() - t0) / <f64>megabytes, reps);
 
 		t0 = clock();
 		for (let r = 0; r < reps; ++r) {
@@ -150,7 +173,7 @@ export class Main extends Layout {
 				other[i] = data[i];
 			}
 		}
-		report("elementCopy_1MB", clock() - t0, reps);
+		report("elementCopy" + tag, (clock() - t0) / <f64>megabytes, reps);
 
 		t0 = clock();
 		let blob = Blob.fromArray(data);
@@ -158,22 +181,22 @@ export class Main extends Layout {
 			blob.release();
 			blob = Blob.fromArray(data);
 		}
-		report("Blob.fromArray_1MB", clock() - t0, reps);
+		report("Blob.fromArray" + tag, (clock() - t0) / <f64>megabytes, reps);
 
 		t0 = clock();
 		for (let r = 0; r < reps; ++r) {
 			blob.readInto(0, other);
 		}
-		report("blob.readInto_1MB", clock() - t0, reps);
+		report("blob.readInto" + tag, (clock() - t0) / <f64>megabytes, reps);
 
-		let region = SharedRegion.create(<u32>MB);
+		let region = SharedRegion.create(<u32>bytes);
 		t0 = clock();
 		for (let r = 0; r < reps; ++r) {
 			region.exclusive((view) => {
 				view.writeFrom(0, data);
 			});
 		}
-		report("region.writeFrom_1MB", clock() - t0, reps);
+		report("region.writeFrom" + tag, (clock() - t0) / <f64>megabytes, reps);
 
 		t0 = clock();
 		for (let r = 0; r < reps; ++r) {
@@ -181,7 +204,7 @@ export class Main extends Layout {
 				view.readInto(0, other);
 			});
 		}
-		report("region.readInto_1MB", clock() - t0, reps);
+		report("region.readInto" + tag, (clock() - t0) / <f64>megabytes, reps);
 
 		let small = new Float32Array(16);
 		let smallReps = 20000;
@@ -315,6 +338,26 @@ export class Main extends Layout {
 		}
 		report("barrier_" + participants.toString() + "_first", t1 - t0, 1);
 		report("barrier_" + participants.toString(), clock() - t1, rounds);
+	}
+
+	// Every worker locks one shared region, or each its own
+	locks(sharedOne: bool): void {
+		let n = workerCount();
+		let rounds = 20000;
+		let start = SharedRegion.create(64);
+		let one = SharedRegion.create(64);
+		for (let k = 0; k < n; ++k) {
+			let region = sharedOne ? one : SharedRegion.create(64);
+			this.workers.push(Worker.spawn(lockWorker, region, start, rounds));
+		}
+		// Let the workers reach the start line
+		let idle = clock();
+		while (clock() - idle < 0.05) {}
+		let t0 = clock();
+		start.atomicStore(0, 1);
+		while (start.atomicLoad(4) < <u32>n) {}
+		let seconds = clock() - t0;
+		report((sharedOne ? "lock_one_region_" : "lock_own_region_") + n.toString(), seconds, rounds);
 	}
 
 	signals(): void {

@@ -31,12 +31,15 @@ import {
 } from "./lane_common";
 import {
 	b3LaneCollideApply,
+	b3LaneCollideBegin,
 	b3LaneCollideMain,
-	b3LaneCollidePack,
+	b3LaneCollideSection,
 	b3LaneCollidePartition,
 	b3LaneCollideReplica,
 	b3LaneCollideSupported,
 } from "./lane_collide";
+import { b3LaneTreeApply, b3LaneTreeJob, b3LaneTreeMain, b3LaneTreePack } from "./lane_tree";
+import { b3EnqueueTaskCallback, b3FinishTaskCallback, b3TaskCallback } from "./types";
 import { B3_GRAPH_COLOR_COUNT } from "./constants";
 import { b3Vec3 } from "./math_functions";
 import { b3Manifold, b3ManifoldPoint } from "./collision";
@@ -76,22 +79,23 @@ export { B3_MAX_LANES, b3_laneBackendJobs, b3_laneBackendWorkers } from "./lane_
 // Which tasks b3World_EnableLanes moves to lanes
 export const b3_laneCollide: i32 = 1;
 export const b3_laneSolve: i32 = 2;
-
-const LANE_MAGIC: u32 = 0x534c3342;
+export const b3_laneTree: i32 = 4;
 
 // Worker commands, in the control region's command word
 const CMD_SOLVE: u32 = 1;
 const CMD_COLLIDE: u32 = 2;
 const CMD_QUIT: u32 = 3;
 
-// Control region words, by byte offset
+// Control region words, by byte offset. A command's serial goes out before its sections are packed, so the lanes
+// wake meanwhile; each lane's section blob follows with its ready word set to the serial.
 const C_SERIAL: u32 = 0;
 const C_COMMAND: u32 = 4;
-const C_INPUT: u32 = 8;
 const C_LANES: u32 = 12;
 const C_SNAPSHOT: u32 = 16;
 const C_OUTPUTS: u32 = 64;
-const C_PAIRS: u32 = 128;
+const C_INPUTS: u32 = 96;
+const C_READY: u32 = 128;
+const C_PAIRS: u32 = 192;
 const C_BYTES: u32 = C_PAIRS + 4 * 64;
 
 // Pair region words, by byte offset. Lane p appends what it sends lane q in a step to pair p * lanes + q, with
@@ -137,7 +141,6 @@ const H_COLOR_INDICES: i32 = H_NEIGHBORS + B3_MAX_LANES;
 // Per receiving lane and active color, the lanes that send it velocities
 const H_NEEDS: i32 = H_COLOR_INDICES + B3_GRAPH_COLOR_COUNT;
 const H_WORDS: i32 = H_NEEDS + B3_MAX_LANES * B3_GRAPH_COLOR_COUNT;
-const H_OFFSET: i32 = 4 * (2 + 2 * B3_MAX_LANES);
 
 // Per contact record words before its manifolds
 const R_WORDS: i32 = 11;
@@ -224,7 +227,6 @@ export class b3LaneSolveReplica {
 	world: b3World = new b3World();
 	part: b3LanePartition;
 	dummy: b3Contact = new b3Contact();
-	table: Uint32Array = new Uint32Array(2 + 2 * B3_MAX_LANES);
 	header: Uint32Array = new Uint32Array(H_WORDS);
 	input: Uint8Array = new Uint8Array(0);
 	output: Uint8Array = new Uint8Array(0);
@@ -803,13 +805,11 @@ export unsafe function b3LaneSolvePartition(
 	part.partition = partition;
 	part.spins = 0;
 	part.exchangesWaited = 0;
-	input.readInto(0, r.table);
-	let lanes = <i32>r.table[1];
-	let offset = r.table[2 + partition];
-	let length = <i32>r.table[2 + lanes + partition];
-	input.readInto(<u32>H_OFFSET, r.header);
+	// The section blob: the common header, then this partition's section
+	input.readInto(0, r.header);
+	let length = <i32>input.byteLength - 4 * H_WORDS;
 	r.input = b3GrowU8(r.input, length);
-	input.readInto(offset, r.input, 0, length);
+	input.readInto(<u32>(4 * H_WORDS), r.input, 0, length);
 	b3LaneSolveSetup(r);
 	b3LaneSolveStages(part, exchanges);
 	b3LaneSolveOutput(r, output);
@@ -870,7 +870,9 @@ export unsafe function b3LaneSolvePartition(
 		for (let q = 0; q < lanes * lanes; ++q) {
 			exchanges.push(new SharedRegion(control.atomicLoad(C_PAIRS + 4 * <u32>q)));
 		}
-		let input = new Blob(control.atomicLoad(C_INPUT));
+		let ready = C_READY + 4 * <u32>partition;
+		while (control.atomicLoad(ready) != serial) {}
+		let input = new Blob(control.atomicLoad(C_INPUTS + 4 * <u32>partition));
 		if (command == CMD_SOLVE) {
 			let output = new SharedRegion(control.atomicLoad(C_OUTPUTS + 4 * <u32>partition));
 			b3LaneSolvePartition(replica, input, output, exchanges, partition);
@@ -892,6 +894,10 @@ export class b3LaneStats {
 	solves: i32 = 0;
 	fallbacks: i32 = 0;
 	pack: f64 = 0;
+	packMasks: f64 = 0;
+	packNeeds: f64 = 0;
+	packContacts: f64 = 0;
+	packBodies: f64 = 0;
 	blob: f64 = 0;
 	partition0: f64 = 0;
 	wait: f64 = 0;
@@ -917,6 +923,9 @@ export class b3LaneTasks {
 	workers: Array<Worker> = new Array<Worker>();
 	jobs: Array<Job<i32>> = new Array<Job<i32>>();
 	writer: b3LaneWriter = new b3LaneWriter();
+	head: b3LaneWriter = new b3LaneWriter();
+	// The section blobs of the command in flight, released once it is done
+	inputs: Array<Blob> = new Array<Blob>();
 	part: b3LanePartition;
 	staging: Uint8Array = new Uint8Array(0);
 	masks: Uint32Array = new Uint32Array(0);
@@ -936,11 +945,19 @@ export class b3LaneTasks {
 	replicaOnMain: bool = false;
 	mainReplica: b3LaneSolveReplica? = null;
 	collideJobs: Array<Job<Blob>> = new Array<Job<Blob>>();
+	tree: b3LaneTreeMain = new b3LaneTreeMain();
+	treeJob: Job<Blob>? = null;
+	treeInput: Blob? = null;
+	// The world's task callbacks before the lanes took them over
+	enqueueTask: b3EnqueueTaskCallback;
+	finishTask: b3FinishTaskCallback;
 	serial: u32 = 0;
 	stats: b3LaneStats = new b3LaneStats();
 
 	constructor(world: b3World, lanes: i32, backend: i32) {
 		this.world = world;
+		this.enqueueTask = world.enqueueTaskFcn;
+		this.finishTask = world.finishTaskFcn;
 		this.lanes = lanes;
 		this.backend = backend;
 		this.part = new b3LanePartition(new b3StepContext(world));
@@ -1183,6 +1200,9 @@ unsafe function b3LaneSolve(t: b3LaneTasks, context: b3StepContext): bool {
 		}
 	}
 
+	stats.packMasks += b3LaneNow() - ticks;
+	let phaseTicks = b3LaneNow();
+
 	// Free bodies go to the lane their index falls in; neighbors are lanes that share a body
 	let neighbors = t.neighbors;
 	for (let p = 0; p < B3_MAX_LANES; ++p) {
@@ -1235,6 +1255,7 @@ unsafe function b3LaneSolve(t: b3LaneTasks, context: b3StepContext): bool {
 			}
 		}
 	}
+	stats.packNeeds += b3LaneNow() - phaseTicks;
 	let passes = 3 * context.subStepCount + (anyRestitution ? world.restitutionIterations : 0);
 	if (passes * activeColorCount >= X_TABLE_ENTRIES) {
 		stats.fallbacks += 1;
@@ -1260,13 +1281,20 @@ unsafe function b3LaneSolve(t: b3LaneTasks, context: b3StepContext): bool {
 	t.serial += 1;
 	let epochBase = t.serial * EPOCH_STRIDE;
 
-	let w = t.writer;
-	w.reset();
-	w.u32(LANE_MAGIC);
-	w.u32(<u32>lanes);
-	for (let p = 0; p < 2 * B3_MAX_LANES; ++p) {
-		w.u32(0);
+	// The workers wake now and pick up each section as it is ready
+	let replicaOnMain = lanes == 1 && t.replicaOnMain;
+	let firstPacked = replicaOnMain ? 0 : 1;
+	if (t.backend == b3_laneBackendWorkers && lanes > 1) {
+		let control = t.control;
+		control.atomicStore(C_COMMAND, CMD_SOLVE);
+		control.atomicStore(C_SERIAL, t.serial);
+		t.wake.notify();
 	}
+	t.jobs.length = 0;
+	t.inputs.length = 0;
+
+	let w = t.head;
+	w.reset();
 	w.i32(awakeCount);
 	w.i32(activeColorCount);
 	w.i32(context.subStepCount);
@@ -1304,6 +1332,9 @@ unsafe function b3LaneSolve(t: b3LaneTasks, context: b3StepContext): bool {
 	for (let k = 0; k < B3_MAX_LANES * B3_GRAPH_COLOR_COUNT; ++k) {
 		w.u32(needs[k]);
 	}
+	let head = w;
+	w = t.writer;
+	w.reset();
 
 	t.packContacts = b3GrowI32(t.packContacts, contacts.length + 16);
 	t.packOwned = b3GrowI32(t.packOwned, awakeCount);
@@ -1313,9 +1344,9 @@ unsafe function b3LaneSolve(t: b3LaneTasks, context: b3StepContext): bool {
 	let stateSize = <i32>sizeof<b3BodyState>();
 	let sims = b3ArrayData(context.sims);
 	let states = b3ArrayData(context.states);
-	let replicaOnMain = lanes == 1 && t.replicaOnMain;
-	let firstPacked = replicaOnMain ? 0 : 1;
 	for (let p = firstPacked; p < lanes; ++p) {
+		let blobStart = w.length;
+		w.bytes(head.buffer.dataStart, head.length);
 		let sectionStart = w.length;
 		w.u32(0);
 		w.u32(0);
@@ -1335,6 +1366,7 @@ unsafe function b3LaneSolve(t: b3LaneTasks, context: b3StepContext): bool {
 			);
 		}
 
+		phaseTicks = b3LaneNow();
 		t.contactStarts[p] = packedContacts;
 		let outputBytes = 4 * O_WORDS;
 		for (let i = 0; i < activeColorCount; ++i) {
@@ -1358,6 +1390,8 @@ unsafe function b3LaneSolve(t: b3LaneTasks, context: b3StepContext): bool {
 			}
 		}
 
+		stats.packContacts += b3LaneNow() - phaseTicks;
+		phaseTicks = b3LaneNow();
 		t.ownedStarts[p] = packedOwned;
 		let bit: u32 = 1 << <u32>p;
 		let bodyCount = 0;
@@ -1379,15 +1413,27 @@ unsafe function b3LaneSolve(t: b3LaneTasks, context: b3StepContext): bool {
 			}
 		}
 
+		stats.packBodies += b3LaneNow() - phaseTicks;
 		w.patch(sectionStart, <u32>(packedContacts - t.contactStarts[p]));
 		w.patch(sectionStart + 4, <u32>bodyCount);
-		w.patch(8 + 4 * p, <u32>sectionStart);
-		w.patch(8 + 4 * (lanes + p), <u32>(w.length - sectionStart));
 		t.outputBytes[p] = outputBytes;
 		if (outputBytes > <i32>t.outputs[p].size) {
 			t.outputs[p].release();
 			t.outputs[p] = SharedRegion.create(<u32>(outputBytes + (outputBytes >> 1)));
 			t.publishRegions();
+		}
+
+		let blobTicks = b3LaneNow();
+		let input = Blob.fromArray(w.buffer, blobStart, w.length - blobStart);
+		stats.blob += b3LaneNow() - blobTicks;
+		t.inputs.push(input);
+		if (p > 0) {
+			if (t.backend == b3_laneBackendWorkers) {
+				t.control.atomicStore(C_INPUTS + 4 * <u32>p, input.id);
+				t.control.atomicStore(C_READY + 4 * <u32>p, t.serial);
+			} else {
+				t.jobs.push(Jobs.run(b3LaneSolveJob, input, t.outputs[p], t.exchanges, p));
+			}
 		}
 	}
 	t.contactStarts[lanes] = packedContacts;
@@ -1398,32 +1444,12 @@ unsafe function b3LaneSolve(t: b3LaneTasks, context: b3StepContext): bool {
 	stats.bytesIn += <f64>w.length;
 
 	ticks = b3LaneNow();
-	let input = lanes > 1 || replicaOnMain ? Blob.fromArray(w.buffer, 0, w.length) : null;
-	stats.blob += b3LaneNow() - ticks;
-
-	// Start the other lanes, then take partition 0 here
-	if (input != null) {
-		if (t.backend == b3_laneBackendWorkers) {
-			let control = t.control;
-			control.atomicStore(C_INPUT, input.id);
-			control.atomicStore(C_COMMAND, CMD_SOLVE);
-			control.atomicStore(C_SERIAL, t.serial);
-			t.wake.notify();
-		} else {
-			t.jobs.length = 0;
-			for (let p = 1; p < lanes; ++p) {
-				t.jobs.push(Jobs.run(b3LaneSolveJob, input, t.outputs[p], t.exchanges, p));
-			}
-		}
-	}
-
-	ticks = b3LaneNow();
 	if (replicaOnMain) {
 		if (t.mainReplica == null) {
 			t.mainReplica = new b3LaneSolveReplica();
 		}
 		let replica = t.mainReplica!;
-		b3LaneSolvePartition(replica, input!, t.outputs[0], t.exchanges, 0);
+		b3LaneSolvePartition(replica, t.inputs[0], t.outputs[0], t.exchanges, 0);
 		part = replica.part;
 	} else {
 		b3LaneSolveStages(part, t.exchanges);
@@ -1451,9 +1477,10 @@ unsafe function b3LaneSolve(t: b3LaneTasks, context: b3StepContext): bool {
 
 	ticks = b3LaneNow();
 	b3LaneSolveApply(t, context, firstPacked);
-	if (input != null) {
-		input.release();
+	for (let k = 0; k < t.inputs.length; ++k) {
+		t.inputs[k].release();
 	}
+	t.inputs.length = 0;
 	stats.apply += b3LaneNow() - ticks;
 	stats.solves += 1;
 	stats.mainSpins += <f64>part.spins;
@@ -1535,23 +1562,26 @@ unsafe function b3LaneCollide(t: b3LaneTasks, context: b3StepContext, contactCou
 		m.fallbacks += 1;
 		return false;
 	}
-	if (t.backend == b3_laneBackendWorkers) {
-		t.wake.notify();
-	}
-	let input = b3LaneCollidePack(m, context, contactCount, lanes);
-	let snapshot = m.snapshot.blob!;
 	t.serial += 1;
 	let serial = t.serial;
+	b3LaneCollideBegin(m, context, contactCount, lanes);
+	let snapshot = m.snapshot.blob!;
+	let control = t.control;
 	if (t.backend == b3_laneBackendWorkers) {
-		let control = t.control;
 		control.atomicStore(C_SNAPSHOT, snapshot.id);
-		control.atomicStore(C_INPUT, input.id);
 		control.atomicStore(C_COMMAND, CMD_COLLIDE);
 		control.atomicStore(C_SERIAL, serial);
 		t.wake.notify();
-	} else {
-		t.collideJobs.length = 0;
-		for (let p = 1; p < lanes; ++p) {
+	}
+	t.collideJobs.length = 0;
+	t.inputs.length = 0;
+	for (let p = 1; p < lanes; ++p) {
+		let input = b3LaneCollideSection(m, context, p);
+		t.inputs.push(input);
+		if (t.backend == b3_laneBackendWorkers) {
+			control.atomicStore(C_INPUTS + 4 * <u32>p, input.id);
+			control.atomicStore(C_READY + 4 * <u32>p, serial);
+		} else {
 			t.collideJobs.push(Jobs.run(b3LaneCollideJob, snapshot, input, p));
 		}
 	}
@@ -1585,9 +1615,50 @@ unsafe function b3LaneCollide(t: b3LaneTasks, context: b3StepContext, contactCou
 			t.collideJobs[p - 1].release();
 		}
 	}
-	input.release();
+	for (let k = 0; k < t.inputs.length; ++k) {
+		t.inputs[k].release();
+	}
+	t.inputs.length = 0;
 	m.steps += 1;
 	return true;
+}
+
+// Handle of the tree task in flight, the only task this layer's enqueue callback defers
+const TREE_TASK: u64 = 1;
+
+// The world's enqueue callback while the tree task is on lanes. Every other task carries its arguments inside its
+// closure, which cannot cross to a lane, so it runs here at once as the default callback runs it.
+unsafe function b3LaneEnqueue(t: b3LaneTasks, task: b3TaskCallback, taskContext: u64, name: string): u64 {
+	if (name == "rebuild tree" && t.treeJob == null) {
+		let input = b3LaneTreePack(t.tree, t.world);
+		t.treeInput = input;
+		t.treeJob = Jobs.run(b3LaneTreeJob, input);
+		t.tree.tasks += 1;
+		return TREE_TASK;
+	}
+	task(taskContext);
+	return 0;
+}
+
+unsafe function b3LaneFinish(t: b3LaneTasks, userTask: u64): void {
+	let job = t.treeJob;
+	if (userTask != TREE_TASK || job == null) {
+		return;
+	}
+	let ticks = b3LaneNow();
+	let result = job.join();
+	t.tree.wait += b3LaneNow() - ticks;
+	if (result == null || !result.ok) {
+		console.log("b3LaneFinish: tree job failed " + (job.failed != null ? job.failed! : "?"));
+	} else {
+		let output = result.value;
+		b3LaneTreeApply(t.tree, t.world, output);
+		output.release();
+	}
+	job.release();
+	t.treeJob = null;
+	t.treeInput!.release();
+	t.treeInput = null;
 }
 
 const b3_laneTasks = new Array<b3LaneTasks>();
@@ -1596,7 +1667,10 @@ const b3_laneTasks = new Array<b3LaneTasks>();
 // the others on jobs or workers. lanes 0 turns it off.
 export function b3World_EnableLanes(worldId: b3WorldId, lanes: i32, backend: i32, tasks: i32): b3LaneTasks? {
 	for (let i = 0; i < b3_laneTasks.length; ++i) {
-		b3_laneTasks[i].stop();
+		let old = b3_laneTasks[i];
+		old.stop();
+		old.world.enqueueTaskFcn = old.enqueueTask;
+		old.world.finishTaskFcn = old.finishTask;
 	}
 	b3_laneTasks.length = 0;
 	b3SetLaneSolve(null);
@@ -1613,6 +1687,11 @@ export function b3World_EnableLanes(worldId: b3WorldId, lanes: i32, backend: i32
 	}
 	if ((tasks & b3_laneCollide) != 0) {
 		b3SetLaneCollide((context: b3StepContext, contactCount: i32): bool => b3LaneCollide(b3_laneTasks[0], context, contactCount));
+	}
+	if ((tasks & b3_laneTree) != 0) {
+		world.enqueueTaskFcn = (task: b3TaskCallback, taskContext: u64, userContext: u64, name: string): u64 =>
+			b3LaneEnqueue(b3_laneTasks[0], task, taskContext, name);
+		world.finishTaskFcn = (userTask: u64, userContext: u64): void => b3LaneFinish(b3_laneTasks[0], userTask);
 	}
 	return laneTasks;
 }

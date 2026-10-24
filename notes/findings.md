@@ -190,3 +190,60 @@ monomorphized instance. `isFloat<T>()` folds too and its dead branch never compi
 one generic kernel take `T = v128` under `--enable-simd` and `T = f32` without it (lib/simd.as, the `L`
 helpers). There is no `isVector<T>()`. A constant condition in a ternary still compiles both arms, so the
 two instantiations have to be picked with an `if`.
+
+## Jobs and workers have no clock
+
+Found by the threading pass (notes/threading.md). Lane code that reaches `clock()` from `rive/os` fails the build,
+although the error lists timers among what a job may use:
+
+```as
+import { clock } from "rive/os";
+@job export function timed(n: i32): f64 {
+	let t = clock();
+	return clock() - t;
+}
+// E3004: jobs module: job code reaches rive_rt_v1.now, which a job cannot use; it sees only its arguments, shared
+// memory, pure std code and console logs and timers (through timed -> clock -> RtNative.now)
+```
+
+So a lane cannot time its own stages. lib/lane_common.as times only the main lane's partition, through a clock
+function the main lane installs and the lanes see as null; per lane stage times are not measurable.
+
+## A contended region lock parks its waiters
+
+`SharedRegion.exclusive` takes `SharedRegion::lock`, which is `std::timed_mutex::try_lock_until`
+(runtime/src/wasm/wasm_shared.cpp). Contended, it waits on a condition variable, so every handoff pays a thread
+wake. bench/threads/micro (`locks`), N workers each running 20000 times
+`region.exclusive((view) => { view.readInto(0, out); })` with a 64 byte `out`, Apple M5 Max, load 11 to 13:
+
+| workers | one region for all, us per lock | a region each, us per lock |
+|---|---|---|
+| 1 | 0.31 | 0.28 |
+| 3 | 2.23 | 0.46 |
+| 7 | 35.25 | 0.48 |
+
+The first exchange protocol of lib/lanes.as had every neighbor read one region per lane and took 37 us per color
+stage at 4 lanes and 155 us at 8; one region per sending and receiving pair, whose lock never sees two threads,
+brought it to about 7 us. A short spin before parking, as `lockWord` does, would fix the general case.
+
+## A parked worker wakes tens to hundreds of microseconds after a notify
+
+bench/threads/micro (`signals`, `naps`): the main lane notifies a `Signal` a worker awaits with `next`, after the
+worker has parked for 2 ms, and spins until the worker acks through a region word. 200 rounds, M5 Max:
+
+| load | signal wake, mean / max us | `Worker.sleep(0.0002)` poll, mean / max us | port round trip us |
+|---|---|---|---|
+| 8 | 75 / 3337 | 57 / 423 | 20.6 |
+| 13 | 45 to 798 / 268 to 14944 | 79 to 533 / 259 to 13505 | |
+| 40 | | | 447 |
+
+A wake costs more than one of the solver's colored stages at 4 lanes (about 11 us of work), so the task layer
+wakes its workers at the start of each hook, where the wake hides behind the main lane's serialization, and keeps
+them spinning while a command is in flight.
+
+## A trap in a lane names no function
+
+A lane that traps reports only `worker b3LaneWorker failed: unreachable` (or `wasm call trapped in
+host_obj_advance: unreachable` on the main lane), in release and debug bakes alike, so an index out of range in
+lane code has no location. Debugging the solver replica took a mode that runs it on the main lane
+(`replicaOnMain`, `REPLICA=1` in bench/threads) and console lines.

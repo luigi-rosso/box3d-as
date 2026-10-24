@@ -644,13 +644,9 @@ export class b3LaneCollideReplica {
 // Runs b3CollideTask over a section on the replica and answers the contacts' updated state as a blob, whose size
 // only the task knows: a mesh contact's manifolds and triangle cache may grow
 export unsafe function b3LaneCollidePartition(r: b3LaneCollideReplica, snapshot: Blob, input: Blob, partition: i32): Blob {
-	let table = new Uint32Array(2 + 2 * B3_MAX_LANES);
-	input.readInto(0, table);
-	let lanes = <i32>table[1];
-	let offset = table[2 + partition];
-	let length = <i32>table[2 + lanes + partition];
+	let length = <i32>input.byteLength;
 	r.input = b3GrowU8(r.input, length);
-	input.readInto(offset, r.input, 0, length);
+	input.readInto(0, r.input, 0, length);
 	b3UseSnapshot(r.cache, snapshot);
 
 	let base = r.input.dataStart;
@@ -782,6 +778,7 @@ export class b3LaneCollideMain {
 	shapeStamps: Int32Array = new Int32Array(0);
 	bodyStamps: Int32Array = new Int32Array(0);
 	stamp: i32 = 0;
+	sleepingCount: i32 = 0;
 	ranges: Int32Array = new Int32Array(B3_MAX_LANES + 1);
 	pack: f64 = 0;
 	apply: f64 = 0;
@@ -820,10 +817,15 @@ unsafe function b3PackBody(m: b3LaneCollideMain, world: b3World, encoded: i32, b
 		index = -encoded - 2;
 		sims = world.solverSets[b3_staticSet].bodySims;
 	} else {
+		// Sleeping sets each index their sims from 0, so the replica's one sleeping set takes them in turn
 		kind = BODY_SLEEPING;
 		let body = world.bodies[bodyId];
-		index = body.localIndex;
 		sims = world.solverSets[body.setIndex].bodySims;
+		memory.copy(at + <usize>(BODY_WORDS * 4), b3ArrayData(sims) + <usize>body.localIndex * <usize>simSize, <usize>simSize);
+		store<i32>(at, kind);
+		store<i32>(at + 4, m.sleepingCount++);
+		store<i32>(at + 8, bodyId);
+		return;
 	}
 	store<i32>(at, kind);
 	store<i32>(at + 4, index);
@@ -853,10 +855,7 @@ unsafe function b3PackCollideSection(m: b3LaneCollideMain, context: b3StepContex
 	m.stamp += 1;
 
 	let head = w.reserve(S_BYTES);
-	let maxSleeping = 0;
-	for (let s = b3_firstSleepingSet; s < world.solverSets.length; ++s) {
-		maxSleeping = max(maxSleeping, world.solverSets[s].bodySims.length);
-	}
+	m.sleepingCount = 0;
 	store<i32>(head + S_CONTACTS, last - first);
 	store<i32>(head + S_CONTACT_CAPACITY, contacts.length);
 	store<i32>(head + S_SHAPE_CAPACITY, world.shapes.length);
@@ -866,7 +865,6 @@ unsafe function b3PackCollideSection(m: b3LaneCollideMain, context: b3StepContex
 	store<f32>(head + S_LENGTH_UNITS, b3GetLengthUnitsPerMeter());
 	store<i32>(head + S_AWAKE_CAPACITY, world.solverSets[b3_awakeSet].bodySims.length);
 	store<i32>(head + S_STATIC_CAPACITY, world.solverSets[b3_staticSet].bodySims.length);
-	store<i32>(head + S_SLEEPING_COUNT, maxSleeping);
 
 	let shapesStart = w.length;
 	for (let i = first; i < last; ++i) {
@@ -902,11 +900,12 @@ unsafe function b3PackCollideSection(m: b3LaneCollideMain, context: b3StepContex
 	}
 	w.patch(sectionStart + S_SHAPES, <u32>shapeCount);
 	w.patch(sectionStart + S_BODIES, <u32>bodyCount);
+	w.patch(sectionStart + S_SLEEPING_COUNT, <u32>m.sleepingCount);
 }
 
-// Packs the other lanes' shares of the step's contacts into one blob, behind a table of section offsets.
-// Partition 0 stays on the main lane. Answers the blob, or null when the lanes cannot take this step.
-export unsafe function b3LaneCollidePack(m: b3LaneCollideMain, context: b3StepContext, contactCount: i32, lanes: i32): Blob {
+// Readies a step's collide on lanes: the snapshot, rebuilt when the shapes changed, and the even split of the awake
+// contacts, partition 0's share staying on the main lane
+export unsafe function b3LaneCollideBegin(m: b3LaneCollideMain, context: b3StepContext, contactCount: i32, lanes: i32): void {
 	let world = context.world;
 	let ticks = b3LaneNow();
 	let checksum = b3ShapesChecksum(world);
@@ -917,23 +916,18 @@ export unsafe function b3LaneCollidePack(m: b3LaneCollideMain, context: b3StepCo
 	}
 	m.shapeStamps = b3GrowI32(m.shapeStamps, world.shapes.length);
 	m.bodyStamps = b3GrowI32(m.bodyStamps, world.bodies.length);
-
 	for (let p = 0; p <= lanes; ++p) {
 		m.ranges[p] = b3SplitStart(contactCount, p, lanes);
 	}
+	m.pack += b3LaneNow() - ticks;
+}
+
+// Lane p's share of the contacts as one section blob
+export unsafe function b3LaneCollideSection(m: b3LaneCollideMain, context: b3StepContext, p: i32): Blob {
+	let ticks = b3LaneNow();
 	let w = m.writer;
 	w.reset();
-	w.u32(0x43433342);
-	w.u32(<u32>lanes);
-	for (let p = 0; p < 2 * B3_MAX_LANES; ++p) {
-		w.u32(0);
-	}
-	for (let p = 1; p < lanes; ++p) {
-		let sectionStart = w.length;
-		b3PackCollideSection(m, context, m.ranges[p], m.ranges[p + 1]);
-		w.patch(8 + 4 * p, <u32>sectionStart);
-		w.patch(8 + 4 * (lanes + p), <u32>(w.length - sectionStart));
-	}
+	b3PackCollideSection(m, context, m.ranges[p], m.ranges[p + 1]);
 	m.bytesIn += <f64>w.length;
 	let blob = Blob.fromArray(w.buffer, 0, w.length);
 	m.pack += b3LaneNow() - ticks;

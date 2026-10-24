@@ -119,7 +119,7 @@ export function b3LaneAwait(region: SharedRegion, offset: u32, value: u32): u64 
 	let spins: u64 = 0;
 	while (region.atomicLoad(offset) < value) {
 		spins += 1;
-		if (spins == 20000000) {
+		if (spins == 4000000000) {
 			console.log("b3LaneAwait: gave up on region " + region.id.toString() + " word " + offset.toString() + " at " +
 				region.atomicLoad(offset).toString() + " for " + value.toString());
 			break;
