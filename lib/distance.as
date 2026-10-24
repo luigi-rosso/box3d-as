@@ -1091,6 +1091,8 @@ function b3LogVec3(name: string, p: b3Vec3): void {
 
 /// Perform a linear shape cast of shape B moving and shape A fixed. Determines the hit point, normal, and translation fraction.
 /// The query runs in frame A, so the hit point and normal are returned in frame A. Initially touching shapes are a miss.
+const s_castDistanceInput = new b3DistanceInput();
+
 export function b3ShapeCast(input: b3ShapeCastPairInput): b3CastOutput {
 	// Compute tolerance
 	let linearSlop = B3_LINEAR_SLOP();
@@ -1105,7 +1107,8 @@ export function b3ShapeCast(input: b3ShapeCastPairInput): b3CastOutput {
 
 	let alpha: f32 = 0.0;
 
-	let distanceInput = new b3DistanceInput();
+	// C's stack value; b3ShapeCast does not nest
+	let distanceInput = s_castDistanceInput;
 	distanceInput.proxyA = input.proxyA;
 	distanceInput.proxyB = input.proxyB;
 	distanceInput.useRadii = false;
@@ -1312,6 +1315,8 @@ class b3SeparationFunction {
 	}
 }
 
+const s_separationFunction = new b3SeparationFunction(new b3ShapeProxy(), new b3ShapeProxy());
+
 function b3MakeSeparationFunction(
 	cache: b3SimplexCache,
 	proxyA: b3ShapeProxy,
@@ -1323,7 +1328,12 @@ function b3MakeSeparationFunction(
 ): b3SeparationFunction {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(1 <= cache.count && cache.count <= 3);
 
-	let fcn = new b3SeparationFunction(proxyA, proxyB);
+	// C's stack value; one object serves every call, since b3TimeOfImpact does not nest
+	let fcn = s_separationFunction;
+	fcn.proxyA = proxyA;
+	fcn.proxyB = proxyB;
+	fcn.witness1 = b3Vec3();
+	fcn.witness2 = b3Vec3();
 	fcn.sweepA = sweepA;
 	fcn.sweepB = sweepB;
 	fcn.type = b3_separationUnknown;
@@ -1670,6 +1680,8 @@ function b3ForceFixedAxis(fcn: b3SeparationFunction, beta: f32): void {
 /// non-tunneling collisions. If you change the time interval, you should call this function
 /// again.
 // Time of Impact using root finding
+const s_toiDistanceInput = new b3DistanceInput();
+
 export function b3TimeOfImpact(input: b3TOIInput): b3TOIOutput {
 	let output = b3TOIOutput();
 
@@ -1704,9 +1716,9 @@ export function b3TimeOfImpact(input: b3TOIInput): b3TOIOutput {
 	const maxIterations = 25;
 	let distanceIterations = 0;
 
-	// Prepare input for distance query.
+	// Prepare input for distance query. C's stack value; b3TimeOfImpact does not nest.
 	let cache = b3SimplexCache();
-	let distanceInput = new b3DistanceInput();
+	let distanceInput = s_toiDistanceInput;
 	distanceInput.proxyA = proxyA;
 	distanceInput.proxyB = proxyB;
 	distanceInput.useRadii = false;

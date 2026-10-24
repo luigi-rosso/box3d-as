@@ -172,6 +172,25 @@ export function b3GetCompoundSphere(compound: b3CompoundData, index: i32): b3Com
 	return compound.spheres[index];
 }
 
+// The type b3GetCompoundChild would give the child, without building it
+export function b3GetCompoundChildType(compound: b3CompoundData, childIndex: i32): i32 {
+	if (0 <= childIndex && childIndex < compound.capsuleCount) {
+		return b3_capsuleShape;
+	}
+	childIndex -= compound.capsuleCount;
+
+	if (0 <= childIndex && childIndex < compound.hullCount) {
+		return b3_hullShape;
+	}
+	childIndex -= compound.hullCount;
+
+	if (0 <= childIndex && childIndex < compound.meshCount) {
+		return b3_meshShape;
+	}
+
+	return b3_sphereShape;
+}
+
 // C returns the child by value. This fills a caller owned child so hot callers reuse one; a convex
 // child points its material indices at convexMaterial, a one element array the caller owns.
 export function b3GetCompoundChildInto(

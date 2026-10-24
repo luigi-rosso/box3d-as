@@ -43,7 +43,7 @@ import { b3AllocId, b3FreeId } from "./id_pool";
 import { b3Array_RemoveSwap } from "./container";
 import { b3AddKey, b3RemoveKey, b3ShapePairKey } from "./table";
 import { b3EncodeBodySimIndex, b3WakeBody, b3_enableContactRecycling } from "./body";
-import { b3GetCompoundChild, b3GetCompoundChildInto } from "./compound";
+import { b3GetCompoundChildInto, b3GetCompoundChildType } from "./compound";
 import { b3RemoveContactFromGraph } from "./constraint_graph";
 import {
 	b3CollideCapsuleAndSphere,
@@ -251,6 +251,37 @@ export class b3Contact {
 	generation: u32 = 0;
 }
 
+// The zeroed contact of C's (b3Contact){ 0 }, with the mesh contact's cache emptied in place
+function b3ResetContact(contact: b3Contact): void {
+	contact.setIndex = 0;
+	contact.colorIndex = 0;
+	contact.localIndex = 0;
+	contact.edges[0] = b3ContactEdge();
+	contact.edges[1] = b3ContactEdge();
+	contact.shapeIdA = 0;
+	contact.shapeIdB = 0;
+	contact.childIndex = 0;
+	contact.islandId = 0;
+	contact.islandIndex = 0;
+	contact.contactId = 0;
+	contact.encodedBodySimA = 0;
+	contact.encodedBodySimB = 0;
+	contact.flags = 0;
+	contact.manifolds = b3_emptyManifolds;
+	contact.manifoldCount = 0;
+	contact.cachedRotationA = b3Quat();
+	contact.cachedRotationB = b3Quat();
+	contact.cachedRelativePose = b3Transform();
+	contact.friction = 0.0;
+	contact.restitution = 0.0;
+	contact.rollingResistance = 0.0;
+	contact.tangentVelocity = b3Vec3();
+	contact.convexContact = b3ConvexContact();
+	contact.meshContact.triangleCache.length = 0;
+	contact.meshContact.queryBounds = b3AABB();
+	contact.generation = 0;
+}
+
 export struct b3ContactSpec {
 	contactId: i32 = 0;
 
@@ -427,10 +458,10 @@ export function b3CreateContact(world: b3World, shapeA: b3Shape, shapeB: b3Shape
 	let shapeIdA = shapeA.id;
 	let shapeIdB = shapeB.id;
 
-	// *contact = (b3Contact){ 0 } keeping the generation
-	let generation = world.contacts[contactId].generation;
-	let contact = new b3Contact();
-	world.contacts[contactId] = contact;
+	// *contact = (b3Contact){ 0 } keeping the generation, in place as C reuses the slot
+	let contact = world.contacts[contactId];
+	let generation = contact.generation;
+	b3ResetContact(contact);
 	contact.contactId = contactId;
 	contact.generation = generation + 1;
 	contact.setIndex = setIndex;
@@ -447,8 +478,7 @@ export function b3CreateContact(world: b3World, shapeA: b3Shape, shapeB: b3Shape
 	if (shapeA.type == b3_meshShape || shapeA.type == b3_heightShape) {
 		contact.flags |= b3_simMeshContact;
 	} else if (shapeA.type == b3_compoundShape) {
-		let child = b3GetCompoundChild(shapeA.compound!, childIndex);
-		if (child.type == b3_meshShape) {
+		if (b3GetCompoundChildType(shapeA.compound!, childIndex) == b3_meshShape) {
 			contact.flags |= b3_simMeshContact;
 		}
 	}
@@ -634,7 +664,8 @@ export function b3DestroyContact(world: b3World, contact: b3Contact, wakeBodies:
 	world.bodies[bodyIdB].contactCount -= 1;
 
 	if ((contact.flags & b3_simMeshContact) != 0) {
-		contact.meshContact.triangleCache = new Array<b3TriangleCache>();
+		// C destroys the cache array; the slot keeps its storage for the next contact
+		contact.meshContact.triangleCache.length = 0;
 	}
 
 	// Remove contact from the array that owns it
