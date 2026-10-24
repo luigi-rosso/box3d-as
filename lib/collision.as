@@ -1277,6 +1277,11 @@ export class b3CompoundData {
 
 	/// sphereCount entries
 	spheres: StaticArray<b3CompoundSphere> = new StaticArray<b3CompoundSphere>(0);
+
+	// Not in C: the mesh child objects and material index views b3GetCompoundChild hands out, built once per
+	// compound so a contact update allocates none
+	childMeshes: StaticArray<b3Mesh>? = null;
+	childMeshMaterials: StaticArray<Uint16Array>? = null;
 }
 
 /// A capsule that lives in a compound.
