@@ -25,6 +25,7 @@ import {
 	b3IsValidFloat,
 	b3MakeMatrixFromQuat,
 	b3MaxFloat,
+	b3Matrix3,
 	b3MaxInt,
 	b3MinFloat,
 	b3MinInt,
@@ -54,6 +55,7 @@ import {
 	b3LocalManifoldPoint,
 	b3Manifold,
 	b3Mesh,
+	b3HullData,
 	b3MeshTriangle,
 	b3Point2D,
 	b3SATCache,
@@ -74,7 +76,18 @@ import {
 	b3_flatEdge3,
 } from "./collision";
 import { b3SurfaceMaterial, b3_capsuleShape, b3_heightShape, b3_hullShape, b3_meshShape, b3_sphereShape } from "./types";
-import { B3_FORCE_GHOST_COLLISIONS, b3Contact, b3ContactCache, b3TriangleCache, b3_enableSpeculativePoints } from "./contact";
+import {
+	B3_FORCE_GHOST_COLLISIONS,
+	MP_PERSISTED,
+	MP_TOTALNORMALIMPULSE,
+	MP_TRIANGLEINDEX,
+	b3Contact,
+	b3ContactCache,
+	b3ManifoldPointAddress,
+	b3StorePointAnchors,
+	b3TriangleCache,
+	b3_enableSpeculativePoints,
+} from "./contact";
 import { b3MakeFeatureId } from "./manifold";
 import { b3AllocateManifolds, b3FreeManifolds, b3World } from "./physics_world";
 import { b3Shape, b3GetMeshTriangle, b3GetShapeMaterials } from "./shape";
@@ -92,6 +105,15 @@ import {
 	b3SplatW4,
 	b3StoreW4,
 	b3SubW4,
+	b3AddL,
+	b3MaxL,
+	b3MinL,
+	b3MulL,
+	b3SetL,
+	b3SplatL,
+	b3StoreL,
+	b3StoreRow,
+	b3SubL,
 } from "./simd";
 import { b3CTZ32 } from "./ctz";
 import { Q_LOOP } from "./qsort";
@@ -298,6 +320,10 @@ struct b3FoundVertices {
 	keys: FixedArray<i32, 64>;
 	count: i32 = 0;
 }
+
+// The found edges and vertices of b3ComputeMeshManifolds, which does not nest
+let s_foundEdges = b3FoundEdges();
+let s_foundVertices = b3FoundVertices();
 
 @inline function b3AddVertex(vertices: ref b3FoundVertices, vertex: i32): bool {
 	let key = vertex;
@@ -596,96 +622,37 @@ function b3SurfaceMaterialAt(materials: StaticArray<b3SurfaceMaterial>, index: i
 	return materials[index];
 }
 
+// C's memcpy and memset of manifold arrays; both counts are within the arrays
+unsafe function b3CopyManifolds(dst: StaticArray<b3Manifold>, src: StaticArray<b3Manifold>, count: i32): void {
+	if (B3_ASSERT_ENABLED) B3_ASSERT(count <= dst.length && count <= src.length);
+	memory.copy(changetype<usize>(dst), changetype<usize>(src), <usize>count * sizeof<b3Manifold>());
+}
+
+unsafe function b3ZeroManifolds(manifolds: StaticArray<b3Manifold>, count: i32): void {
+	if (B3_ASSERT_ENABLED) B3_ASSERT(count <= manifolds.length);
+	memory.fill(changetype<usize>(manifolds), 0, <usize>count * sizeof<b3Manifold>());
+}
+
+// The four lane prefilter of b3ComputeMeshManifolds: transforms the cached triangles into the frame of shape B, culls
+// those outside the hull bounds and writes the survivors. Its own function keeps the v128 lanes out of the caller's frame.
 @unchecked
-export function b3ComputeMeshManifolds(
-	world: b3World,
-	workerIndex: i32,
-	contact: b3Contact,
+function b3PrefilterTriangles(
 	shapeA: b3Shape,
-	materialMap: Uint16Array?,
-	xfA: b3WorldTransform,
-	shapeB: b3Shape,
-	xfB: b3WorldTransform,
-	isFast: bool,
-): bool {
-	if (B3_ASSERT_ENABLED) B3_ASSERT(shapeA.type == b3_meshShape || shapeA.type == b3_heightShape);
-
-	let context = world.taskContexts[workerIndex];
-
-	b3RefreshCache(contact, shapeA, xfA, shapeB.aabb);
-
-	// Collide with triangles and build manifolds
-	let meshContact = contact.meshContact;
-	let triangleCount = meshContact.triangleCache.length;
-
-	// C's pointer arrays become indices into the manifold buffer
-	if (s_acceptedManifolds.length < triangleCount) {
-		let capacity = b3ScratchCapacity(s_acceptedManifolds.length, triangleCount);
-		s_acceptedManifolds = new StaticArray<i32>(capacity);
-		s_tentativeManifolds = new StaticArray<i32>(capacity);
-		s_tentativeTriangles = new StaticArray<b3TentativeTriangle>(capacity);
-		s_survivorIndices = new StaticArray<i32>(capacity);
-		s_survivorVertices = new StaticArray<b3Vec3>(3 * capacity);
-	}
-	let acceptedManifolds = s_acceptedManifolds;
-	let acceptedManifoldCount = 0;
-	let tentativeManifolds = s_tentativeManifolds;
-	let tentativeManifoldCount = 0;
-	let tentativeTriangles = s_tentativeTriangles;
-	let tentativeTriangleCount = 0;
-
-	let foundEdges: b3FoundEdges;
-	let foundVertices: b3FoundVertices;
-	foundEdges.count = 0;
-	foundVertices.count = 0;
-
-	// This transform converts from mesh frame into the shapeB frame
-	let transformAtoB = b3InvMulWorldTransforms(xfB, xfA);
-	let relativeMatrix = b3MakeMatrixFromQuat(transformAtoB.q);
-	let linearSlop = B3_LINEAR_SLOP();
-
-	// This should push apart shapes after a time of impact event.
-	// In the past I've called this `polygon skin`, but PhysX and Unreal
-	// call it `rest offset` which seems appropriate in this case.
-	// It leads to a small visual gap but seems to improve the quality of mesh
-	// collision, especially for hull versus mesh.
-	let restOffset = B3_MESH_REST_OFFSET();
-	let enableSpeculative = (contact.flags & b3_enableSpeculativePoints) != 0;
-
-	// Make room for clip points
-	let pointBufferCapacity = B3_MAX_POINTS_PER_TRIANGLE * triangleCount;
-
-	if (s_pointBuffer.length < pointBufferCapacity) {
-		s_pointBuffer = new StaticArray<b3LocalManifoldPoint>(b3ScratchCapacity(s_pointBuffer.length, pointBufferCapacity));
-	}
-	let pointBuffer = s_pointBuffer;
-	let totalPointCount = 0;
-
-	// C bumps triangleCount manifolds; a slot is created when first used and reused while it holds no points
-	let manifoldBuffer = s_manifoldBuffer;
-	let manifoldCount = 0;
-
-	let triangleCaches = meshContact.triangleCache;
-
-	let hullB = shapeB.type == b3_hullShape ? shapeB.hull : null;
-	let hullSpeculativeDistance: f32 = enableSpeculative ? B3_SPECULATIVE_DISTANCE() : 0.0;
-	let hullMargin = b3Vec3(hullSpeculativeDistance, hullSpeculativeDistance, hullSpeculativeDistance);
-
-	let survivorIndices = s_survivorIndices;
-	let survivorVertices = s_survivorVertices;
+	triangleCaches: Array<b3TriangleCache>,
+	triangleCount: i32,
+	meshTriangles: StaticArray<b3MeshTriangle>?,
+	meshVertices: StaticArray<b3Vec3>?,
+	meshScale: b3Vec3,
+	meshFlipped: bool,
+	relativeMatrix: b3Matrix3,
+	translation: b3Vec3,
+	hullB: b3HullData?,
+	hullMarginValue: f32,
+	survivorIndices: StaticArray<i32>,
+	survivorVertices: StaticArray<b3Vec3>,
+): i32 {
 	let survivorCount = 0;
-
-	let meshTriangles: StaticArray<b3MeshTriangle>? = null;
-	let meshVertices: StaticArray<b3Vec3>? = null;
-	let meshScale = b3Vec3_one;
-	let meshFlipped = false;
-	if (shapeA.type == b3_meshShape) {
-		meshTriangles = b3GetMeshTriangles(shapeA.mesh!.data);
-		meshVertices = b3GetMeshVertices(shapeA.mesh!.data);
-		meshScale = shapeA.mesh!.scale;
-		meshFlipped = meshScale.x * meshScale.y * meshScale.z < 0.0;
-	}
-
+	let hullMargin = b3Vec3(hullMarginValue, hullMarginValue, hullMarginValue);
 	let cxx = b3SplatW4(relativeMatrix.cx.x);
 	let cxy = b3SplatW4(relativeMatrix.cx.y);
 	let cxz = b3SplatW4(relativeMatrix.cx.z);
@@ -695,9 +662,9 @@ export function b3ComputeMeshManifolds(
 	let czx = b3SplatW4(relativeMatrix.cz.x);
 	let czy = b3SplatW4(relativeMatrix.cz.y);
 	let czz = b3SplatW4(relativeMatrix.cz.z);
-	let px = b3SplatW4(transformAtoB.p.x);
-	let py = b3SplatW4(transformAtoB.p.y);
-	let pz = b3SplatW4(transformAtoB.p.z);
+	let px = b3SplatW4(translation.x);
+	let py = b3SplatW4(translation.y);
+	let pz = b3SplatW4(translation.z);
 
 	let marginW = b3SplatW4(hullMargin.x);
 	let hullBounds = hullB != null ? hullB.aabb : b3AABB();
@@ -735,51 +702,101 @@ export function b3ComputeMeshManifolds(
 			}
 		}
 
-		// Transform triangle into the shape frame
-		let vx: FixedArray<b3FloatW4, 3>;
-		let vy: FixedArray<b3FloatW4, 3>;
-		let vz: FixedArray<b3FloatW4, 3>;
-		for (let k = 0; k < 3; ++k) {
-			let ax = b3SetW4(lanes[k][0].x, lanes[k][1].x, lanes[k][2].x, lanes[k][3].x);
-			let ay = b3SetW4(lanes[k][0].y, lanes[k][1].y, lanes[k][2].y, lanes[k][3].y);
-			let az = b3SetW4(lanes[k][0].z, lanes[k][1].z, lanes[k][2].z, lanes[k][3].z);
-
-			vx[k] = b3AddW4(b3AddW4(b3AddW4(b3MulW4(cxx, ax), b3MulW4(cyx, ay)), b3MulW4(czx, az)), px);
-			vy[k] = b3AddW4(b3AddW4(b3AddW4(b3MulW4(cxy, ax), b3MulW4(cyy, ay)), b3MulW4(czy, az)), py);
-			vz[k] = b3AddW4(b3AddW4(b3AddW4(b3MulW4(cxz, ax), b3MulW4(cyz, ay)), b3MulW4(czz, az)), pz);
-		}
-
 		let keepMask: u32 = (<u32>1 << <u32>laneCount) - 1;
-		if (hullB != null) {
-			let lowerX = b3SubW4(b3MinW4(vx[0], b3MinW4(vx[1], vx[2])), marginW);
-			let lowerY = b3SubW4(b3MinW4(vy[0], b3MinW4(vy[1], vy[2])), marginW);
-			let lowerZ = b3SubW4(b3MinW4(vz[0], b3MinW4(vz[1], vz[2])), marginW);
-			let upperX = b3AddW4(b3MaxW4(vx[0], b3MaxW4(vx[1], vx[2])), marginW);
-			let upperY = b3AddW4(b3MaxW4(vy[0], b3MaxW4(vy[1], vy[2])), marginW);
-			let upperZ = b3AddW4(b3MaxW4(vz[0], b3MaxW4(vz[1], vz[2])), marginW);
+		if (ASC_FEATURE_SIMD) {
+			// The lane math below on v128 lanes, which notes/containers.md shows exact
+			let v0x = b3TransformLaneL<v128>(cxx.x, cyx.x, czx.x, px.x, lanes[0][0], lanes[0][1], lanes[0][2], lanes[0][3]);
+			let v0y = b3TransformLaneL<v128>(cxy.x, cyy.x, czy.x, py.x, lanes[0][0], lanes[0][1], lanes[0][2], lanes[0][3]);
+			let v0z = b3TransformLaneL<v128>(cxz.x, cyz.x, czz.x, pz.x, lanes[0][0], lanes[0][1], lanes[0][2], lanes[0][3]);
+			let v1x = b3TransformLaneL<v128>(cxx.x, cyx.x, czx.x, px.x, lanes[1][0], lanes[1][1], lanes[1][2], lanes[1][3]);
+			let v1y = b3TransformLaneL<v128>(cxy.x, cyy.x, czy.x, py.x, lanes[1][0], lanes[1][1], lanes[1][2], lanes[1][3]);
+			let v1z = b3TransformLaneL<v128>(cxz.x, cyz.x, czz.x, pz.x, lanes[1][0], lanes[1][1], lanes[1][2], lanes[1][3]);
+			let v2x = b3TransformLaneL<v128>(cxx.x, cyx.x, czx.x, px.x, lanes[2][0], lanes[2][1], lanes[2][2], lanes[2][3]);
+			let v2y = b3TransformLaneL<v128>(cxy.x, cyy.x, czy.x, py.x, lanes[2][0], lanes[2][1], lanes[2][2], lanes[2][3]);
+			let v2z = b3TransformLaneL<v128>(cxz.x, cyz.x, czz.x, pz.x, lanes[2][0], lanes[2][1], lanes[2][2], lanes[2][3]);
 
-			let separated = b3OrW4(b3LessThanW4(upperX, hullLowerX), b3GreaterThanW4(lowerX, hullUpperX));
-			separated = b3OrW4(separated, b3OrW4(b3LessThanW4(upperY, hullLowerY), b3GreaterThanW4(lowerY, hullUpperY)));
-			separated = b3OrW4(separated, b3OrW4(b3LessThanW4(upperZ, hullLowerZ), b3GreaterThanW4(lowerZ, hullUpperZ)));
+			if (hullB != null) {
+				let margin = f32x4.splat(marginW.x);
+				let lowerX = b3SubL(b3MinL(v0x, b3MinL(v1x, v2x)), margin);
+				let lowerY = b3SubL(b3MinL(v0y, b3MinL(v1y, v2y)), margin);
+				let lowerZ = b3SubL(b3MinL(v0z, b3MinL(v1z, v2z)), margin);
+				let upperX = b3AddL(b3MaxL(v0x, b3MaxL(v1x, v2x)), margin);
+				let upperY = b3AddL(b3MaxL(v0y, b3MaxL(v1y, v2y)), margin);
+				let upperZ = b3AddL(b3MaxL(v0z, b3MaxL(v1z, v2z)), margin);
 
-			let cullMask = keepMask & <u32>b3MoveMaskW4(separated);
-			keepMask &= ~cullMask;
+				let separated = v128.or(f32x4.lt(upperX, f32x4.splat(hullLowerX.x)), f32x4.gt(lowerX, f32x4.splat(hullUpperX.x)));
+				separated = v128.or(separated, v128.or(f32x4.lt(upperY, f32x4.splat(hullLowerY.x)), f32x4.gt(lowerY, f32x4.splat(hullUpperY.x))));
+				separated = v128.or(separated, v128.or(f32x4.lt(upperZ, f32x4.splat(hullLowerZ.x)), f32x4.gt(lowerZ, f32x4.splat(hullUpperZ.x))));
 
-			while (cullMask != 0) {
-				let lane = b3CTZ32(cullMask);
-				cullMask &= cullMask - 1;
-				triangleCaches[baseIndex + <i32>lane].cache.satCache = b3SATCache();
+				let cullMask = keepMask & <u32>i32x4.bitmask(separated);
+				keepMask &= ~cullMask;
+
+				while (cullMask != 0) {
+					let lane = b3CTZ32(cullMask);
+					cullMask &= cullMask - 1;
+					triangleCaches[baseIndex + <i32>lane].cache.satCache = b3SATCache();
+				}
 			}
-		}
 
-		if (keepMask == 0) {
-			continue;
-		}
+			if (keepMask == 0) {
+				continue;
+			}
 
-		for (let k = 0; k < 3; ++k) {
-			b3StoreW4(x, 4 * k, vx[k]);
-			b3StoreW4(y, 4 * k, vy[k]);
-			b3StoreW4(z, 4 * k, vz[k]);
+			b3StoreLanesL(x, 0, v0x);
+			b3StoreLanesL(y, 0, v0y);
+			b3StoreLanesL(z, 0, v0z);
+			b3StoreLanesL(x, 4, v1x);
+			b3StoreLanesL(y, 4, v1y);
+			b3StoreLanesL(z, 4, v1z);
+			b3StoreLanesL(x, 8, v2x);
+			b3StoreLanesL(y, 8, v2y);
+			b3StoreLanesL(z, 8, v2z);
+		} else {
+			// Transform triangle into the shape frame
+			let vx: FixedArray<b3FloatW4, 3>;
+			let vy: FixedArray<b3FloatW4, 3>;
+			let vz: FixedArray<b3FloatW4, 3>;
+			for (let k = 0; k < 3; ++k) {
+				let ax = b3SetW4(lanes[k][0].x, lanes[k][1].x, lanes[k][2].x, lanes[k][3].x);
+				let ay = b3SetW4(lanes[k][0].y, lanes[k][1].y, lanes[k][2].y, lanes[k][3].y);
+				let az = b3SetW4(lanes[k][0].z, lanes[k][1].z, lanes[k][2].z, lanes[k][3].z);
+
+				vx[k] = b3AddW4(b3AddW4(b3AddW4(b3MulW4(cxx, ax), b3MulW4(cyx, ay)), b3MulW4(czx, az)), px);
+				vy[k] = b3AddW4(b3AddW4(b3AddW4(b3MulW4(cxy, ax), b3MulW4(cyy, ay)), b3MulW4(czy, az)), py);
+				vz[k] = b3AddW4(b3AddW4(b3AddW4(b3MulW4(cxz, ax), b3MulW4(cyz, ay)), b3MulW4(czz, az)), pz);
+			}
+
+			if (hullB != null) {
+				let lowerX = b3SubW4(b3MinW4(vx[0], b3MinW4(vx[1], vx[2])), marginW);
+				let lowerY = b3SubW4(b3MinW4(vy[0], b3MinW4(vy[1], vy[2])), marginW);
+				let lowerZ = b3SubW4(b3MinW4(vz[0], b3MinW4(vz[1], vz[2])), marginW);
+				let upperX = b3AddW4(b3MaxW4(vx[0], b3MaxW4(vx[1], vx[2])), marginW);
+				let upperY = b3AddW4(b3MaxW4(vy[0], b3MaxW4(vy[1], vy[2])), marginW);
+				let upperZ = b3AddW4(b3MaxW4(vz[0], b3MaxW4(vz[1], vz[2])), marginW);
+
+				let separated = b3OrW4(b3LessThanW4(upperX, hullLowerX), b3GreaterThanW4(lowerX, hullUpperX));
+				separated = b3OrW4(separated, b3OrW4(b3LessThanW4(upperY, hullLowerY), b3GreaterThanW4(lowerY, hullUpperY)));
+				separated = b3OrW4(separated, b3OrW4(b3LessThanW4(upperZ, hullLowerZ), b3GreaterThanW4(lowerZ, hullUpperZ)));
+
+				let cullMask = keepMask & <u32>b3MoveMaskW4(separated);
+				keepMask &= ~cullMask;
+
+				while (cullMask != 0) {
+					let lane = b3CTZ32(cullMask);
+					cullMask &= cullMask - 1;
+					triangleCaches[baseIndex + <i32>lane].cache.satCache = b3SATCache();
+				}
+			}
+
+			if (keepMask == 0) {
+				continue;
+			}
+
+			for (let k = 0; k < 3; ++k) {
+				b3StoreW4(x, 4 * k, vx[k]);
+				b3StoreW4(y, 4 * k, vy[k]);
+				b3StoreW4(z, 4 * k, vz[k]);
+			}
 		}
 
 		while (keepMask != 0) {
@@ -793,6 +810,146 @@ export function b3ComputeMeshManifolds(
 			survivorIndices[survivorCount] = baseIndex + lane;
 			survivorCount += 1;
 		}
+	}
+
+	return survivorCount;
+}
+
+// One row of the triangle transform over four lane vertices, ( ( m0 x + m1 y ) + m2 z ) + p as the b3FloatW4 code computes it
+@inline function b3TransformLaneL<T>(m0: f32, m1: f32, m2: f32, p: f32, a: b3Vec3, b: b3Vec3, c: b3Vec3, d: b3Vec3): T {
+	let ax = b3SetL<T>(a.x, b.x, c.x, d.x);
+	let ay = b3SetL<T>(a.y, b.y, c.y, d.y);
+	let az = b3SetL<T>(a.z, b.z, c.z, d.z);
+	return b3AddL(b3AddL(b3AddL(b3MulL(b3SplatL<T>(m0), ax), b3MulL(b3SplatL<T>(m1), ay)), b3MulL(b3SplatL<T>(m2), az)), b3SplatL<T>(p));
+}
+
+// b3StoreW4 of a v128 row into the lane scratch, which has room for three rows
+@inline unsafe function b3StoreLanesL<T>(data: StaticArray<f32>, index: i32, a: T): void {
+	b3StoreL<T>(changetype<usize>(data) + <usize>index * 4, a);
+}
+
+@unchecked
+export unsafe function b3ComputeMeshManifolds(
+	world: b3World,
+	workerIndex: i32,
+	contact: b3Contact,
+	shapeA: b3Shape,
+	materialMap: Uint16Array?,
+	xfA: b3WorldTransform,
+	shapeB: b3Shape,
+	xfB: b3WorldTransform,
+	isFast: bool,
+): bool {
+	if (B3_ASSERT_ENABLED) B3_ASSERT(shapeA.type == b3_meshShape || shapeA.type == b3_heightShape);
+
+	let context = world.taskContexts[workerIndex];
+
+	b3RefreshCache(contact, shapeA, xfA, shapeB.aabb);
+
+	// Collide with triangles and build manifolds
+	let meshContact = contact.meshContact;
+	let triangleCount = meshContact.triangleCache.length;
+
+	// C's pointer arrays become indices into the manifold buffer
+	if (s_acceptedManifolds.length < triangleCount) {
+		let capacity = b3ScratchCapacity(s_acceptedManifolds.length, triangleCount);
+		s_acceptedManifolds = new StaticArray<i32>(capacity);
+		s_tentativeManifolds = new StaticArray<i32>(capacity);
+		s_tentativeTriangles = new StaticArray<b3TentativeTriangle>(capacity);
+		s_survivorIndices = new StaticArray<i32>(capacity);
+		s_survivorVertices = new StaticArray<b3Vec3>(3 * capacity);
+	}
+	let acceptedManifolds = s_acceptedManifolds;
+	let acceptedManifoldCount = 0;
+	let tentativeManifolds = s_tentativeManifolds;
+	let tentativeManifoldCount = 0;
+	let tentativeTriangles = s_tentativeTriangles;
+	let tentativeTriangleCount = 0;
+
+	// C's uninitialized stack arrays; a local struct would zero all 128 keys on every call
+	s_foundEdges.count = 0;
+	s_foundVertices.count = 0;
+
+	// This transform converts from mesh frame into the shapeB frame
+	let transformAtoB = b3InvMulWorldTransforms(xfB, xfA);
+	let relativeMatrix = b3MakeMatrixFromQuat(transformAtoB.q);
+	let linearSlop = B3_LINEAR_SLOP();
+
+	// This should push apart shapes after a time of impact event.
+	// In the past I've called this `polygon skin`, but PhysX and Unreal
+	// call it `rest offset` which seems appropriate in this case.
+	// It leads to a small visual gap but seems to improve the quality of mesh
+	// collision, especially for hull versus mesh.
+	let restOffset = B3_MESH_REST_OFFSET();
+	let enableSpeculative = (contact.flags & b3_enableSpeculativePoints) != 0;
+
+	// Make room for clip points
+	let pointBufferCapacity = B3_MAX_POINTS_PER_TRIANGLE * triangleCount;
+
+	if (s_pointBuffer.length < pointBufferCapacity) {
+		s_pointBuffer = new StaticArray<b3LocalManifoldPoint>(b3ScratchCapacity(s_pointBuffer.length, pointBufferCapacity));
+	}
+	let pointBuffer = s_pointBuffer;
+	let totalPointCount = 0;
+
+	// C bumps triangleCount manifolds; a slot is created when first used and reused while it holds no points
+	let manifoldBuffer = s_manifoldBuffer;
+	let manifoldCount = 0;
+
+	let triangleCaches = meshContact.triangleCache;
+
+	let hullB = shapeB.type == b3_hullShape ? shapeB.hull : null;
+	let hullSpeculativeDistance: f32 = enableSpeculative ? B3_SPECULATIVE_DISTANCE() : 0.0;
+	let hullMargin = b3Vec3(hullSpeculativeDistance, hullSpeculativeDistance, hullSpeculativeDistance);
+
+	let survivorIndices = s_survivorIndices;
+	let survivorVertices = s_survivorVertices;
+
+	let meshTriangles: StaticArray<b3MeshTriangle>? = null;
+	let meshVertices: StaticArray<b3Vec3>? = null;
+	let meshScale = b3Vec3_one;
+	let meshFlipped = false;
+	if (shapeA.type == b3_meshShape) {
+		meshTriangles = b3GetMeshTriangles(shapeA.mesh!.data);
+		meshVertices = b3GetMeshVertices(shapeA.mesh!.data);
+		meshScale = shapeA.mesh!.scale;
+		meshFlipped = meshScale.x * meshScale.y * meshScale.z < 0.0;
+	}
+
+	// Mesh and height field each call the prefilter, which keeps it a function of its own in the release bake
+	let survivorCount = 0;
+	if (meshVertices != null) {
+		survivorCount = b3PrefilterTriangles(
+			shapeA,
+			triangleCaches,
+			triangleCount,
+			meshTriangles,
+			meshVertices,
+			meshScale,
+			meshFlipped,
+			relativeMatrix,
+			transformAtoB.p,
+			hullB,
+			hullMargin.x,
+			survivorIndices,
+			survivorVertices,
+		);
+	} else {
+		survivorCount = b3PrefilterTriangles(
+			shapeA,
+			triangleCaches,
+			triangleCount,
+			null,
+			null,
+			meshScale,
+			meshFlipped,
+			relativeMatrix,
+			transformAtoB.p,
+			hullB,
+			hullMargin.x,
+			survivorIndices,
+			survivorVertices,
+		);
 	}
 
 	let vertices = s_triangleVertices;
@@ -877,24 +1034,24 @@ export function b3ComputeMeshManifolds(
 			manifold.i3 = triangle.i3;
 
 			if (manifold.feature == b3_featureTriangleFace || B3_FORCE_GHOST_COLLISIONS != 0) {
-				b3AddEdge(foundEdges, triangle.i1, triangle.i2);
-				b3AddEdge(foundEdges, triangle.i2, triangle.i3);
-				b3AddEdge(foundEdges, triangle.i3, triangle.i1);
-				b3AddVertex(foundVertices, triangle.i1);
-				b3AddVertex(foundVertices, triangle.i2);
-				b3AddVertex(foundVertices, triangle.i3);
+				b3AddEdge(s_foundEdges, triangle.i1, triangle.i2);
+				b3AddEdge(s_foundEdges, triangle.i2, triangle.i3);
+				b3AddEdge(s_foundEdges, triangle.i3, triangle.i1);
+				b3AddVertex(s_foundVertices, triangle.i1);
+				b3AddVertex(s_foundVertices, triangle.i2);
+				b3AddVertex(s_foundVertices, triangle.i3);
 
 				acceptedManifolds[acceptedManifoldCount] = manifoldCount - 1;
 				acceptedManifoldCount += 1;
 			} else if (manifold.feature == b3_featureHullFace) {
 				let cosNormalAngle = b3Dot(manifold.triangleNormal, manifold.normal);
 				if (cosNormalAngle > 0.5) {
-					b3AddEdge(foundEdges, triangle.i1, triangle.i2);
-					b3AddEdge(foundEdges, triangle.i2, triangle.i3);
-					b3AddEdge(foundEdges, triangle.i3, triangle.i1);
-					b3AddVertex(foundVertices, triangle.i1);
-					b3AddVertex(foundVertices, triangle.i2);
-					b3AddVertex(foundVertices, triangle.i3);
+					b3AddEdge(s_foundEdges, triangle.i1, triangle.i2);
+					b3AddEdge(s_foundEdges, triangle.i2, triangle.i3);
+					b3AddEdge(s_foundEdges, triangle.i3, triangle.i1);
+					b3AddVertex(s_foundVertices, triangle.i1);
+					b3AddVertex(s_foundVertices, triangle.i2);
+					b3AddVertex(s_foundVertices, triangle.i3);
 
 					acceptedManifolds[acceptedManifoldCount] = manifoldCount - 1;
 					acceptedManifoldCount += 1;
@@ -906,12 +1063,12 @@ export function b3ComputeMeshManifolds(
 
 					if (minSeparation < -2.0 * linearSlop) {
 						// Deep overlap
-						b3AddEdge(foundEdges, triangle.i1, triangle.i2);
-						b3AddEdge(foundEdges, triangle.i2, triangle.i3);
-						b3AddEdge(foundEdges, triangle.i3, triangle.i1);
-						b3AddVertex(foundVertices, triangle.i1);
-						b3AddVertex(foundVertices, triangle.i2);
-						b3AddVertex(foundVertices, triangle.i3);
+						b3AddEdge(s_foundEdges, triangle.i1, triangle.i2);
+						b3AddEdge(s_foundEdges, triangle.i2, triangle.i3);
+						b3AddEdge(s_foundEdges, triangle.i3, triangle.i1);
+						b3AddVertex(s_foundVertices, triangle.i1);
+						b3AddVertex(s_foundVertices, triangle.i2);
+						b3AddVertex(s_foundVertices, triangle.i3);
 						acceptedManifolds[acceptedManifoldCount] = manifoldCount - 1;
 						acceptedManifoldCount += 1;
 					} else {
@@ -950,12 +1107,12 @@ export function b3ComputeMeshManifolds(
 			let tentativeIndex = tentativeManifolds[tentativeTriangles[i].index];
 			let m = manifoldBuffer[tentativeIndex];
 
-			let addedEdge1 = b3AddEdge(foundEdges, m.i1, m.i2);
-			let addedEdge2 = b3AddEdge(foundEdges, m.i2, m.i3);
-			let addedEdge3 = b3AddEdge(foundEdges, m.i3, m.i1);
-			let addedVertex1 = b3AddVertex(foundVertices, m.i1);
-			let addedVertex2 = b3AddVertex(foundVertices, m.i2);
-			let addedVertex3 = b3AddVertex(foundVertices, m.i3);
+			let addedEdge1 = b3AddEdge(s_foundEdges, m.i1, m.i2);
+			let addedEdge2 = b3AddEdge(s_foundEdges, m.i2, m.i3);
+			let addedEdge3 = b3AddEdge(s_foundEdges, m.i3, m.i1);
+			let addedVertex1 = b3AddVertex(s_foundVertices, m.i1);
+			let addedVertex2 = b3AddVertex(s_foundVertices, m.i2);
+			let addedVertex3 = b3AddVertex(s_foundVertices, m.i3);
 
 			let feature: b3TriangleFeature = m.feature;
 			let shouldCollide = false;
@@ -1012,19 +1169,19 @@ export function b3ComputeMeshManifolds(
 			}
 
 			if ((triangleFlags & b3_flatEdge1) == b3_flatEdge1) {
-				if (b3FindEdge(foundEdges, m.i1, m.i2)) {
+				if (b3FindEdge(s_foundEdges, m.i1, m.i2)) {
 					continue;
 				}
 			}
 
 			if ((triangleFlags & b3_flatEdge2) == b3_flatEdge2) {
-				if (b3FindEdge(foundEdges, m.i2, m.i3)) {
+				if (b3FindEdge(s_foundEdges, m.i2, m.i3)) {
 					continue;
 				}
 			}
 
 			if ((triangleFlags & b3_flatEdge3) == b3_flatEdge3) {
-				if (b3FindEdge(foundEdges, m.i3, m.i1)) {
+				if (b3FindEdge(s_foundEdges, m.i3, m.i1)) {
 					continue;
 				}
 			}
@@ -1155,9 +1312,7 @@ export function b3ComputeMeshManifolds(
 		s_consumed = new StaticArray<bool>(capacity);
 	}
 	let oldManifolds = s_oldManifolds;
-	for (let i = 0; i < oldManifoldCount; ++i) {
-		oldManifolds[i] = contact.manifolds[i];
-	}
+	b3CopyManifolds(oldManifolds, contact.manifolds, oldManifoldCount);
 
 	// Resize manifolds if needed
 	if (oldManifoldCount != clusterCount) {
@@ -1166,10 +1321,7 @@ export function b3ComputeMeshManifolds(
 		contact.manifoldCount = <i32>(<u16>clusterCount);
 	} else {
 		// Mem zero manifolds
-		for (let i = 0; i < contact.manifoldCount; ++i) {
-			let zero: b3Manifold;
-			contact.manifolds[i] = zero;
-		}
+		b3ZeroManifolds(contact.manifolds, contact.manifoldCount);
 	}
 
 	let consumed = s_consumed;
@@ -1218,25 +1370,25 @@ export function b3ComputeMeshManifolds(
 
 		for (let j = 0; j < pointCount; ++j) {
 			let source = clusterPoints[cm.pointOffset + j];
-			ref target = manifold.points[j];
 
 			// Contact points are computed in frame B
-			target.anchorB = b3MulMV(matrixB, source.point);
-			target.anchorA = b3Add(target.anchorB, offsetA);
-			target.separation = source.separation - restOffset;
-			target.featureId = b3MakeFeatureId(source.pair);
-			target.triangleIndex = source.triangleIndex;
+			let anchorB = b3MulMV(matrixB, source.point);
+			let anchorA = b3Add(anchorB, offsetA);
+			let featureId = b3MakeFeatureId(source.pair);
+			let triangleIndex = source.triangleIndex;
 
-			// Preserve normal impulse if possible
+			// Preserve normal impulse if possible. The manifold was zeroed, so the other fields hold zero.
+			let normalImpulse: f32 = 0.0;
+			let persisted = false;
 			if (matchedIndex != B3_NULL_INDEX) {
 				ref matchedManifold = oldManifolds[matchedIndex];
 				let oldPointCount = matchedManifold.pointCount;
 				for (let k = 0; k < oldPointCount; ++k) {
 					ref oldPt = matchedManifold.points[k];
 
-					if (target.featureId == oldPt.featureId && target.triangleIndex == oldPt.triangleIndex) {
-						target.normalImpulse = oldPt.normalImpulse;
-						target.persisted = true;
+					if (featureId == oldPt.featureId && triangleIndex == oldPt.triangleIndex) {
+						normalImpulse = oldPt.normalImpulse;
+						persisted = true;
 
 						// claimed
 						oldPt.triangleIndex = B3_NULL_INDEX;
@@ -1244,6 +1396,12 @@ export function b3ComputeMeshManifolds(
 					}
 				}
 			}
+
+			let mp = b3ManifoldPointAddress(contact.manifolds, i, j);
+			b3StorePointAnchors(mp, anchorA, anchorB, source.separation - restOffset, normalImpulse);
+			b3StoreRow(mp + MP_TOTALNORMALIMPULSE, 0.0, 0.0, 0.0, reinterpret<f32>(featureId));
+			store<i32>(mp + MP_TRIANGLEINDEX, triangleIndex);
+			store<bool>(mp + MP_PERSISTED, persisted);
 		}
 	}
 

@@ -117,27 +117,6 @@ function b3BarycentricCoordsEdge(a: b3Vec3, b: b3Vec3): FixedArray<f32, 3> {
 	return out;
 }
 
-function b3BarycentricCoordsTri(a: b3Vec3, b: b3Vec3, c: b3Vec3): FixedArray<f32, 4> {
-	let out: FixedArray<f32, 4>;
-	let ab = b3Sub(b, a);
-	let ac = b3Sub(c, a);
-
-	let bXC = b3Cross(b, c);
-	let cXA = b3Cross(c, a);
-	let aXB = b3Cross(a, b);
-
-	let abXAc = b3Cross(ab, ac);
-
-	// Last element is divisor
-	let divisor = b3Dot(abXAc, abXAc);
-
-	out[0] = b3Dot(bXC, abXAc);
-	out[1] = b3Dot(cXA, abXAc);
-	out[2] = b3Dot(aXB, abXAc);
-	out[3] = divisor;
-	return out;
-}
-
 function b3BarycentricCoordsTet(a: b3Vec3, b: b3Vec3, c: b3Vec3, d: b3Vec3): FixedArray<f32, 5> {
 	let out: FixedArray<f32, 5>;
 	let ab = b3Sub(b, a);
@@ -156,7 +135,7 @@ function b3BarycentricCoordsTet(a: b3Vec3, b: b3Vec3, c: b3Vec3, d: b3Vec3): Fix
 	return out;
 }
 
-function b3GetMetric(simplex: ref b3Simplex): f32 {
+@inline function b3GetMetric(simplex: ref b3Simplex): f32 {
 	let count = simplex.count;
 	if (B3_ASSERT_ENABLED) B3_ASSERT(1 <= count && count <= 4);
 
@@ -297,7 +276,18 @@ function b3SolveSimplex3(simplex: ref b3Simplex): bool {
 	}
 
 	// Edge regions
-	let wABC = b3BarycentricCoordsTri(v1.w, v2.w, v3.w);
+	// wABC = b3BarycentricCoordsTri( v1.w, v2.w, v3.w ) written out: with no calls left in
+	// b3ShapeDistance, WAMR keeps the memory base and bound in registers there (notes/perf_3.md)
+	let wABC: FixedArray<f32, 4>;
+	{
+		let ab = b3Sub(v2.w, v1.w);
+		let ac = b3Sub(v3.w, v1.w);
+		let abXAc = b3Cross(ab, ac);
+		wABC[0] = b3Dot(b3Cross(v2.w, v3.w), abXAc);
+		wABC[1] = b3Dot(b3Cross(v3.w, v1.w), abXAc);
+		wABC[2] = b3Dot(b3Cross(v1.w, v2.w), abXAc);
+		wABC[3] = b3Dot(abXAc, abXAc);
+	}
 
 	// VR( AB )
 	if (wABC[2] <= 0.0 && wAB[0] > 0.0 && wAB[1] > 0.0) {
@@ -431,10 +421,50 @@ function b3SolveSimplex4(simplex: ref b3Simplex): bool {
 	}
 
 	// Edge region
-	let wACB = b3BarycentricCoordsTri(vertexA.w, vertexC.w, vertexB.w);
-	let wABD = b3BarycentricCoordsTri(vertexA.w, vertexB.w, vertexD.w);
-	let wADC = b3BarycentricCoordsTri(vertexA.w, vertexD.w, vertexC.w);
-	let wBCD = b3BarycentricCoordsTri(vertexB.w, vertexC.w, vertexD.w);
+	// wACB = b3BarycentricCoordsTri( vertexA.w, vertexC.w, vertexB.w ) written out
+	let wACB: FixedArray<f32, 4>;
+	{
+		let ab = b3Sub(vertexC.w, vertexA.w);
+		let ac = b3Sub(vertexB.w, vertexA.w);
+		let abXAc = b3Cross(ab, ac);
+		wACB[0] = b3Dot(b3Cross(vertexC.w, vertexB.w), abXAc);
+		wACB[1] = b3Dot(b3Cross(vertexB.w, vertexA.w), abXAc);
+		wACB[2] = b3Dot(b3Cross(vertexA.w, vertexC.w), abXAc);
+		wACB[3] = b3Dot(abXAc, abXAc);
+	}
+	// wABD = b3BarycentricCoordsTri( vertexA.w, vertexB.w, vertexD.w ) written out
+	let wABD: FixedArray<f32, 4>;
+	{
+		let ab = b3Sub(vertexB.w, vertexA.w);
+		let ac = b3Sub(vertexD.w, vertexA.w);
+		let abXAc = b3Cross(ab, ac);
+		wABD[0] = b3Dot(b3Cross(vertexB.w, vertexD.w), abXAc);
+		wABD[1] = b3Dot(b3Cross(vertexD.w, vertexA.w), abXAc);
+		wABD[2] = b3Dot(b3Cross(vertexA.w, vertexB.w), abXAc);
+		wABD[3] = b3Dot(abXAc, abXAc);
+	}
+	// wADC = b3BarycentricCoordsTri( vertexA.w, vertexD.w, vertexC.w ) written out
+	let wADC: FixedArray<f32, 4>;
+	{
+		let ab = b3Sub(vertexD.w, vertexA.w);
+		let ac = b3Sub(vertexC.w, vertexA.w);
+		let abXAc = b3Cross(ab, ac);
+		wADC[0] = b3Dot(b3Cross(vertexD.w, vertexC.w), abXAc);
+		wADC[1] = b3Dot(b3Cross(vertexC.w, vertexA.w), abXAc);
+		wADC[2] = b3Dot(b3Cross(vertexA.w, vertexD.w), abXAc);
+		wADC[3] = b3Dot(abXAc, abXAc);
+	}
+	// wBCD = b3BarycentricCoordsTri( vertexB.w, vertexC.w, vertexD.w ) written out
+	let wBCD: FixedArray<f32, 4>;
+	{
+		let ab = b3Sub(vertexC.w, vertexB.w);
+		let ac = b3Sub(vertexD.w, vertexB.w);
+		let abXAc = b3Cross(ab, ac);
+		wBCD[0] = b3Dot(b3Cross(vertexC.w, vertexD.w), abXAc);
+		wBCD[1] = b3Dot(b3Cross(vertexD.w, vertexB.w), abXAc);
+		wBCD[2] = b3Dot(b3Cross(vertexB.w, vertexC.w), abXAc);
+		wBCD[3] = b3Dot(abXAc, abXAc);
+	}
 
 	// VR( AB )
 	if (wABD[2] <= 0.0 && wACB[1] <= 0.0 && wAB[0] > 0.0 && wAB[1] > 0.0) {
@@ -652,7 +682,7 @@ function b3SolveSimplex4(simplex: ref b3Simplex): bool {
 	return true;
 }
 
-function b3ComputeWitnessPoints(simplex: ref b3Simplex, vertexA: ref b3Vec3, vertexB: ref b3Vec3): void {
+@inline function b3ComputeWitnessPoints(simplex: ref b3Simplex, vertexA: ref b3Vec3, vertexB: ref b3Vec3): void {
 	let count = simplex.count;
 	if (B3_ASSERT_ENABLED) B3_ASSERT(1 <= count && count <= 4);
 
@@ -1061,6 +1091,8 @@ function b3LogVec3(name: string, p: b3Vec3): void {
 
 /// Perform a linear shape cast of shape B moving and shape A fixed. Determines the hit point, normal, and translation fraction.
 /// The query runs in frame A, so the hit point and normal are returned in frame A. Initially touching shapes are a miss.
+const s_castDistanceInput = new b3DistanceInput();
+
 export function b3ShapeCast(input: b3ShapeCastPairInput): b3CastOutput {
 	// Compute tolerance
 	let linearSlop = B3_LINEAR_SLOP();
@@ -1075,7 +1107,8 @@ export function b3ShapeCast(input: b3ShapeCastPairInput): b3CastOutput {
 
 	let alpha: f32 = 0.0;
 
-	let distanceInput = new b3DistanceInput();
+	// C's stack value; b3ShapeCast does not nest
+	let distanceInput = s_castDistanceInput;
 	distanceInput.proxyA = input.proxyA;
 	distanceInput.proxyB = input.proxyB;
 	distanceInput.useRadii = false;
@@ -1282,6 +1315,8 @@ class b3SeparationFunction {
 	}
 }
 
+const s_separationFunction = new b3SeparationFunction(new b3ShapeProxy(), new b3ShapeProxy());
+
 function b3MakeSeparationFunction(
 	cache: b3SimplexCache,
 	proxyA: b3ShapeProxy,
@@ -1293,7 +1328,12 @@ function b3MakeSeparationFunction(
 ): b3SeparationFunction {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(1 <= cache.count && cache.count <= 3);
 
-	let fcn = new b3SeparationFunction(proxyA, proxyB);
+	// C's stack value; one object serves every call, since b3TimeOfImpact does not nest
+	let fcn = s_separationFunction;
+	fcn.proxyA = proxyA;
+	fcn.proxyB = proxyB;
+	fcn.witness1 = b3Vec3();
+	fcn.witness2 = b3Vec3();
 	fcn.sweepA = sweepA;
 	fcn.sweepB = sweepB;
 	fcn.type = b3_separationUnknown;
@@ -1640,6 +1680,8 @@ function b3ForceFixedAxis(fcn: b3SeparationFunction, beta: f32): void {
 /// non-tunneling collisions. If you change the time interval, you should call this function
 /// again.
 // Time of Impact using root finding
+const s_toiDistanceInput = new b3DistanceInput();
+
 export function b3TimeOfImpact(input: b3TOIInput): b3TOIOutput {
 	let output = b3TOIOutput();
 
@@ -1674,9 +1716,9 @@ export function b3TimeOfImpact(input: b3TOIInput): b3TOIOutput {
 	const maxIterations = 25;
 	let distanceIterations = 0;
 
-	// Prepare input for distance query.
+	// Prepare input for distance query. C's stack value; b3TimeOfImpact does not nest.
 	let cache = b3SimplexCache();
-	let distanceInput = new b3DistanceInput();
+	let distanceInput = s_toiDistanceInput;
 	distanceInput.proxyA = proxyA;
 	distanceInput.proxyB = proxyB;
 	distanceInput.useRadii = false;

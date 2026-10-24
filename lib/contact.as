@@ -43,7 +43,7 @@ import { b3AllocId, b3FreeId } from "./id_pool";
 import { b3Array_RemoveSwap } from "./container";
 import { b3AddKey, b3RemoveKey, b3ShapePairKey } from "./table";
 import { b3EncodeBodySimIndex, b3WakeBody, b3_enableContactRecycling } from "./body";
-import { b3GetCompoundChild, b3GetCompoundChildInto } from "./compound";
+import { b3GetCompoundChildInto, b3GetCompoundChildType } from "./compound";
 import { b3RemoveContactFromGraph } from "./constraint_graph";
 import {
 	b3CollideCapsuleAndSphere,
@@ -56,6 +56,7 @@ import {
 } from "./convex_manifold";
 import { b3UnlinkContact } from "./island";
 import { b3MakeFeatureId } from "./manifold";
+import { b3StoreRow } from "./simd";
 import { b3ComputeMeshManifolds } from "./mesh_contact";
 import {
 	b3AllocateManifolds,
@@ -67,7 +68,6 @@ import {
 	b3_staticSet,
 } from "./physics_world";
 import {
-	b3CopyShapeInto,
 	b3GetShapeMaterials,
 	b3Shape,
 	b3_enableContactEvents,
@@ -77,6 +77,33 @@ import {
 } from "./shape";
 
 export const B3_FORCE_GHOST_COLLISIONS: i32 = 0;
+
+// Manifold point writes as 16 byte rows (b3StoreRow). The point fields run anchorA, anchorB, separation, normalImpulse,
+// totalNormalImpulse, normalVelocity, baseSeparation, featureId, so the rows below follow that order.
+export const MP_ANCHORA = offsetof<b3ManifoldPoint>("anchorA");
+export const MP_ANCHORB = offsetof<b3ManifoldPoint>("anchorB");
+export const MP_SEPARATION = offsetof<b3ManifoldPoint>("separation");
+export const MP_NORMALIMPULSE = offsetof<b3ManifoldPoint>("normalImpulse");
+export const MP_TOTALNORMALIMPULSE = offsetof<b3ManifoldPoint>("totalNormalImpulse");
+export const MP_BASESEPARATION = offsetof<b3ManifoldPoint>("baseSeparation");
+export const MP_TRIANGLEINDEX = offsetof<b3ManifoldPoint>("triangleIndex");
+export const MP_PERSISTED = offsetof<b3ManifoldPoint>("persisted");
+
+// The address of point pointIndex of manifold manifoldIndex; both are below the counts the caller holds
+@inline export unsafe function b3ManifoldPointAddress(manifolds: StaticArray<b3Manifold>, manifoldIndex: i32, pointIndex: i32): usize {
+	return (
+		changetype<usize>(manifolds) +
+		<usize>manifoldIndex * sizeof<b3Manifold>() +
+		offsetof<b3Manifold>("points") +
+		<usize>pointIndex * sizeof<b3ManifoldPoint>()
+	);
+}
+
+// anchorA, anchorB, separation and normalImpulse of the point at mp
+@inline export unsafe function b3StorePointAnchors(mp: usize, anchorA: b3Vec3, anchorB: b3Vec3, separation: f32, normalImpulse: f32): void {
+	b3StoreRow(mp + MP_ANCHORA, anchorA.x, anchorA.y, anchorA.z, anchorB.x);
+	b3StoreRow(mp + MP_ANCHORB + 4, anchorB.y, anchorB.z, separation, normalImpulse);
+}
 
 // The C union becomes one field per member; they do not alias. A contact only ever uses the member
 // matching its shape B type.
@@ -208,20 +235,51 @@ export class b3Contact {
 	cachedRelativePose: b3Transform = b3Transform();
 
 	// Mixed friction and restitution
+	// The solver gathers friction, restitution and rolling resistance as one row, so they stay in this order.
 	friction: f32 = 0;
+	restitution: f32 = 0;
+	rollingResistance: f32 = 0;
+	tangentVelocity: b3Vec3 = b3Vec3();
 
 	// Usage determined by b3_simMeshContact in simFlags
 	// The C union becomes one field per member.
 	convexContact: b3ConvexContact = b3ConvexContact();
 	meshContact: b3MeshContact = new b3MeshContact();
 
-	restitution: f32 = 0;
-	rollingResistance: f32 = 0;
-	tangentVelocity: b3Vec3 = b3Vec3();
-
 	// This is monotonically advanced when a contact is allocated in this slot
 	// Used to check for invalid b3ContactId
 	generation: u32 = 0;
+}
+
+// The zeroed contact of C's (b3Contact){ 0 }, with the mesh contact's cache emptied in place
+function b3ResetContact(contact: b3Contact): void {
+	contact.setIndex = 0;
+	contact.colorIndex = 0;
+	contact.localIndex = 0;
+	contact.edges[0] = b3ContactEdge();
+	contact.edges[1] = b3ContactEdge();
+	contact.shapeIdA = 0;
+	contact.shapeIdB = 0;
+	contact.childIndex = 0;
+	contact.islandId = 0;
+	contact.islandIndex = 0;
+	contact.contactId = 0;
+	contact.encodedBodySimA = 0;
+	contact.encodedBodySimB = 0;
+	contact.flags = 0;
+	contact.manifolds = b3_emptyManifolds;
+	contact.manifoldCount = 0;
+	contact.cachedRotationA = b3Quat();
+	contact.cachedRotationB = b3Quat();
+	contact.cachedRelativePose = b3Transform();
+	contact.friction = 0.0;
+	contact.restitution = 0.0;
+	contact.rollingResistance = 0.0;
+	contact.tangentVelocity = b3Vec3();
+	contact.convexContact = b3ConvexContact();
+	contact.meshContact.triangleCache.length = 0;
+	contact.meshContact.queryBounds = b3AABB();
+	contact.generation = 0;
 }
 
 export struct b3ContactSpec {
@@ -400,10 +458,10 @@ export function b3CreateContact(world: b3World, shapeA: b3Shape, shapeB: b3Shape
 	let shapeIdA = shapeA.id;
 	let shapeIdB = shapeB.id;
 
-	// *contact = (b3Contact){ 0 } keeping the generation
-	let generation = world.contacts[contactId].generation;
-	let contact = new b3Contact();
-	world.contacts[contactId] = contact;
+	// *contact = (b3Contact){ 0 } keeping the generation, in place as C reuses the slot
+	let contact = world.contacts[contactId];
+	let generation = contact.generation;
+	b3ResetContact(contact);
 	contact.contactId = contactId;
 	contact.generation = generation + 1;
 	contact.setIndex = setIndex;
@@ -420,8 +478,7 @@ export function b3CreateContact(world: b3World, shapeA: b3Shape, shapeB: b3Shape
 	if (shapeA.type == b3_meshShape || shapeA.type == b3_heightShape) {
 		contact.flags |= b3_simMeshContact;
 	} else if (shapeA.type == b3_compoundShape) {
-		let child = b3GetCompoundChild(shapeA.compound!, childIndex);
-		if (child.type == b3_meshShape) {
+		if (b3GetCompoundChildType(shapeA.compound!, childIndex) == b3_meshShape) {
 			contact.flags |= b3_simMeshContact;
 		}
 	}
@@ -607,7 +664,8 @@ export function b3DestroyContact(world: b3World, contact: b3Contact, wakeBodies:
 	world.bodies[bodyIdB].contactCount -= 1;
 
 	if ((contact.flags & b3_simMeshContact) != 0) {
-		contact.meshContact.triangleCache = new Array<b3TriangleCache>();
+		// C destroys the cache array; the slot keeps its storage for the next contact
+		contact.meshContact.triangleCache.length = 0;
 	}
 
 	// Remove contact from the array that owns it
@@ -656,7 +714,7 @@ const s_contactChildMaterial = new Uint16Array(1);
 const s_contactChildShape = new b3Shape();
 const s_contactChildMaterials = new StaticArray<b3SurfaceMaterial>(1);
 
-function b3ComputeConvexManifold(
+unsafe function b3ComputeConvexManifold(
 	world: b3World,
 	workerIndex: i32,
 	contact: b3Contact,
@@ -757,30 +815,22 @@ function b3ComputeConvexManifold(
 	let matrixA = b3MakeMatrixFromQuat(xfA.q);
 	manifold.normal = b3MulMV(matrixA, geomManifold.normal);
 
-	// Store point data in contact
+	// Store point data in contact and copy impulses from old points. C stores every point before matching any;
+	// a point's match reads only its own feature id and the old points, so one pass per point is the same.
 	for (let i = 0; i < geomManifold.pointCount; ++i) {
 		let source = geomManifold.points[geomManifold.pointOffset + i];
-		ref target = manifold.points[i];
 
 		// Contact points are computed in frame A
-		target.anchorA = b3MulMV(matrixA, source.point);
-		target.anchorB = b3Add(target.anchorA, b3SubPos(xfA.p, xfB.p));
-		target.separation = source.separation;
-		target.featureId = b3MakeFeatureId(source.pair);
-		target.triangleIndex = B3_NULL_INDEX;
-		target.normalVelocity = 0.0;
-	}
+		let anchorA = b3MulMV(matrixA, source.point);
+		let anchorB = b3Add(anchorA, b3SubPos(xfA.p, xfB.p));
+		let featureId = b3MakeFeatureId(source.pair);
 
-	// Copy impulses from old points
-	for (let i = 0; i < geomManifold.pointCount; ++i) {
-		ref pt2 = manifold.points[i];
-		pt2.totalNormalImpulse = 0.0;
-		pt2.persisted = false;
-
+		let normalImpulse: f32 = 0.0;
+		let persisted = false;
 		for (let j = 0; j < oldCount; ++j) {
-			if (pt2.featureId == oldPoints[j].featureId) {
-				pt2.normalImpulse = oldPoints[j].normalImpulse;
-				pt2.persisted = true;
+			if (featureId == oldPoints[j].featureId) {
+				normalImpulse = oldPoints[j].normalImpulse;
+				persisted = true;
 
 				// claimed
 				oldPoints[j].featureId = UINT32_MAX;
@@ -789,15 +839,17 @@ function b3ComputeConvexManifold(
 			}
 		}
 
-		if (pt2.persisted == false) {
-			pt2.normalImpulse = 0.0;
-		}
+		let mp = b3ManifoldPointAddress(contact.manifolds, 0, i);
+		b3StorePointAnchors(mp, anchorA, anchorB, source.separation, normalImpulse);
+		b3StoreRow(mp + MP_TOTALNORMALIMPULSE, 0.0, 0.0, load<f32>(mp + MP_BASESEPARATION), reinterpret<f32>(featureId));
+		store<i32>(mp + MP_TRIANGLEINDEX, B3_NULL_INDEX);
+		store<bool>(mp + MP_PERSISTED, persisted);
 	}
 
 	return true;
 }
 
-function b3UpdateConvexContact(
+unsafe function b3UpdateConvexContact(
 	world: b3World,
 	workerIndex: i32,
 	contact: b3Contact,
@@ -823,10 +875,10 @@ function b3UpdateConvexContact(
 		manifold.normal = b3Neg(manifold.normal);
 		let pointCount = manifold.pointCount;
 		for (let i = 0; i < pointCount; ++i) {
-			ref mp = manifold.points[i];
-			let t = mp.anchorA;
-			mp.anchorA = mp.anchorB;
-			mp.anchorB = t;
+			let mp = b3ManifoldPointAddress(contact.manifolds, 0, i);
+			let anchorA = load<b3Vec3>(mp + MP_ANCHORA);
+			let anchorB = load<b3Vec3>(mp + MP_ANCHORB);
+			b3StorePointAnchors(mp, anchorB, anchorA, load<f32>(mp + MP_SEPARATION), load<f32>(mp + MP_NORMALIMPULSE));
 		}
 	}
 
@@ -911,7 +963,7 @@ function b3UpdateConvexContact(
 
 // Update the contact manifold and touching status.
 // Note: do not assume the shape AABBs are overlapping or are valid.
-export function b3UpdateContact(
+export unsafe function b3UpdateContact(
 	world: b3World,
 	workerIndex: i32,
 	contact: b3Contact,
@@ -932,9 +984,14 @@ export function b3UpdateContact(
 		let child = s_contactChild;
 		b3GetCompoundChildInto(shapeA.compound!, childIndex, child, s_contactChildMaterial);
 
-		// Temporary child shape to match existing function signatures
+		// Temporary child shape to match existing function signatures. C copies the whole shape; the paths below read
+		// only its identity, flags, type, materials and the child geometry, so those are what is copied.
 		let childShapeA = s_contactChildShape;
-		b3CopyShapeInto(childShapeA, shapeA);
+		childShapeA.id = shapeA.id;
+		childShapeA.generation = shapeA.generation;
+		childShapeA.flags = shapeA.flags;
+		childShapeA.materialCount = shapeA.materialCount;
+		childShapeA.materials = shapeA.materials;
 
 		childShapeA.type = child.type;
 
@@ -1006,11 +1063,11 @@ export function b3UpdateContact(
 		let manifoldCount = contact.manifoldCount;
 		let offset = b3RotateVector(xfA.q, child.transform.p);
 		for (let i = 0; i < manifoldCount; ++i) {
-			ref manifold = contact.manifolds[i];
-			let pointCount = manifold.pointCount;
+			let pointCount = contact.manifolds[i].pointCount;
 			for (let j = 0; j < pointCount; ++j) {
-				ref mp = manifold.points[j];
-				mp.anchorA = b3Add(mp.anchorA, offset);
+				let mp = b3ManifoldPointAddress(contact.manifolds, i, j);
+				let anchorA = b3Add(load<b3Vec3>(mp + MP_ANCHORA), offset);
+				b3StoreRow(mp + MP_ANCHORA, anchorA.x, anchorA.y, anchorA.z, load<f32>(mp + MP_ANCHORB));
 			}
 		}
 	} else if (shapeA.type == b3_meshShape || shapeA.type == b3_heightShape) {
@@ -1038,11 +1095,12 @@ export function b3UpdateContact(
 
 		// Adjust anchors to be relative to center of mass
 		for (let i = 0; i < contact.manifoldCount; ++i) {
-			ref manifold = contact.manifolds[i];
-			for (let j = 0; j < manifold.pointCount; ++j) {
-				ref mp = manifold.points[j];
-				mp.anchorA = b3Sub(mp.anchorA, centerA);
-				mp.anchorB = b3Sub(mp.anchorB, centerB);
+			let pointCount = contact.manifolds[i].pointCount;
+			for (let j = 0; j < pointCount; ++j) {
+				let mp = b3ManifoldPointAddress(contact.manifolds, i, j);
+				let anchorA = b3Sub(load<b3Vec3>(mp + MP_ANCHORA), centerA);
+				let anchorB = b3Sub(load<b3Vec3>(mp + MP_ANCHORB), centerB);
+				b3StorePointAnchors(mp, anchorA, anchorB, load<f32>(mp + MP_SEPARATION), load<f32>(mp + MP_NORMALIMPULSE));
 			}
 		}
 

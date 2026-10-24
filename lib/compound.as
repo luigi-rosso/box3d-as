@@ -172,6 +172,39 @@ export function b3GetCompoundSphere(compound: b3CompoundData, index: i32): b3Com
 	return compound.spheres[index];
 }
 
+// The type b3GetCompoundChild would give the child, without building it
+export function b3GetCompoundChildType(compound: b3CompoundData, childIndex: i32): i32 {
+	if (0 <= childIndex && childIndex < compound.capsuleCount) {
+		return b3_capsuleShape;
+	}
+	childIndex -= compound.capsuleCount;
+
+	if (0 <= childIndex && childIndex < compound.hullCount) {
+		return b3_hullShape;
+	}
+	childIndex -= compound.hullCount;
+
+	if (0 <= childIndex && childIndex < compound.meshCount) {
+		return b3_meshShape;
+	}
+
+	return b3_sphereShape;
+}
+
+// The mesh and material index view of every mesh child, as b3GetCompoundMesh builds them per call
+export function b3BuildCompoundChildMeshes(compound: b3CompoundData): void {
+	let count = compound.meshCount;
+	let meshes = new StaticArray<b3Mesh>(count);
+	let materials = new StaticArray<Uint16Array>(count);
+	for (let i = 0; i < count; ++i) {
+		let compoundMesh = b3GetCompoundMesh(compound, i);
+		meshes[i] = new b3Mesh(compoundMesh.meshData!, compoundMesh.scale);
+		materials[i] = compoundMesh.materialIndices;
+	}
+	compound.childMeshes = meshes;
+	compound.childMeshMaterials = materials;
+}
+
 // C returns the child by value. This fills a caller owned child so hot callers reuse one; a convex
 // child points its material indices at convexMaterial, a one element array the caller owns.
 export function b3GetCompoundChildInto(
@@ -214,12 +247,14 @@ export function b3GetCompoundChildInto(
 
 	// Mesh?
 	if (0 <= childIndex && childIndex < compound.meshCount) {
-		let compoundMesh = b3GetCompoundMesh(compound, childIndex);
+		if (compound.childMeshes == null) {
+			b3BuildCompoundChildMeshes(compound);
+		}
 
-		child.mesh = new b3Mesh(compoundMesh.meshData!, compoundMesh.scale);
-		child.transform = compoundMesh.transform;
-		child.materialIndices = compoundMesh.materialIndices;
-		child.materialCount = compoundMesh.materialCount;
+		child.mesh = compound.childMeshes![childIndex];
+		child.transform = compound.meshInstances[childIndex].transform;
+		child.materialIndices = compound.childMeshMaterials![childIndex];
+		child.materialCount = <i32>compound.meshInstances[childIndex].materialCount;
 		child.type = b3_meshShape;
 		return;
 	}
@@ -725,6 +760,7 @@ export function b3CreateCompound(def: b3CompoundDef): b3CompoundData? {
 
 	b3DynamicTree_Destroy(tree);
 
+	b3BuildCompoundChildMeshes(compound);
 	return compound;
 }
 

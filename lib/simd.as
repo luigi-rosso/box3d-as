@@ -1059,3 +1059,16 @@ export {
 @inline export unsafe function b3AllZeroAt(p: usize): bool {
 	return load<f32>(p) == 0.0 && load<f32>(p + 4) == 0.0 && load<f32>(p + 8) == 0.0 && load<f32>(p + 12) == 0.0;
 }
+
+// Four floats into the 16 bytes at p: one v128 store under SIMD, four f32 stores without. Lanes only move bits, so
+// both artifacts write the same memory. Callers pass the current value of any field the row covers past their own.
+@inline export unsafe function b3StoreRow(p: usize, x: f32, y: f32, z: f32, w: f32): void {
+	if (ASC_FEATURE_SIMD) {
+		v128.store(p, f32x4.replace_lane(f32x4.replace_lane(f32x4.replace_lane(f32x4.splat(x), 1, y), 2, z), 3, w));
+	} else {
+		store<f32>(p, x);
+		store<f32>(p + 4, y);
+		store<f32>(p + 8, z);
+		store<f32>(p + 12, w);
+	}
+}

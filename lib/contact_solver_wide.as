@@ -131,19 +131,15 @@ const CT_FLAGS = offsetof<b3Contact>("flags");
 const CT_CONTACTID = offsetof<b3Contact>("contactId");
 const CT_ENCODEDBODYSIMA = offsetof<b3Contact>("encodedBodySimA");
 const CT_ENCODEDBODYSIMB = offsetof<b3Contact>("encodedBodySimB");
-const CT_RESTITUTION = offsetof<b3Contact>("restitution");
 const CT_ROLLINGRESISTANCE = offsetof<b3Contact>("rollingResistance");
 const CT_TANGENTVELOCITY = offsetof<b3Contact>("tangentVelocity");
 const M_POINTS = offsetof<b3Manifold>("points");
 const M_NORMAL = offsetof<b3Manifold>("normal");
-const M_TWISTIMPULSE = offsetof<b3Manifold>("twistImpulse");
 const M_FRICTIONIMPULSE = offsetof<b3Manifold>("frictionImpulse");
 const M_ROLLINGIMPULSE = offsetof<b3Manifold>("rollingImpulse");
 const M_POINTCOUNT = offsetof<b3Manifold>("pointCount");
 const MP_ANCHORA = offsetof<b3ManifoldPoint>("anchorA");
 const MP_ANCHORB = offsetof<b3ManifoldPoint>("anchorB");
-const MP_SEPARATION = offsetof<b3ManifoldPoint>("separation");
-const MP_NORMALIMPULSE = offsetof<b3ManifoldPoint>("normalImpulse");
 const MP_NORMALVELOCITY = offsetof<b3ManifoldPoint>("normalVelocity");
 const MP_TOTALNORMALIMPULSE = offsetof<b3ManifoldPoint>("totalNormalImpulse");
 const BSIM_INVMASS = offsetof<b3BodySim>("invMass");
@@ -389,17 +385,17 @@ unsafe function b3PrepareConstraintL<T>(
 		let iB1 = sB1 + BSIM_INVINERTIA;
 		let iB2 = sB2 + BSIM_INVINERTIA;
 		let iB3 = sB3 + BSIM_INVINERTIA;
-		let iAxx = b3SetL<T>(load<f32>(iA0 + M3_CX), load<f32>(iA1 + M3_CX), load<f32>(iA2 + M3_CX), load<f32>(iA3 + M3_CX));
-		let iAxy = b3SetL<T>(load<f32>(iA0 + M3_CX + 4), load<f32>(iA1 + M3_CX + 4), load<f32>(iA2 + M3_CX + 4), load<f32>(iA3 + M3_CX + 4));
-		let iAxz = b3SetL<T>(load<f32>(iA0 + M3_CX + 8), load<f32>(iA1 + M3_CX + 8), load<f32>(iA2 + M3_CX + 8), load<f32>(iA3 + M3_CX + 8));
-		let iAyy = b3SetL<T>(load<f32>(iA0 + M3_CY + 4), load<f32>(iA1 + M3_CY + 4), load<f32>(iA2 + M3_CY + 4), load<f32>(iA3 + M3_CY + 4));
-		let iAyz = b3SetL<T>(load<f32>(iA0 + M3_CY + 8), load<f32>(iA1 + M3_CY + 8), load<f32>(iA2 + M3_CY + 8), load<f32>(iA3 + M3_CY + 8));
+		let iAxx = b3GatherXL<T>(iA0, iA1, iA2, iA3, M3_CX);
+		let iAxy = b3GatherYL<T>(iA0, iA1, iA2, iA3, M3_CX);
+		let iAxz = b3GatherZL<T>(iA0, iA1, iA2, iA3, M3_CX);
+		let iAyy = b3GatherYL<T>(iA0, iA1, iA2, iA3, M3_CY);
+		let iAyz = b3GatherZL<T>(iA0, iA1, iA2, iA3, M3_CY);
 		let iAzz = b3SetL<T>(load<f32>(iA0 + M3_CZ + 8), load<f32>(iA1 + M3_CZ + 8), load<f32>(iA2 + M3_CZ + 8), load<f32>(iA3 + M3_CZ + 8));
-		let iBxx = b3SetL<T>(load<f32>(iB0 + M3_CX), load<f32>(iB1 + M3_CX), load<f32>(iB2 + M3_CX), load<f32>(iB3 + M3_CX));
-		let iBxy = b3SetL<T>(load<f32>(iB0 + M3_CX + 4), load<f32>(iB1 + M3_CX + 4), load<f32>(iB2 + M3_CX + 4), load<f32>(iB3 + M3_CX + 4));
-		let iBxz = b3SetL<T>(load<f32>(iB0 + M3_CX + 8), load<f32>(iB1 + M3_CX + 8), load<f32>(iB2 + M3_CX + 8), load<f32>(iB3 + M3_CX + 8));
-		let iByy = b3SetL<T>(load<f32>(iB0 + M3_CY + 4), load<f32>(iB1 + M3_CY + 4), load<f32>(iB2 + M3_CY + 4), load<f32>(iB3 + M3_CY + 4));
-		let iByz = b3SetL<T>(load<f32>(iB0 + M3_CY + 8), load<f32>(iB1 + M3_CY + 8), load<f32>(iB2 + M3_CY + 8), load<f32>(iB3 + M3_CY + 8));
+		let iBxx = b3GatherXL<T>(iB0, iB1, iB2, iB3, M3_CX);
+		let iBxy = b3GatherYL<T>(iB0, iB1, iB2, iB3, M3_CX);
+		let iBxz = b3GatherZL<T>(iB0, iB1, iB2, iB3, M3_CX);
+		let iByy = b3GatherYL<T>(iB0, iB1, iB2, iB3, M3_CY);
+		let iByz = b3GatherZL<T>(iB0, iB1, iB2, iB3, M3_CY);
 		let iBzz = b3SetL<T>(load<f32>(iB0 + M3_CZ + 8), load<f32>(iB1 + M3_CZ + 8), load<f32>(iB2 + M3_CZ + 8), load<f32>(iB3 + M3_CZ + 8));
 
 		b3StoreL<T>(c + CW_INVMASSA, mA);
@@ -421,10 +417,11 @@ unsafe function b3PrepareConstraintL<T>(
 		let cl1 = contactLanes[l1];
 		let cl2 = contactLanes[l2];
 		let cl3 = contactLanes[l3];
-		let rollingResistance = b3SetL<T>(load<f32>(cl0 + CT_ROLLINGRESISTANCE), load<f32>(cl1 + CT_ROLLINGRESISTANCE), load<f32>(cl2 + CT_ROLLINGRESISTANCE), load<f32>(cl3 + CT_ROLLINGRESISTANCE));
-		b3StoreL<T>(c + CW_FRICTION, b3SetL<T>(load<f32>(cl0 + CT_FRICTION), load<f32>(cl1 + CT_FRICTION), load<f32>(cl2 + CT_FRICTION), load<f32>(cl3 + CT_FRICTION)));
+		// friction, restitution and rolling resistance are one row of each contact
+		let rollingResistance = b3GatherZL<T>(cl0, cl1, cl2, cl3, CT_FRICTION);
+		b3StoreL<T>(c + CW_FRICTION, b3GatherXL<T>(cl0, cl1, cl2, cl3, CT_FRICTION));
 		b3StoreL<T>(c + CW_ROLLINGRESISTANCE, rollingResistance);
-		b3StoreL<T>(c + CW_RESTITUTION, b3SetL<T>(load<f32>(cl0 + CT_RESTITUTION), load<f32>(cl1 + CT_RESTITUTION), load<f32>(cl2 + CT_RESTITUTION), load<f32>(cl3 + CT_RESTITUTION)));
+		b3StoreL<T>(c + CW_RESTITUTION, b3GatherYL<T>(cl0, cl1, cl2, cl3, CT_FRICTION));
 
 		let rm = c + CW_ROLLINGMASS;
 		if (anyRolling) {
@@ -468,9 +465,6 @@ unsafe function b3PrepareConstraintL<T>(
 		for (let manifoldIndex = 0; manifoldIndex < manifoldCount; ++manifoldIndex) {
 			let cm0 = manifoldData + <usize>(manifoldBase + manifoldIndex) * sizeof<b3ContactManifoldWide>();
 			let cm = cm0 + <usize>lane * 4;
-			let tangentVelocityX = b3SetL<T>(load<f32>(cl0 + CT_TANGENTVELOCITY), load<f32>(cl1 + CT_TANGENTVELOCITY), load<f32>(cl2 + CT_TANGENTVELOCITY), load<f32>(cl3 + CT_TANGENTVELOCITY));
-			let tangentVelocityY = b3SetL<T>(load<f32>(cl0 + CT_TANGENTVELOCITY + 4), load<f32>(cl1 + CT_TANGENTVELOCITY + 4), load<f32>(cl2 + CT_TANGENTVELOCITY + 4), load<f32>(cl3 + CT_TANGENTVELOCITY + 4));
-			let tangentVelocityZ = b3SetL<T>(load<f32>(cl0 + CT_TANGENTVELOCITY + 8), load<f32>(cl1 + CT_TANGENTVELOCITY + 8), load<f32>(cl2 + CT_TANGENTVELOCITY + 8), load<f32>(cl3 + CT_TANGENTVELOCITY + 8));
 
 			let manifoldLanes: FixedArray<usize, 4>;
 			let activeLanes: FixedArray<i32, 4>;
@@ -501,15 +495,16 @@ unsafe function b3PrepareConstraintL<T>(
 			let m2 = manifoldLanes[l2];
 			let m3 = manifoldLanes[l3];
 
-			// C transposes the normal, twist, friction and rolling impulse floats of each lane
-			let normalX = b3SetL<T>(load<f32>(m0 + M_NORMAL), load<f32>(m1 + M_NORMAL), load<f32>(m2 + M_NORMAL), load<f32>(m3 + M_NORMAL));
-			let normalY = b3SetL<T>(load<f32>(m0 + M_NORMAL + 4), load<f32>(m1 + M_NORMAL + 4), load<f32>(m2 + M_NORMAL + 4), load<f32>(m3 + M_NORMAL + 4));
-			let normalZ = b3SetL<T>(load<f32>(m0 + M_NORMAL + 8), load<f32>(m1 + M_NORMAL + 8), load<f32>(m2 + M_NORMAL + 8), load<f32>(m3 + M_NORMAL + 8));
-			let twistImpulse = b3SetL<T>(load<f32>(m0 + M_TWISTIMPULSE), load<f32>(m1 + M_TWISTIMPULSE), load<f32>(m2 + M_TWISTIMPULSE), load<f32>(m3 + M_TWISTIMPULSE));
-			let frictionImpulseX = b3SetL<T>(load<f32>(m0 + M_FRICTIONIMPULSE), load<f32>(m1 + M_FRICTIONIMPULSE), load<f32>(m2 + M_FRICTIONIMPULSE), load<f32>(m3 + M_FRICTIONIMPULSE));
-			let frictionImpulseY = b3SetL<T>(load<f32>(m0 + M_FRICTIONIMPULSE + 4), load<f32>(m1 + M_FRICTIONIMPULSE + 4), load<f32>(m2 + M_FRICTIONIMPULSE + 4), load<f32>(m3 + M_FRICTIONIMPULSE + 4));
-			let frictionImpulseZ = b3SetL<T>(load<f32>(m0 + M_FRICTIONIMPULSE + 8), load<f32>(m1 + M_FRICTIONIMPULSE + 8), load<f32>(m2 + M_FRICTIONIMPULSE + 8), load<f32>(m3 + M_FRICTIONIMPULSE + 8));
-			let rollingImpulseX = b3SetL<T>(load<f32>(m0 + M_ROLLINGIMPULSE), load<f32>(m1 + M_ROLLINGIMPULSE), load<f32>(m2 + M_ROLLINGIMPULSE), load<f32>(m3 + M_ROLLINGIMPULSE));
+			// C transposes the normal, twist, friction and rolling impulse floats of each lane as two rows of four,
+			// so these fields stay contiguous in that order
+			let normalX = b3GatherXL<T>(m0, m1, m2, m3, M_NORMAL);
+			let normalY = b3GatherYL<T>(m0, m1, m2, m3, M_NORMAL);
+			let normalZ = b3GatherZL<T>(m0, m1, m2, m3, M_NORMAL);
+			let twistImpulse = b3GatherWL<T>(m0, m1, m2, m3, M_NORMAL);
+			let frictionImpulseX = b3GatherXL<T>(m0, m1, m2, m3, M_FRICTIONIMPULSE);
+			let frictionImpulseY = b3GatherYL<T>(m0, m1, m2, m3, M_FRICTIONIMPULSE);
+			let frictionImpulseZ = b3GatherZL<T>(m0, m1, m2, m3, M_FRICTIONIMPULSE);
+			let rollingImpulseX = b3GatherWL<T>(m0, m1, m2, m3, M_FRICTIONIMPULSE);
 			let rollingImpulseY = b3SetL<T>(load<f32>(m0 + M_ROLLINGIMPULSE + 4), load<f32>(m1 + M_ROLLINGIMPULSE + 4), load<f32>(m2 + M_ROLLINGIMPULSE + 4), load<f32>(m3 + M_ROLLINGIMPULSE + 4));
 			let rollingImpulseZ = b3SetL<T>(load<f32>(m0 + M_ROLLINGIMPULSE + 8), load<f32>(m1 + M_ROLLINGIMPULSE + 8), load<f32>(m2 + M_ROLLINGIMPULSE + 8), load<f32>(m3 + M_ROLLINGIMPULSE + 8));
 
@@ -537,6 +532,9 @@ unsafe function b3PrepareConstraintL<T>(
 			b3StoreL<T>(cm + MW_TANGENT2 + V_X, tangent2X);
 			b3StoreL<T>(cm + MW_TANGENT2 + V_Y, tangent2Y);
 			b3StoreL<T>(cm + MW_TANGENT2 + V_Z, tangent2Z);
+			let tangentVelocityX = b3GatherXL<T>(cl0, cl1, cl2, cl3, CT_TANGENTVELOCITY);
+			let tangentVelocityY = b3GatherYL<T>(cl0, cl1, cl2, cl3, CT_TANGENTVELOCITY);
+			let tangentVelocityZ = b3GatherZL<T>(cl0, cl1, cl2, cl3, CT_TANGENTVELOCITY);
 			b3StoreL<T>(cm + MW_TANGENTVELOCITY1, b3DotL(tangentVelocityX, tangentVelocityY, tangentVelocityZ, tangent1X, tangent1Y, tangent1Z));
 			b3StoreL<T>(cm + MW_TANGENTVELOCITY2, b3DotL(tangentVelocityX, tangentVelocityY, tangentVelocityZ, tangent2X, tangent2Y, tangent2Z));
 
@@ -573,19 +571,15 @@ unsafe function b3PrepareConstraintL<T>(
 				let p2 = m2 + pointOffset;
 				let p3 = m3 + pointOffset;
 
-				// C transposes anchorA, anchorB, separation and normalImpulse of each lane
-				let rAX = b3BlendL(b3SplatL<T>(0.0), b3SetL<T>(load<f32>(p0 + MP_ANCHORA), load<f32>(p1 + MP_ANCHORA), load<f32>(p2 + MP_ANCHORA), load<f32>(p3 + MP_ANCHORA)), pointMask);
-				let rAY = b3BlendL(b3SplatL<T>(0.0), b3SetL<T>(load<f32>(p0 + MP_ANCHORA + 4), load<f32>(p1 + MP_ANCHORA + 4), load<f32>(p2 + MP_ANCHORA + 4), load<f32>(p3 + MP_ANCHORA + 4)), pointMask);
-				let rAZ = b3BlendL(b3SplatL<T>(0.0), b3SetL<T>(load<f32>(p0 + MP_ANCHORA + 8), load<f32>(p1 + MP_ANCHORA + 8), load<f32>(p2 + MP_ANCHORA + 8), load<f32>(p3 + MP_ANCHORA + 8)), pointMask);
-				let rBX = b3BlendL(b3SplatL<T>(0.0), b3SetL<T>(load<f32>(p0 + MP_ANCHORB), load<f32>(p1 + MP_ANCHORB), load<f32>(p2 + MP_ANCHORB), load<f32>(p3 + MP_ANCHORB)), pointMask);
-				let rBY = b3BlendL(b3SplatL<T>(0.0), b3SetL<T>(load<f32>(p0 + MP_ANCHORB + 4), load<f32>(p1 + MP_ANCHORB + 4), load<f32>(p2 + MP_ANCHORB + 4), load<f32>(p3 + MP_ANCHORB + 4)), pointMask);
-				let rBZ = b3BlendL(b3SplatL<T>(0.0), b3SetL<T>(load<f32>(p0 + MP_ANCHORB + 8), load<f32>(p1 + MP_ANCHORB + 8), load<f32>(p2 + MP_ANCHORB + 8), load<f32>(p3 + MP_ANCHORB + 8)), pointMask);
-				let separation = b3BlendL(b3SplatL<T>(0.0), b3SetL<T>(load<f32>(p0 + MP_SEPARATION), load<f32>(p1 + MP_SEPARATION), load<f32>(p2 + MP_SEPARATION), load<f32>(p3 + MP_SEPARATION)), pointMask);
-				let normalImpulse = b3BlendL(
-					b3SplatL<T>(0.0),
-					b3SetL<T>(load<f32>(p0 + MP_NORMALIMPULSE), load<f32>(p1 + MP_NORMALIMPULSE), load<f32>(p2 + MP_NORMALIMPULSE), load<f32>(p3 + MP_NORMALIMPULSE)),
-					pointMask
-				);
+				// C transposes anchorA, anchorB, separation and normalImpulse of each lane as two rows of four
+				let rAX = b3BlendL(b3SplatL<T>(0.0), b3GatherXL<T>(p0, p1, p2, p3, MP_ANCHORA), pointMask);
+				let rAY = b3BlendL(b3SplatL<T>(0.0), b3GatherYL<T>(p0, p1, p2, p3, MP_ANCHORA), pointMask);
+				let rAZ = b3BlendL(b3SplatL<T>(0.0), b3GatherZL<T>(p0, p1, p2, p3, MP_ANCHORA), pointMask);
+				let rBX = b3BlendL(b3SplatL<T>(0.0), b3GatherWL<T>(p0, p1, p2, p3, MP_ANCHORA), pointMask);
+				let rBY = b3BlendL(b3SplatL<T>(0.0), b3GatherXL<T>(p0, p1, p2, p3, MP_ANCHORB + 4), pointMask);
+				let rBZ = b3BlendL(b3SplatL<T>(0.0), b3GatherYL<T>(p0, p1, p2, p3, MP_ANCHORB + 4), pointMask);
+				let separation = b3BlendL(b3SplatL<T>(0.0), b3GatherZL<T>(p0, p1, p2, p3, MP_ANCHORB + 4), pointMask);
+				let normalImpulse = b3BlendL(b3SplatL<T>(0.0), b3GatherWL<T>(p0, p1, p2, p3, MP_ANCHORB + 4), pointMask);
 
 				// C0 friction center decay. Needed to prevent spinning top drift (GyroscopicPrecession sample).
 				// See details in b3PrepareContacts_Mesh. This code should stay in sync.
@@ -675,6 +669,13 @@ unsafe function b3PrepareConstraintL<T>(
 			}
 
 			{
+				// Reloaded rather than kept live across the point loops, which keeps the interpreter's frame small
+				let tangent1X = b3LoadL<T>(cm + MW_TANGENT1 + V_X);
+				let tangent1Y = b3LoadL<T>(cm + MW_TANGENT1 + V_Y);
+				let tangent1Z = b3LoadL<T>(cm + MW_TANGENT1 + V_Z);
+				let tangent2X = b3LoadL<T>(cm + MW_TANGENT2 + V_X);
+				let tangent2Y = b3LoadL<T>(cm + MW_TANGENT2 + V_Y);
+				let tangent2Z = b3LoadL<T>(cm + MW_TANGENT2 + V_Z);
 				let rtA1X = b3CrossL(centerAY, centerAZ, tangent1Y, tangent1Z);
 				let rtA1Y = b3CrossL(centerAZ, centerAX, tangent1Z, tangent1X);
 				let rtA1Z = b3CrossL(centerAX, centerAY, tangent1X, tangent1Y);
