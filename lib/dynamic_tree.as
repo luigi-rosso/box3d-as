@@ -1813,7 +1813,7 @@ function b3CopySubtree(tree: b3DynamicTree, node: b3TreeNode, newIndex: i32): vo
 	}
 }
 
-function b3PlaceLeaf(tree: b3DynamicTree, leaf: b3TreeNode, newIndex: i32): void {
+@inline function b3PlaceLeaf(tree: b3DynamicTree, leaf: b3TreeNode, newIndex: i32): void {
 	if (b3IsLeaf(leaf)) {
 		tree.swapNodes[newIndex] = leaf;
 		tree.proxies[b3GetProxyId(leaf)].node = newIndex;

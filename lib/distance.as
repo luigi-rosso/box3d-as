@@ -713,10 +713,21 @@ unsafe function b3CopyGJKSimplex(dst: i32, src: i32): void {
 	memory.copy(base + <usize>dst * size, base + <usize>src * size, size);
 }
 
+// Checked accesses for b3ShapeDistance, which is otherwise unchecked: the cached indices and the
+// debug simplex capacity come from the caller and are only asserted in C
+function b3GetProxyPoint(proxy: b3ShapeProxy, index: i32): b3Vec3 {
+	return proxy.points[index];
+}
+
+function b3RecordSimplex(simplexes: StaticArray<b3Simplex>, index: i32, simplex: ref b3Simplex): void {
+	simplexes[index] = simplex;
+}
+
 /// Compute the closest points between two shapes represented as point clouds.
 /// b3SimplexCache cache is input/output. On the first call set b3SimplexCache.count to zero.
 /// The query runs in frame A, so the witness points and normal are returned in frame A.
 /// The underlying GJK algorithm may be debugged by passing in debug simplexes and capacity. You may pass in null and 0 for these.
+@unchecked
 export function b3ShapeDistance(
 	input: b3DistanceInput,
 	cache: ref b3SimplexCache,
@@ -747,8 +758,8 @@ export function b3ShapeDistance(
 		if (B3_ASSERT_ENABLED) B3_ASSERT(0 <= index1 && index1 < proxyA.count);
 		if (B3_ASSERT_ENABLED) B3_ASSERT(0 <= index2 && index2 < proxyB.count);
 
-		let vertex1 = proxyA.points[index1];
-		let vertex2 = b3Add(b3MulMV(m, proxyB.points[index2]), xf.p);
+		let vertex1 = b3GetProxyPoint(proxyA, index1);
+		let vertex2 = b3Add(b3MulMV(m, b3GetProxyPoint(proxyB, index2)), xf.p);
 
 		simplex.vertices[i].indexA = index1;
 		simplex.vertices[i].indexB = index2;
@@ -773,8 +784,8 @@ export function b3ShapeDistance(
 
 	// If the cache is invalid or empty
 	if (simplex.count == 0) {
-		let vertex1 = proxyA.points[0];
-		let vertex2 = b3Add(b3MulMV(m, proxyB.points[0]), xf.p);
+		let vertex1 = b3GetProxyPoint(proxyA, 0);
+		let vertex2 = b3Add(b3MulMV(m, b3GetProxyPoint(proxyB, 0)), xf.p);
 
 		simplex.count = 1;
 		simplex.vertices[0].indexA = 0;
@@ -789,7 +800,7 @@ export function b3ShapeDistance(
 
 	let simplexIndex = 0;
 	if (simplexes != null && simplexIndex < simplexCapacity) {
-		simplexes[simplexIndex] = simplex;
+		b3RecordSimplex(simplexes, simplexIndex, simplex);
 		simplexIndex += 1;
 	}
 
@@ -836,7 +847,7 @@ export function b3ShapeDistance(
 		}
 
 		if (simplexes != null && simplexIndex < simplexCapacity) {
-			simplexes[simplexIndex] = simplex;
+			b3RecordSimplex(simplexes, simplexIndex, simplex);
 			simplexIndex += 1;
 			distanceOutput.iterations = iteration;
 			distanceOutput.simplexCount = simplexIndex;
