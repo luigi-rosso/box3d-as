@@ -200,10 +200,12 @@ All pass bit exact against the real `lib/`, with `-O` and without:
   ops, wide vec3 ops, loads and stores, 12000 bounds/ray/triangle tests, SIMD
   width.
 
-## Wasm SIMD later
+## Wasm SIMD
 
 Each lane op maps to v128 behind `if (ASC_FEATURE_SIMD)`, with `b3FloatW4`
-becoming one `v128`. Nothing is written yet. Exact replacements:
+becoming one `v128`. The contact solver kernels use these through the lane
+generic `L` helpers at the end of `lib/simd.as` (notes/perf_solver.md); the
+`b3FloatW4` struct helpers are still scalar. Exact replacements:
 
 - Zero, Splat, Set, Neg, Add, Sub, Mul, Div, Sqrt: `f32x4` ops directly
   (`f32x4.neg` flips only the sign, like `-x`). MulAdd stays `add(a, mul(b, c))`;

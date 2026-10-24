@@ -86,21 +86,22 @@ b3TransferBody(world, targetSet, sourceSet, bodyId: i32), b3TransferJoint(world,
 - contact_solver.as: `b3ContactConstraint.constraints` is the first index into the overflow color's
   `manifoldConstraints`, `.contact` the contact id. `b3PrepareContacts_Overflow` and friends build
   their block with a shared `b3MakeOverflowBlock(count)`.
-- contact_solver_wide.as, following the split stream of notes/decls.md:
-  `b3PrepareConstraintW(c: ref b3ContactConstraintWide, manifolds, manifoldBase, contactIds:
-  FixedArray<i32, 4>, manifoldCount, context, warmStartScale)` (`B3_NULL_INDEX` for C's NULL
-  contact), and `b3WarmStartContactsW` / `b3PushContactsW` / `b3SolveContactsW` /
-  `b3ApplyRestitutionW` / `b3StoreImpulsesW(block, context, [workerIndex,] constraints, manifolds,
-  constraintBase, manifoldStarts: Int32Array, fixedManifoldCount)`. The first manifold of a block is
-  the constraint index for convex (one manifold each) and `manifoldStarts[block.startIndex]` for
-  mesh; `b3NextConstraintW` is `ci += 1; mi += manifoldCount`. Convex callers pass an empty
-  `Int32Array` that the lazy ternary never reads.
-- C's `B3_GATHER_LANES` over sim pointers is `b3GatherInvMassW(sims, lanes)` and
-  `b3GatherInvInertiaW(sims, lanes)` over the awake indices, `B3_NULL_INDEX` standing for
-  `b3_zeroBodySim`. The transposes of manifold and point floats are the equivalent `b3SetW` per
-  output (a transpose of loads only moves bits). `( (const float*)&w )[lane]` is `b3LaneW(w, lane)`.
-  C's lane pointer arrays (`contactLanes`, `manifoldLanes`) are module scratch arrays, since a
-  FixedArray cannot hold references; they are not reentrant within one instance.
+- contact_solver_wide.as, following the split stream of notes/decls.md. Since the solver perf pass
+  (notes/perf_solver.md) the kernels are generic over the lane type, `v128` under `ASC_FEATURE_SIMD` and
+  `f32` one lane at a time without it, and read the wide constraints in place through `offsetof` addresses:
+  `b3PrepareConstraintL<T>(constraints, constraintIndex, manifolds, manifoldBase, contactIds:
+  FixedArray<i32, 4>, manifoldCount, context, warmStartScale: f32)` (`B3_NULL_INDEX` for C's NULL
+  contact), and `b3WarmStartContactsL<T>` / `b3PushContactsL<T>` / `b3SolveContactsL<T>` /
+  `b3ApplyRestitutionL<T>(block, context, constraints, manifolds, constraintBase, manifoldStarts:
+  Int32Array, fixedManifoldCount)`, plus `b3StoreImpulsesW(block, context, workerIndex, ...)` for both. The
+  first manifold of a block is the constraint index for convex (one manifold each) and
+  `manifoldStarts[block.startIndex]` for mesh; `b3NextConstraintW` is `ci += 1; mi += manifoldCount`.
+  Convex callers pass an empty `Int32Array` that the lazy ternary never reads.
+- C's `B3_GATHER_LANES` over sim pointers reads each lane sim's `invMass` and `invInertiaWorld` at their
+  raw addresses, `b3_zeroSims` standing for `b3_zeroBodySim`; body states gather and scatter as C's SSE2
+  path (four rows per 64 byte state, transposed), or one lane's state for an f32 kernel. The transposes of
+  manifold and point floats are lane sets (a transpose of loads only moves bits). C's lane pointer arrays
+  (`contactLanes`, `manifoldLanes`) are `FixedArray<usize, 4>` of object and manifold addresses.
 - The width dispatchers in contact_solver.as call the W4 versions directly (`simdWidth` is 4).
 
 ## Skipped
@@ -112,8 +113,9 @@ b3TransferBody(world, targetSet, sourceSet, bodyId: i32), b3TransferJoint(world,
 - `b3ValidateIsland`, the `b3ValidateSolverSets` calls, `b3ValidateNoMoved`,
   `b3ValidateBroadPhase` (validation only), `B3_VALIDATE` lines.
 - Tracy zones. The `b3Profile` timers are ported (notes/bench.md).
-- `b3StackAlloc` / `b3StackFree`: each site is a local array; the overflow color's constraint arrays
-  are reset to empty after the finalize pass (C leaves dangling pointers nobody reads).
+- `b3StackAlloc` / `b3StackFree`: the step buffers of `b3Solve` live in a grow only module
+  `b3SolverScratch` (notes/perf_solver.md); other sites are local arrays. The overflow color's
+  constraint arrays are reset to empty after the finalize pass (C leaves dangling pointers nobody reads).
 
 ## Calls into other modules
 

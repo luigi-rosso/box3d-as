@@ -44,6 +44,7 @@ Commands:
 
 ```sh
 bench/as/run.sh                                  # ROUNDS=3 NATIVE_REPEATS=3; writes bench/as/out/session_*.log, prints the tables
+WASM_SIMD=off bench/as/run.sh                    # the same on the scalar artifact (wasmSimd: off); interp scenes always use it
 bench/as/profile.sh 1 300 15                     # scene, steps, seconds of Time Profiler; OUT= keeps the trace
 # one run by hand, after an rsync of lib/ into bench/as/lib/
 RIVE=~/Projects/rive-master/packages/rive-cli/out/release/rive

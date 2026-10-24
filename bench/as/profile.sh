@@ -1,6 +1,7 @@
 #!/bin/sh
 # Time Profiler over the AOT bench, symbolized to wasm functions by tools/aotsym.py.
 #   bench/as/profile.sh [scene] [steps] [seconds]    scene 1 large_pyramid, 2 many_bodies, see main.as
+#   WASM_SIMD=off profiles the scalar artifact
 # DELAY=s (default 0) spins that long before the first step so the attach does not miss early steps.
 # The trace bundle records the environment, so it stays in OUT (default a temp dir).
 set -e
@@ -15,8 +16,16 @@ CACHE=${RIVE_AOT_CACHE_DIR:-$OUT/aotcache}
 mkdir -p "$OUT" "$CACHE"
 rsync -a --delete "$HERE/../../lib/" "$HERE/lib/"
 sed 's|"\.\./\.\./lib/|"./lib/|' "$HERE/../../verify/scenes/scenes.as" > "$HERE/scenes.as"
+# WASM_SIMD=off bakes the scalar artifact from a copy of the project with wasmSimd: off
+PROJECT=$HERE
+if [ "${WASM_SIMD:-on}" = off ]; then
+	PROJECT=${TMPDIR:-/tmp}/box3d_bench_scalar_project
+	mkdir -p "$PROJECT"
+	rsync -a --delete --exclude out --exclude build "$HERE/" "$PROJECT/"
+	echo "wasmSimd: off" >> "$PROJECT/rive.yaml"
+fi
 
-cd "$HERE"
+cd "$PROJECT"
 RIVE_RASC_NAMES=1 RIVE_WAMRC="$WAMRC" RIVE_WASM_AOT_SYNC=o3 RIVE_AOT_CACHE_DIR="$CACHE" \
 	"$RIVE" . --aot --bench=$((STEPS + 10)) --define=SCENE="$SCENE" --define=STEPS="$STEPS" \
 	--define=DELAY="${DELAY:-0}" > "$OUT/run.log" 2>&1 &
