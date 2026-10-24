@@ -76,7 +76,18 @@ import {
 	b3_flatEdge3,
 } from "./collision";
 import { b3SurfaceMaterial, b3_capsuleShape, b3_heightShape, b3_hullShape, b3_meshShape, b3_sphereShape } from "./types";
-import { B3_FORCE_GHOST_COLLISIONS, b3Contact, b3ContactCache, b3TriangleCache, b3_enableSpeculativePoints } from "./contact";
+import {
+	B3_FORCE_GHOST_COLLISIONS,
+	MP_PERSISTED,
+	MP_TOTALNORMALIMPULSE,
+	MP_TRIANGLEINDEX,
+	b3Contact,
+	b3ContactCache,
+	b3ManifoldPointAddress,
+	b3StorePointAnchors,
+	b3TriangleCache,
+	b3_enableSpeculativePoints,
+} from "./contact";
 import { b3MakeFeatureId } from "./manifold";
 import { b3AllocateManifolds, b3FreeManifolds, b3World } from "./physics_world";
 import { b3Shape, b3GetMeshTriangle, b3GetShapeMaterials } from "./shape";
@@ -101,6 +112,7 @@ import {
 	b3SetL,
 	b3SplatL,
 	b3StoreL,
+	b3StoreRow,
 	b3SubL,
 } from "./simd";
 import { b3CTZ32 } from "./ctz";
@@ -813,7 +825,7 @@ function b3PrefilterTriangles(
 }
 
 @unchecked
-export function b3ComputeMeshManifolds(
+export unsafe function b3ComputeMeshManifolds(
 	world: b3World,
 	workerIndex: i32,
 	contact: b3Contact,
@@ -1355,25 +1367,25 @@ export function b3ComputeMeshManifolds(
 
 		for (let j = 0; j < pointCount; ++j) {
 			let source = clusterPoints[cm.pointOffset + j];
-			ref target = manifold.points[j];
 
 			// Contact points are computed in frame B
-			target.anchorB = b3MulMV(matrixB, source.point);
-			target.anchorA = b3Add(target.anchorB, offsetA);
-			target.separation = source.separation - restOffset;
-			target.featureId = b3MakeFeatureId(source.pair);
-			target.triangleIndex = source.triangleIndex;
+			let anchorB = b3MulMV(matrixB, source.point);
+			let anchorA = b3Add(anchorB, offsetA);
+			let featureId = b3MakeFeatureId(source.pair);
+			let triangleIndex = source.triangleIndex;
 
-			// Preserve normal impulse if possible
+			// Preserve normal impulse if possible. The manifold was zeroed, so the other fields hold zero.
+			let normalImpulse: f32 = 0.0;
+			let persisted = false;
 			if (matchedIndex != B3_NULL_INDEX) {
 				ref matchedManifold = oldManifolds[matchedIndex];
 				let oldPointCount = matchedManifold.pointCount;
 				for (let k = 0; k < oldPointCount; ++k) {
 					ref oldPt = matchedManifold.points[k];
 
-					if (target.featureId == oldPt.featureId && target.triangleIndex == oldPt.triangleIndex) {
-						target.normalImpulse = oldPt.normalImpulse;
-						target.persisted = true;
+					if (featureId == oldPt.featureId && triangleIndex == oldPt.triangleIndex) {
+						normalImpulse = oldPt.normalImpulse;
+						persisted = true;
 
 						// claimed
 						oldPt.triangleIndex = B3_NULL_INDEX;
@@ -1381,6 +1393,12 @@ export function b3ComputeMeshManifolds(
 					}
 				}
 			}
+
+			let mp = b3ManifoldPointAddress(contact.manifolds, i, j);
+			b3StorePointAnchors(mp, anchorA, anchorB, source.separation - restOffset, normalImpulse);
+			b3StoreRow(mp + MP_TOTALNORMALIMPULSE, 0.0, 0.0, 0.0, reinterpret<f32>(featureId));
+			store<i32>(mp + MP_TRIANGLEINDEX, triangleIndex);
+			store<bool>(mp + MP_PERSISTED, persisted);
 		}
 	}
 
