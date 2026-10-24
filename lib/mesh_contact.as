@@ -73,7 +73,7 @@ import {
 	b3_flatEdge2,
 	b3_flatEdge3,
 } from "./collision";
-import { b3_capsuleShape, b3_heightShape, b3_hullShape, b3_meshShape, b3_sphereShape } from "./types";
+import { b3SurfaceMaterial, b3_capsuleShape, b3_heightShape, b3_hullShape, b3_meshShape, b3_sphereShape } from "./types";
 import { B3_FORCE_GHOST_COLLISIONS, b3Contact, b3ContactCache, b3TriangleCache, b3_enableSpeculativePoints } from "./contact";
 import { b3MakeFeatureId } from "./manifold";
 import { b3AllocateManifolds, b3FreeManifolds, b3World } from "./physics_world";
@@ -573,6 +573,30 @@ struct b3Cluster {
 	pointCount: i32 = 0;
 }
 
+// Checked reads for b3ComputeMeshManifolds, which is otherwise unchecked: every scratch buffer,
+// cache and manifold index there is bounded where the buffer is sized, while these index shape data
+// through values the shape supplies.
+function b3MeshTriangleAt(triangles: StaticArray<b3MeshTriangle>, index: i32): b3MeshTriangle {
+	return triangles[index];
+}
+
+function b3MeshVertexAt(vertices: StaticArray<b3Vec3>, index: i32): b3Vec3 {
+	return vertices[index];
+}
+
+function b3MaterialIndexAt(indices: StaticArray<u8>, index: i32): u8 {
+	return indices[index];
+}
+
+function b3MaterialMapAt(map: Uint16Array, index: i32): u16 {
+	return map[index];
+}
+
+function b3SurfaceMaterialAt(materials: StaticArray<b3SurfaceMaterial>, index: i32): b3SurfaceMaterial {
+	return materials[index];
+}
+
+@unchecked
 export function b3ComputeMeshManifolds(
 	world: b3World,
 	workerIndex: i32,
@@ -698,10 +722,10 @@ export function b3ComputeMeshManifolds(
 			let triangleIndex = triangleCaches[index].triangleIndex;
 
 			if (meshVertices != null) {
-				let meshTriangle = meshTriangles![triangleIndex];
-				lanes[0][lane] = b3Mul(meshScale, meshVertices[meshTriangle.index1]);
-				lanes[1][lane] = b3Mul(meshScale, meshVertices[meshFlipped ? meshTriangle.index3 : meshTriangle.index2]);
-				lanes[2][lane] = b3Mul(meshScale, meshVertices[meshFlipped ? meshTriangle.index2 : meshTriangle.index3]);
+				let meshTriangle = b3MeshTriangleAt(meshTriangles!, triangleIndex);
+				lanes[0][lane] = b3Mul(meshScale, b3MeshVertexAt(meshVertices, meshTriangle.index1));
+				lanes[1][lane] = b3Mul(meshScale, b3MeshVertexAt(meshVertices, meshFlipped ? meshTriangle.index3 : meshTriangle.index2));
+				lanes[2][lane] = b3Mul(meshScale, b3MeshVertexAt(meshVertices, meshFlipped ? meshTriangle.index2 : meshTriangle.index3));
 			} else {
 				if (B3_ASSERT_ENABLED) B3_ASSERT(shapeA.type == b3_heightShape);
 				let triangle = b3GetHeightFieldTriangle(shapeA.heightField!, triangleIndex);
@@ -1248,17 +1272,17 @@ export function b3ComputeMeshManifolds(
 				let triangleIndex = contact.manifolds[i].points[j].triangleIndex;
 				let materialIndex: i32;
 				if (shapeA.type == b3_meshShape) {
-					materialIndex = <i32>materialIndices[triangleIndex];
+					materialIndex = <i32>b3MaterialIndexAt(materialIndices, triangleIndex);
 
 					if (materialMap != null) {
-						materialIndex = <i32>materialMap[materialIndex];
+						materialIndex = <i32>b3MaterialMapAt(materialMap, materialIndex);
 					}
 				} else {
-					materialIndex = <i32>materialIndices[triangleIndex >> 1];
+					materialIndex = <i32>b3MaterialIndexAt(materialIndices, triangleIndex >> 1);
 				}
 
 				materialIndex = b3ClampInt(materialIndex, 0, shapeA.materialCount - 1);
-				let material = materialsA[materialIndex];
+				let material = b3SurfaceMaterialAt(materialsA, materialIndex);
 				friction += frictionCallback(material.friction, material.userMaterialId, materialB.friction, materialB.userMaterialId);
 				restitution += restitutionCallback(
 					material.restitution,
@@ -1284,14 +1308,14 @@ export function b3ComputeMeshManifolds(
 		if (B3_ASSERT_ENABLED) B3_ASSERT(b3IsValidFloat(contact.restitution) && contact.restitution >= 0.0);
 	} else {
 		// Keep these updated in case the values on the shapes are modified
-		contact.friction = frictionCallback(materialsA[0].friction, materialsA[0].userMaterialId, materialB.friction, materialB.userMaterialId);
+		contact.friction = frictionCallback(b3SurfaceMaterialAt(materialsA, 0).friction, b3SurfaceMaterialAt(materialsA, 0).userMaterialId, materialB.friction, materialB.userMaterialId);
 		contact.restitution = restitutionCallback(
-			materialsA[0].restitution,
-			materialsA[0].userMaterialId,
+			b3SurfaceMaterialAt(materialsA, 0).restitution,
+			b3SurfaceMaterialAt(materialsA, 0).userMaterialId,
 			materialB.restitution,
 			materialB.userMaterialId,
 		);
-		tangentVelocityA = materialsA[0].tangentVelocity;
+		tangentVelocityA = b3SurfaceMaterialAt(materialsA, 0).tangentVelocity;
 	}
 
 	tangentVelocityA = b3RotateVector(xfA.q, tangentVelocityA);
