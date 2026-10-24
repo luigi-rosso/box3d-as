@@ -75,6 +75,38 @@ for scene in scenes:
             cells.append(f"{b['ms']:.3f} ({b['load']:.0f}{ratio})")
         print(f'| {scene} | {impl} | ' + ' | '.join(cells) + ' |')
 
+
+def stage_table(stage, impls_shown):
+    print()
+    print(f'{stage}, ms per step: the mean over the run, then the fastest step, each min over rounds; x serial on the mean.')
+    print()
+    print('| scene | impl | ' + ' | '.join(f'{n} lanes' for n in counts) + ' |')
+    print('|---|---|' + '---|' * len(counts))
+    for scene in scenes:
+        serial_runs = runs.get((scene, 'AS serial', 0), [])
+        serial = min((float(r[stage]) for r in serial_runs if stage in r), default=None)
+        if serial_runs:
+            fastest = min(float(r['min_' + stage]) for r in serial_runs)
+            print(f'| {scene} | AS serial | **{serial:.3f}** / {fastest:.3f} |' + ' |' * (len(counts) - 1))
+        for impl in impls:
+            if impl == 'AS serial' or not any(k in impl for k in impls_shown):
+                continue
+            cells = []
+            for n in counts:
+                rs = [r for r in runs.get((scene, impl, n), []) if stage in r]
+                if not rs:
+                    cells.append('')
+                    continue
+                mean = min(float(r[stage]) for r in rs)
+                fastest = min(float(r.get('min_' + stage, r[stage])) for r in rs)
+                ratio = f' (x{serial / mean:.2f})' if serial and impl.startswith('AS') else ''
+                cells.append(f'{mean:.3f} / {fastest:.3f}{ratio}' if impl.startswith('AS') else f'{mean:.3f}')
+            print(f'| {scene} | {impl} | ' + ' | '.join(cells) + ' |')
+
+
+stage_table('constraints', ['native', 'solve', 'all'])
+stage_table('collide', ['native', 'all'])
+
 print()
 print('Stages of the best run, ms per step:')
 print()

@@ -805,14 +805,21 @@ export unsafe function b3LaneSolvePartition(
 	part.partition = partition;
 	part.spins = 0;
 	part.exchangesWaited = 0;
+	for (let i = 0; i < T_COUNT; ++i) {
+		part.times[i] = 0;
+	}
+	let ticks = b3LaneNow();
 	// The section blob: the common header, then this partition's section
 	input.readInto(0, r.header);
 	let length = <i32>input.byteLength - 4 * H_WORDS;
 	r.input = b3GrowU8(r.input, length);
 	input.readInto(<u32>(4 * H_WORDS), r.input, 0, length);
 	b3LaneSolveSetup(r);
+	part.times[T_SETUP] = b3LaneNow() - ticks;
 	b3LaneSolveStages(part, exchanges);
+	ticks = b3LaneNow();
 	b3LaneSolveOutput(r, output);
+	part.times[T_OUTPUT] = b3LaneNow() - ticks;
 	exchanges[partition * part.lanes + partition].atomicStore(X_DONE, part.epochBase | (EPOCH_STRIDE - 1));
 }
 
@@ -1680,7 +1687,14 @@ export function b3World_EnableLanes(worldId: b3WorldId, lanes: i32, backend: i32
 	}
 	b3SetLaneClock((): f64 => <f64>b3GetTicks() * 1e-6);
 	let world = b3GetWorldFromId(worldId);
-	let laneTasks = new b3LaneTasks(world, min(lanes, B3_MAX_LANES), backend);
+	lanes = min(lanes, B3_MAX_LANES);
+	// The colored stages wait for every partition, so jobs need a pool thread for each lane past the main one
+	if (backend == b3_laneBackendJobs && <u32>(lanes - 1) > Jobs.threads()) {
+		console.log("b3World_EnableLanes: " + lanes.toString() + " lanes need " + (lanes - 1).toString() +
+			" job threads, the pool has " + Jobs.threads().toString());
+		lanes = <i32>Jobs.threads() + 1;
+	}
+	let laneTasks = new b3LaneTasks(world, lanes, backend);
 	b3_laneTasks.push(laneTasks);
 	if ((tasks & b3_laneSolve) != 0) {
 		b3SetLaneSolve((context: b3StepContext): bool => b3LaneSolve(b3_laneTasks[0], context));

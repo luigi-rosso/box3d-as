@@ -85,6 +85,67 @@ function barrierArrive(region: SharedRegion, participants: u32): void {
 	start.atomicAdd(4, 1);
 }
 
+export class Pt3 {
+	x: f32 = 0;
+	y: f32 = 0;
+	z: f32 = 0;
+}
+
+@job export function lastTyped(values: Float32Array): f32 {
+	return values[values.length - 1];
+}
+
+@job export function lastArray(values: Array<f32>): f32 {
+	return values[values.length - 1];
+}
+
+@job export function lastStatic(values: StaticArray<f32>): f32 {
+	return values[values.length - 1];
+}
+
+@job export function lastObjects(values: Array<Pt3>): f32 {
+	return values[values.length - 1].z;
+}
+
+@job export function makeTyped(words: i32): Float32Array {
+	let out = new Float32Array(words);
+	out[words - 1] = 1;
+	return out;
+}
+
+@job export function makeBlob(words: i32): Blob {
+	let out = new Float32Array(words);
+	out[words - 1] = 1;
+	return Blob.fromArray(out);
+}
+
+@job export function makeObjects(count: i32): Array<Pt3> {
+	let out = new Array<Pt3>(count);
+	for (let i = 0; i < count; ++i) {
+		out[i] = new Pt3();
+	}
+	return out;
+}
+
+// Touches megabytes of fresh memory, as a job that builds a replica does
+@job export function scratchJob(megabytes: i32): i32 {
+	let scratch = new Uint8Array(megabytes << 20);
+	for (let i = 0; i < scratch.length; i += 4096) {
+		scratch[i] = 1;
+	}
+	return scratch[0];
+}
+
+// Reads 64 bytes of one blob, rounds times, lock free
+@worker export async function blobReader(blob: Blob, start: SharedRegion, rounds: i32): Promise<void> {
+	let out = new Float32Array(16);
+	while (start.atomicLoad(0) == 0) {}
+	for (let r = 0; r < rounds; ++r) {
+		blob.readInto(<u32>((r & 63) * 64), out);
+	}
+	start.atomicAdd(4, 1);
+}
+
 @worker export async function echoWorker(requests: Port<i32>, replies: Port<i32>): Promise<void> {
 	while (true) {
 		let request = await requests.receive();
@@ -140,6 +201,12 @@ export class Main extends Layout {
 		} else if (this.frame == 10) {
 			this.locks(false);
 		} else if (this.frame == 11) {
+			this.arguments();
+		} else if (this.frame == 12) {
+			this.blobs();
+		} else if (this.frame == 13) {
+			this.memory();
+		} else if (this.frame == 14) {
 			console.log("MICRO done");
 		}
 		return true;
@@ -358,6 +425,121 @@ export class Main extends Layout {
 		while (start.atomicLoad(4) < <u32>n) {}
 		let seconds = clock() - t0;
 		report((sharedOne ? "lock_one_region_" : "lock_own_region_") + n.toString(), seconds, rounds);
+	}
+
+	// Deep copy cost per MB of each argument and result shape, job run and join included
+	arguments(): void {
+		let words = MB / 4;
+		let reps = 20;
+		let typed = new Float32Array(words);
+		let array = new Array<f32>(words);
+		let fixed = new StaticArray<f32>(words);
+		let objectCount = MB / 12;
+		let objects = new Array<Pt3>(objectCount);
+		for (let i = 0; i < objectCount; ++i) {
+			objects[i] = new Pt3();
+		}
+		let t0 = clock();
+		for (let r = 0; r < reps; ++r) {
+			let job = Jobs.run(lastTyped, typed);
+			job.join();
+			job.release();
+		}
+		report("arg_Float32Array_1MB", clock() - t0, reps);
+		t0 = clock();
+		for (let r = 0; r < reps; ++r) {
+			let job = Jobs.run(lastArray, array);
+			job.join();
+			job.release();
+		}
+		report("arg_Array_f32_1MB", clock() - t0, reps);
+		t0 = clock();
+		for (let r = 0; r < reps; ++r) {
+			let job = Jobs.run(lastStatic, fixed);
+			job.join();
+			job.release();
+		}
+		report("arg_StaticArray_f32_1MB", clock() - t0, reps);
+		t0 = clock();
+		for (let r = 0; r < reps; ++r) {
+			let job = Jobs.run(lastObjects, objects);
+			job.join();
+			job.release();
+		}
+		report("arg_Array_of_3_float_objects_1MB", clock() - t0, reps);
+		t0 = clock();
+		for (let r = 0; r < reps; ++r) {
+			let job = Jobs.run(makeTyped, words);
+			job.join();
+			job.release();
+		}
+		report("result_Float32Array_1MB", clock() - t0, reps);
+		let kept = new Float32Array(words);
+		t0 = clock();
+		for (let r = 0; r < reps; ++r) {
+			let job = Jobs.run(makeTyped, words);
+			job.joinInto(kept);
+			job.release();
+		}
+		report("result_Float32Array_joinInto_1MB", clock() - t0, reps);
+		t0 = clock();
+		for (let r = 0; r < reps; ++r) {
+			let job = Jobs.run(makeBlob, words);
+			let result = job.join();
+			if (result != null && result.ok) {
+				result.value.readInto(0, kept);
+				result.value.release();
+			}
+			job.release();
+		}
+		report("result_Blob_readInto_1MB", clock() - t0, reps);
+		t0 = clock();
+		for (let r = 0; r < reps; ++r) {
+			let job = Jobs.run(makeObjects, objectCount);
+			job.join();
+			job.release();
+		}
+		report("result_Array_of_3_float_objects_1MB", clock() - t0, reps);
+	}
+
+	// A blob made and released per exchange, and 7 workers reading one blob at once
+	blobs(): void {
+		let small = new Float32Array(256);
+		let reps = 20000;
+		let t0 = clock();
+		for (let r = 0; r < reps; ++r) {
+			let blob = Blob.fromArray(small);
+			blob.release();
+		}
+		report("blob_make_release_1KB", clock() - t0, reps);
+		let n = workerCount();
+		let rounds = 20000;
+		let start = SharedRegion.create(64);
+		let blob = Blob.fromArray(new Float32Array(1024));
+		for (let k = 0; k < n; ++k) {
+			this.workers.push(Worker.spawn(blobReader, blob, start, rounds));
+		}
+		let idle = clock();
+		while (clock() - idle < 0.05) {}
+		t0 = clock();
+		start.atomicStore(0, 1);
+		while (start.atomicLoad(4) < <u32>n) {}
+		report("blob_one_for_all_readers_" + n.toString(), clock() - t0, rounds);
+	}
+
+	// A job's instance is reused while its memory stays small; past that each run instantiates afresh
+	memory(): void {
+		let sizes: StaticArray<i32> = [1, 4, 12, 20, 40];
+		for (let k = 0; k < sizes.length; ++k) {
+			let reps = 20;
+			let t0 = clock();
+			for (let r = 0; r < reps; ++r) {
+				let job = Jobs.run(scratchJob, sizes[k]);
+				job.join();
+				job.release();
+			}
+			report("job_scratch_" + sizes[k].toString() + "MB", clock() - t0, reps);
+		}
 	}
 
 	signals(): void {
