@@ -128,10 +128,21 @@ Box3D's tasks run on script lanes (`lib/lanes.as`, `lib/lane_collide.as`,
 phase, every solver stage and the tree rebuild. Results stay bit exact at any
 lane count.
 
-On today's share-nothing lanes the step does not get faster, while native
-gains 3.0 to 3.7x from 1 to 8 workers:
+On today's share-nothing lanes the whole step gains at most 1.1 to 1.2x,
+while native gains 3.6 to 4.3x from 1 to 8 workers:
 
-- Moving the solver's data costs 60 to 85% of the solver's own work.
+| scene | native 1 / 4 / 8 workers ms/step | AnimaScript serial | best on lanes |
+|---|---|---|---|
+| large pyramid | 3.24 / 0.99 / 0.89 | 4.15 | 3.46 (4 lanes) |
+| many bodies | 6.12 / 1.83 / 1.44 | 7.86 | 6.92 (4 lanes) |
+| mesh drop | 4.57 / 1.44 / 1.14 | 6.14 | 5.46 (8 lanes) |
+| village | 2.05 / 0.87 / 0.87 | 2.80 | slower on any lane count |
+
+The solver stages alone gain 1.3 to 1.8x; the narrow phase on lanes loses,
+and the tree rebuild job is a small clean win. Why:
+
+- Moving the solver's data once each way costs 60 to 100% of the solver's own
+  work. That is per record packing of an object graph, not bandwidth.
 - Each of the 84 colored solver stage syncs per step costs about as much as
   the work it separates.
 
