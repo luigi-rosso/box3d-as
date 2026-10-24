@@ -21,8 +21,8 @@ LOG="$HERE/out/session_$(date +%Y%m%d_%H%M%S).log"
 rsync -a --delete "$HERE/../../lib/" "$HERE/lib/"
 mkdir -p "$HERE/scenes" && sed "s|\"../../lib/|\"../lib/|" "$HERE/../../verify/scenes/scenes.as" > "$HERE/scenes/scenes.as"
 # The scalar artifact bakes from a copy of the project with wasmSimd: off, outside it so the CLI does not
-# compile the copy as part of the project. WASM_SIMD=off runs every scene on it.
-SCALAR_PROJECT=${TMPDIR:-/tmp}/box3d_bench_scalar_project
+# compile the copy as part of the project; one per worktree. WASM_SIMD=off runs every scene on it.
+SCALAR_PROJECT=${TMPDIR:-/tmp}/box3d_bench_scalar_$(echo "$HERE" | md5 | cut -c1-8)
 mkdir -p "$SCALAR_PROJECT"
 rsync -a --delete --exclude out --exclude build "$HERE/" "$SCALAR_PROJECT/"
 echo "wasmSimd: off" >> "$SCALAR_PROJECT/rive.yaml"

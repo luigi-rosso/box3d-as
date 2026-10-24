@@ -18,7 +18,7 @@ mkdir -p "$HERE/scenes" && sed "s|\"../../lib/|\"../lib/|" "$HERE/../../verify/s
 # WASM_SIMD=off bakes the scalar artifact from a copy of the project with wasmSimd: off
 PROJECT=$HERE
 if [ "${WASM_SIMD:-on}" = off ]; then
-	PROJECT=${TMPDIR:-/tmp}/box3d_bench_scalar_project
+	PROJECT=${TMPDIR:-/tmp}/box3d_bench_scalar_$(echo "$HERE" | md5 | cut -c1-8)
 	mkdir -p "$PROJECT"
 	rsync -a --delete --exclude out --exclude build "$HERE/" "$PROJECT/"
 	echo "wasmSimd: off" >> "$PROJECT/rive.yaml"
