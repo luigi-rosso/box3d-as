@@ -36,7 +36,7 @@ import { B3_MIN_FRICTION_WEIGHT, B3_SPECULATIVE_DISTANCE } from "./constants";
 import { b3SetBit } from "./bitset";
 import { b3FloatW4, b3Vec3W4 } from "./simd";
 import { b3Softness, b3SolverBlock, b3StepContext, b3_overflowBlock } from "./solver";
-import { b3DecodeAwakeIndex, b3_dynamicFlag, b3_identityBodyState } from "./body";
+import { b3DecodeAwakeIndex, b3_dynamicFlag, b3BodyState, b3StateAddress, b3StoreStateVelocities } from "./body";
 import { b3_contactStaticFlag, b3_simEnableHitEvent } from "./contact";
 import { b3_awakeSet } from "./physics_world";
 import { B3_OVERFLOW_INDEX } from "./constraint_graph";
@@ -462,7 +462,7 @@ export function b3PrepareContacts_Mesh(block: b3SolverBlock, context: b3StepCont
 	}
 }
 
-export function b3WarmStartContacts_Mesh(block: b3SolverBlock, context: b3StepContext): void {
+export unsafe function b3WarmStartContacts_Mesh(block: b3SolverBlock, context: b3StepContext): void {
 	let world = context.world;
 	let color = world.constraintGraph.colors[block.colorIndex];
 	let awakeSet = world.solverSets[b3_awakeSet];
@@ -470,8 +470,7 @@ export function b3WarmStartContacts_Mesh(block: b3SolverBlock, context: b3StepCo
 	let constraints = color.contactConstraints;
 	let manifoldConstraints = color.manifoldConstraints;
 
-	// This is a dummy state to represent a static body because static bodies don't have a solver body.
-	let dummyState = b3_identityBodyState;
+	// b3StateAddress gives the identity state for a static body because static bodies don't have a solver body.
 
 	let startIndex = block.startIndex;
 	let endIndex = startIndex + <i32>block.count;
@@ -524,8 +523,8 @@ export function b3WarmStartContacts_Mesh(block: b3SolverBlock, context: b3StepCo
 		let indexB = contactConstraint.indexB;
 
 		// The dummy state has no dynamic flag, so only real states are written.
-		let stateA = indexA == B3_NULL_INDEX ? dummyState : states[indexA];
-		let stateB = indexB == B3_NULL_INDEX ? dummyState : states[indexB];
+		let stateA = load<b3BodyState>(b3StateAddress(states, indexA));
+		let stateB = load<b3BodyState>(b3StateAddress(states, indexB));
 
 		if ((stateA.flags & b3_dynamicFlag) != 0) {
 			states[indexA].linearVelocity = b3MulSub(stateA.linearVelocity, contactConstraint.invMassA, linearImpulse);
@@ -541,15 +540,14 @@ export function b3WarmStartContacts_Mesh(block: b3SolverBlock, context: b3StepCo
 
 // Merged normal and friction loops. This is much more stable for the Jenga stack.
 // Solve the non-penetration constraints with the soft bias. No friction and no restitution.
-export function b3PushContacts_Mesh(block: b3SolverBlock, context: b3StepContext): void {
+export unsafe function b3PushContacts_Mesh(block: b3SolverBlock, context: b3StepContext): void {
 	let world = context.world;
 	let color = world.constraintGraph.colors[block.colorIndex];
 	let contactConstraints = color.contactConstraints;
 	let manifoldConstraints = color.manifoldConstraints;
 	let states = context.states;
 
-	// This is a dummy state to represent a static body because static bodies have no solver body.
-	let dummyState = b3_identityBodyState;
+	// b3StateAddress gives the identity state for a static body because static bodies have no solver body.
 
 	// The last block might not be full
 	let startIndex = block.startIndex;
@@ -570,12 +568,12 @@ export function b3PushContacts_Mesh(block: b3SolverBlock, context: b3StepContext
 		let mB = contactConstraint.invMassB;
 		let iB = contactConstraint.invIB;
 
-		let stateA = indexA == B3_NULL_INDEX ? dummyState : states[indexA];
+		let stateA = load<b3BodyState>(b3StateAddress(states, indexA));
 		let vA = stateA.linearVelocity;
 		let wA = stateA.angularVelocity;
 		let dqA = stateA.deltaRotation;
 
-		let stateB = indexB == B3_NULL_INDEX ? dummyState : states[indexB];
+		let stateB = load<b3BodyState>(b3StateAddress(states, indexB));
 		let vB = stateB.linearVelocity;
 		let wB = stateB.angularVelocity;
 		let dqB = stateB.deltaRotation;
@@ -640,27 +638,24 @@ export function b3PushContacts_Mesh(block: b3SolverBlock, context: b3StepContext
 		}
 
 		if ((stateA.flags & b3_dynamicFlag) != 0) {
-			states[indexA].linearVelocity = vA;
-			states[indexA].angularVelocity = wA;
+			b3StoreStateVelocities(states, indexA, vA, wA);
 		}
 
 		if ((stateB.flags & b3_dynamicFlag) != 0) {
-			states[indexB].linearVelocity = vB;
-			states[indexB].angularVelocity = wB;
+			b3StoreStateVelocities(states, indexB, vB, wB);
 		}
 	}
 }
 
 // Solve contacts: normal, friction and rolling resistance.
-export function b3SolveContacts_Mesh(block: b3SolverBlock, context: b3StepContext): void {
+export unsafe function b3SolveContacts_Mesh(block: b3SolverBlock, context: b3StepContext): void {
 	let world = context.world;
 	let color = world.constraintGraph.colors[block.colorIndex];
 	let contactConstraints = color.contactConstraints;
 	let manifoldConstraints = color.manifoldConstraints;
 	let states = context.states;
 
-	// This is a dummy state to represent a static body because static bodies have no solver body.
-	let dummyState = b3_identityBodyState;
+	// b3StateAddress gives the identity state for a static body because static bodies have no solver body.
 
 	// The last block might not be full
 	let startIndex = block.startIndex;
@@ -680,12 +675,12 @@ export function b3SolveContacts_Mesh(block: b3SolverBlock, context: b3StepContex
 		let mB = contactConstraint.invMassB;
 		let iB = contactConstraint.invIB;
 
-		let stateA = indexA == B3_NULL_INDEX ? dummyState : states[indexA];
+		let stateA = load<b3BodyState>(b3StateAddress(states, indexA));
 		let vA = stateA.linearVelocity;
 		let wA = stateA.angularVelocity;
 		let dqA = stateA.deltaRotation;
 
-		let stateB = indexB == B3_NULL_INDEX ? dummyState : states[indexB];
+		let stateB = load<b3BodyState>(b3StateAddress(states, indexB));
 		let vB = stateB.linearVelocity;
 		let wB = stateB.angularVelocity;
 		let dqB = stateB.deltaRotation;
@@ -822,18 +817,16 @@ export function b3SolveContacts_Mesh(block: b3SolverBlock, context: b3StepContex
 		}
 
 		if ((stateA.flags & b3_dynamicFlag) != 0) {
-			states[indexA].linearVelocity = vA;
-			states[indexA].angularVelocity = wA;
+			b3StoreStateVelocities(states, indexA, vA, wA);
 		}
 
 		if ((stateB.flags & b3_dynamicFlag) != 0) {
-			states[indexB].linearVelocity = vB;
-			states[indexB].angularVelocity = wB;
+			b3StoreStateVelocities(states, indexB, vB, wB);
 		}
 	}
 }
 
-export function b3ApplyRestitution_Mesh(block: b3SolverBlock, context: b3StepContext): void {
+export unsafe function b3ApplyRestitution_Mesh(block: b3SolverBlock, context: b3StepContext): void {
 	let world = context.world;
 	let color = world.constraintGraph.colors[block.colorIndex];
 	let contactConstraints = color.contactConstraints;
@@ -843,8 +836,6 @@ export function b3ApplyRestitution_Mesh(block: b3SolverBlock, context: b3StepCon
 	let threshold = world.restitutionThreshold;
 	let inv_h = context.inv_h;
 	let propagate = world.enableRestitutionPropagation;
-
-	let dummyState = b3_identityBodyState;
 
 	let startIndex = block.startIndex;
 	let endIndex = startIndex + <i32>block.count;
@@ -866,12 +857,12 @@ export function b3ApplyRestitution_Mesh(block: b3SolverBlock, context: b3StepCon
 		let mB = contactConstraint.invMassB;
 		let iB = contactConstraint.invIB;
 
-		let stateA = indexA == B3_NULL_INDEX ? dummyState : states[indexA];
+		let stateA = load<b3BodyState>(b3StateAddress(states, indexA));
 		let vA = stateA.linearVelocity;
 		let wA = stateA.angularVelocity;
 		let dqA = stateA.deltaRotation;
 
-		let stateB = indexB == B3_NULL_INDEX ? dummyState : states[indexB];
+		let stateB = load<b3BodyState>(b3StateAddress(states, indexB));
 		let vB = stateB.linearVelocity;
 		let wB = stateB.angularVelocity;
 		let dqB = stateB.deltaRotation;
@@ -935,13 +926,11 @@ export function b3ApplyRestitution_Mesh(block: b3SolverBlock, context: b3StepCon
 		}
 
 		if ((stateA.flags & b3_dynamicFlag) != 0) {
-			states[indexA].linearVelocity = vA;
-			states[indexA].angularVelocity = wA;
+			b3StoreStateVelocities(states, indexA, vA, wA);
 		}
 
 		if ((stateB.flags & b3_dynamicFlag) != 0) {
-			states[indexB].linearVelocity = vB;
-			states[indexB].angularVelocity = wB;
+			b3StoreStateVelocities(states, indexB, vB, wB);
 		}
 	}
 }

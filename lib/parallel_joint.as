@@ -26,7 +26,7 @@ import {
 } from "./math_functions";
 import { b3Length2, b3LengthSquared2, b3Matrix2, b3Solve2, b3Sub2 } from "./math_internal";
 import { b3JointId, b3_parallelJoint } from "./types";
-import { b3_dynamicFlag, b3_identityBodyState } from "./body";
+import { b3_dynamicFlag, b3BodyState, b3StateAddress, b3StoreStateAngularVelocity } from "./body";
 import { b3World, b3_awakeSet } from "./physics_world";
 import { b3MakeSoft, b3StepContext } from "./solver";
 import { b3GetJointSimCheckType, b3JointSim } from "./joint";
@@ -125,7 +125,7 @@ export function b3PrepareParallelJoint(base: b3JointSim, context: b3StepContext)
 	}
 }
 
-export function b3WarmStartParallelJoint(base: b3JointSim, context: b3StepContext): void {
+export unsafe function b3WarmStartParallelJoint(base: b3JointSim, context: b3StepContext): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(base.type == b3_parallelJoint);
 
 	let iA = base.invIA;
@@ -135,8 +135,8 @@ export function b3WarmStartParallelJoint(base: b3JointSim, context: b3StepContex
 
 	// dummy state for static bodies
 	let states = context.states;
-	let stateA = joint.indexA == B3_NULL_INDEX ? b3_identityBodyState : states[joint.indexA];
-	let stateB = joint.indexB == B3_NULL_INDEX ? b3_identityBodyState : states[joint.indexB];
+	let stateA = load<b3BodyState>(b3StateAddress(states, joint.indexA));
+	let stateB = load<b3BodyState>(b3StateAddress(states, joint.indexB));
 
 	let wA = stateA.angularVelocity;
 	let wB = stateB.angularVelocity;
@@ -147,23 +147,23 @@ export function b3WarmStartParallelJoint(base: b3JointSim, context: b3StepContex
 	wB = b3Add(wB, b3MulMV(iB, angularImpulse));
 
 	if (stateA.flags & b3_dynamicFlag) {
-		states[joint.indexA].angularVelocity = wA;
+		b3StoreStateAngularVelocity(states, joint.indexA, wA);
 	}
 
 	if (stateB.flags & b3_dynamicFlag) {
-		states[joint.indexB].angularVelocity = wB;
+		b3StoreStateAngularVelocity(states, joint.indexB, wB);
 	}
 }
 
-export function b3SolveParallelJoint(base: b3JointSim, context: b3StepContext): void {
+export unsafe function b3SolveParallelJoint(base: b3JointSim, context: b3StepContext): void {
 	let iA = base.invIA;
 	let iB = base.invIB;
 
 	// dummy state for static bodies
 	ref joint = base.parallelJoint;
 	let states = context.states;
-	let stateA = joint.indexA == B3_NULL_INDEX ? b3_identityBodyState : states[joint.indexA];
-	let stateB = joint.indexB == B3_NULL_INDEX ? b3_identityBodyState : states[joint.indexB];
+	let stateA = load<b3BodyState>(b3StateAddress(states, joint.indexA));
+	let stateB = load<b3BodyState>(b3StateAddress(states, joint.indexB));
 
 	let wA = stateA.angularVelocity;
 	let wB = stateB.angularVelocity;
@@ -223,10 +223,10 @@ export function b3SolveParallelJoint(base: b3JointSim, context: b3StepContext): 
 	}
 
 	if (stateA.flags & b3_dynamicFlag) {
-		states[joint.indexA].angularVelocity = wA;
+		b3StoreStateAngularVelocity(states, joint.indexA, wA);
 	}
 
 	if (stateB.flags & b3_dynamicFlag) {
-		states[joint.indexB].angularVelocity = wB;
+		b3StoreStateAngularVelocity(states, joint.indexB, wB);
 	}
 }

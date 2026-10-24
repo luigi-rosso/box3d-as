@@ -322,6 +322,33 @@ export const b3_identityBodyState: b3BodyState = b3MakeIdentityBodyState();
 	return load<usize>(changetype<usize>(a) + offsetof<Array<i32>>("dataStart"));
 }
 
+function b3MakeIdentityStates(): StaticArray<b3BodyState> {
+	let states = new StaticArray<b3BodyState>(1);
+	states[0] = b3_identityBodyState;
+	return states;
+}
+
+// b3_identityBodyState in memory, where C points static lanes and joint ends
+export const b3_identityStates = b3MakeIdentityStates();
+
+// C's state pointer: the awake state at index, or the identity state for B3_NULL_INDEX. Index comes from a
+// constraint the solver prepared, so it is below the awake count.
+@inline export unsafe function b3StateAddress(states: Array<b3BodyState>, index: i32): usize {
+	return index == B3_NULL_INDEX
+		? changetype<usize>(b3_identityStates)
+		: b3ArrayData(states) + <usize>index * sizeof<b3BodyState>();
+}
+
+@inline export unsafe function b3StoreStateVelocities(states: Array<b3BodyState>, index: i32, v: b3Vec3, w: b3Vec3): void {
+	let state = b3ArrayData(states) + <usize>index * sizeof<b3BodyState>();
+	store<b3Vec3>(state + offsetof<b3BodyState>("linearVelocity"), v);
+	store<b3Vec3>(state + offsetof<b3BodyState>("angularVelocity"), w);
+}
+
+@inline export unsafe function b3StoreStateAngularVelocity(states: Array<b3BodyState>, index: i32, w: b3Vec3): void {
+	store<b3Vec3>(b3ArrayData(states) + <usize>index * sizeof<b3BodyState>() + offsetof<b3BodyState>("angularVelocity"), w);
+}
+
 // Body simulation data used for integration of position and velocity
 // Transform data used for collision and solver preparation.
 export struct b3BodySim {

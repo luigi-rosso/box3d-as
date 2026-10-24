@@ -44,7 +44,7 @@ import {
 	b3AllZeroAt,
 	b3Vec3W,
 } from "./simd";
-import { b3ArrayData, b3BodySim, b3BodyState, b3DecodeAwakeIndex, b3_dynamicFlag, b3_identityBodyState } from "./body";
+import { b3ArrayData, b3BodySim, b3BodyState, b3DecodeAwakeIndex, b3_identityStates, b3_dynamicFlag } from "./body";
 import { b3Contact, b3_simEnableHitEvent } from "./contact";
 import { b3SolverBlock, b3StepContext } from "./solver";
 import {
@@ -157,14 +157,7 @@ const M3_CZ = offsetof<b3Matrix3>("cz");
 	return isFloat<T>() ? 4 : 1;
 }
 
-function b3MakeIdentityStates(): StaticArray<b3BodyState> {
-	let states = new StaticArray<b3BodyState>(1);
-	states[0] = b3_identityBodyState;
-	return states;
-}
-
-// C points static lanes at b3_identityBodyState and null sims at b3_zeroBodySim.
-const b3_identityStates = b3MakeIdentityStates();
+// C points null sims at b3_zeroBodySim.
 const b3_zeroSims = new StaticArray<b3BodySim>(1);
 
 @inline unsafe function b3StatesData(states: Array<b3BodyState>): usize {
