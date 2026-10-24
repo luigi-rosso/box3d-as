@@ -606,6 +606,17 @@ function b3SurfaceMaterialAt(materials: StaticArray<b3SurfaceMaterial>, index: i
 	return materials[index];
 }
 
+// C's memcpy and memset of manifold arrays; both counts are within the arrays
+unsafe function b3CopyManifolds(dst: StaticArray<b3Manifold>, src: StaticArray<b3Manifold>, count: i32): void {
+	if (B3_ASSERT_ENABLED) B3_ASSERT(count <= dst.length && count <= src.length);
+	memory.copy(changetype<usize>(dst), changetype<usize>(src), <usize>count * sizeof<b3Manifold>());
+}
+
+unsafe function b3ZeroManifolds(manifolds: StaticArray<b3Manifold>, count: i32): void {
+	if (B3_ASSERT_ENABLED) B3_ASSERT(count <= manifolds.length);
+	memory.fill(changetype<usize>(manifolds), 0, <usize>count * sizeof<b3Manifold>());
+}
+
 // The four lane prefilter of b3ComputeMeshManifolds: transforms the cached triangles into the frame of shape B, culls
 // those outside the hull bounds and writes the survivors. Its own function keeps the v128 lanes out of the caller's frame.
 @unchecked
@@ -1286,9 +1297,7 @@ export function b3ComputeMeshManifolds(
 		s_consumed = new StaticArray<bool>(capacity);
 	}
 	let oldManifolds = s_oldManifolds;
-	for (let i = 0; i < oldManifoldCount; ++i) {
-		oldManifolds[i] = contact.manifolds[i];
-	}
+	b3CopyManifolds(oldManifolds, contact.manifolds, oldManifoldCount);
 
 	// Resize manifolds if needed
 	if (oldManifoldCount != clusterCount) {
@@ -1297,10 +1306,7 @@ export function b3ComputeMeshManifolds(
 		contact.manifoldCount = <i32>(<u16>clusterCount);
 	} else {
 		// Mem zero manifolds
-		for (let i = 0; i < contact.manifoldCount; ++i) {
-			let zero: b3Manifold;
-			contact.manifolds[i] = zero;
-		}
+		b3ZeroManifolds(contact.manifolds, contact.manifoldCount);
 	}
 
 	let consumed = s_consumed;
