@@ -25,6 +25,7 @@ import {
 	b3IsValidFloat,
 	b3MakeMatrixFromQuat,
 	b3MaxFloat,
+	b3Matrix3,
 	b3MaxInt,
 	b3MinFloat,
 	b3MinInt,
@@ -54,6 +55,7 @@ import {
 	b3LocalManifoldPoint,
 	b3Manifold,
 	b3Mesh,
+	b3HullData,
 	b3MeshTriangle,
 	b3Point2D,
 	b3SATCache,
@@ -92,6 +94,14 @@ import {
 	b3SplatW4,
 	b3StoreW4,
 	b3SubW4,
+	b3AddL,
+	b3MaxL,
+	b3MinL,
+	b3MulL,
+	b3SetL,
+	b3SplatL,
+	b3StoreL,
+	b3SubL,
 } from "./simd";
 import { b3CTZ32 } from "./ctz";
 import { Q_LOOP } from "./qsort";
@@ -596,6 +606,201 @@ function b3SurfaceMaterialAt(materials: StaticArray<b3SurfaceMaterial>, index: i
 	return materials[index];
 }
 
+// The four lane prefilter of b3ComputeMeshManifolds: transforms the cached triangles into the frame of shape B, culls
+// those outside the hull bounds and writes the survivors. Its own function keeps the v128 lanes out of the caller's frame.
+@unchecked
+function b3PrefilterTriangles(
+	shapeA: b3Shape,
+	triangleCaches: Array<b3TriangleCache>,
+	triangleCount: i32,
+	meshTriangles: StaticArray<b3MeshTriangle>?,
+	meshVertices: StaticArray<b3Vec3>?,
+	meshScale: b3Vec3,
+	meshFlipped: bool,
+	relativeMatrix: b3Matrix3,
+	translation: b3Vec3,
+	hullB: b3HullData?,
+	hullMarginValue: f32,
+	survivorIndices: StaticArray<i32>,
+	survivorVertices: StaticArray<b3Vec3>,
+): i32 {
+	let survivorCount = 0;
+	let hullMargin = b3Vec3(hullMarginValue, hullMarginValue, hullMarginValue);
+	let cxx = b3SplatW4(relativeMatrix.cx.x);
+	let cxy = b3SplatW4(relativeMatrix.cx.y);
+	let cxz = b3SplatW4(relativeMatrix.cx.z);
+	let cyx = b3SplatW4(relativeMatrix.cy.x);
+	let cyy = b3SplatW4(relativeMatrix.cy.y);
+	let cyz = b3SplatW4(relativeMatrix.cy.z);
+	let czx = b3SplatW4(relativeMatrix.cz.x);
+	let czy = b3SplatW4(relativeMatrix.cz.y);
+	let czz = b3SplatW4(relativeMatrix.cz.z);
+	let px = b3SplatW4(translation.x);
+	let py = b3SplatW4(translation.y);
+	let pz = b3SplatW4(translation.z);
+
+	let marginW = b3SplatW4(hullMargin.x);
+	let hullBounds = hullB != null ? hullB.aabb : b3AABB();
+	let hullLowerX = b3SplatW4(hullBounds.lowerBound.x);
+	let hullLowerY = b3SplatW4(hullBounds.lowerBound.y);
+	let hullLowerZ = b3SplatW4(hullBounds.lowerBound.z);
+	let hullUpperX = b3SplatW4(hullBounds.upperBound.x);
+	let hullUpperY = b3SplatW4(hullBounds.upperBound.y);
+	let hullUpperZ = b3SplatW4(hullBounds.upperBound.z);
+
+	// C's x[3][4], y[3][4], z[3][4], row k at index 4 * k
+	let x = s_laneX;
+	let y = s_laneY;
+	let z = s_laneZ;
+
+	for (let baseIndex = 0; baseIndex < triangleCount; baseIndex += 4) {
+		let laneCount = b3MinInt(4, triangleCount - baseIndex);
+
+		let lanes: FixedArray<FixedArray<b3Vec3, 4>, 3>;
+		for (let lane = 0; lane < 4; ++lane) {
+			let index = baseIndex + b3MinInt(lane, laneCount - 1);
+			let triangleIndex = triangleCaches[index].triangleIndex;
+
+			if (meshVertices != null) {
+				let meshTriangle = b3MeshTriangleAt(meshTriangles!, triangleIndex);
+				lanes[0][lane] = b3Mul(meshScale, b3MeshVertexAt(meshVertices, meshTriangle.index1));
+				lanes[1][lane] = b3Mul(meshScale, b3MeshVertexAt(meshVertices, meshFlipped ? meshTriangle.index3 : meshTriangle.index2));
+				lanes[2][lane] = b3Mul(meshScale, b3MeshVertexAt(meshVertices, meshFlipped ? meshTriangle.index2 : meshTriangle.index3));
+			} else {
+				if (B3_ASSERT_ENABLED) B3_ASSERT(shapeA.type == b3_heightShape);
+				let triangle = b3GetHeightFieldTriangle(shapeA.heightField!, triangleIndex);
+				lanes[0][lane] = triangle.vertices[0];
+				lanes[1][lane] = triangle.vertices[1];
+				lanes[2][lane] = triangle.vertices[2];
+			}
+		}
+
+		let keepMask: u32 = (<u32>1 << <u32>laneCount) - 1;
+		if (ASC_FEATURE_SIMD) {
+			// The lane math below on v128 lanes, which notes/containers.md shows exact
+			let v0x = b3TransformLaneL<v128>(cxx.x, cyx.x, czx.x, px.x, lanes[0][0], lanes[0][1], lanes[0][2], lanes[0][3]);
+			let v0y = b3TransformLaneL<v128>(cxy.x, cyy.x, czy.x, py.x, lanes[0][0], lanes[0][1], lanes[0][2], lanes[0][3]);
+			let v0z = b3TransformLaneL<v128>(cxz.x, cyz.x, czz.x, pz.x, lanes[0][0], lanes[0][1], lanes[0][2], lanes[0][3]);
+			let v1x = b3TransformLaneL<v128>(cxx.x, cyx.x, czx.x, px.x, lanes[1][0], lanes[1][1], lanes[1][2], lanes[1][3]);
+			let v1y = b3TransformLaneL<v128>(cxy.x, cyy.x, czy.x, py.x, lanes[1][0], lanes[1][1], lanes[1][2], lanes[1][3]);
+			let v1z = b3TransformLaneL<v128>(cxz.x, cyz.x, czz.x, pz.x, lanes[1][0], lanes[1][1], lanes[1][2], lanes[1][3]);
+			let v2x = b3TransformLaneL<v128>(cxx.x, cyx.x, czx.x, px.x, lanes[2][0], lanes[2][1], lanes[2][2], lanes[2][3]);
+			let v2y = b3TransformLaneL<v128>(cxy.x, cyy.x, czy.x, py.x, lanes[2][0], lanes[2][1], lanes[2][2], lanes[2][3]);
+			let v2z = b3TransformLaneL<v128>(cxz.x, cyz.x, czz.x, pz.x, lanes[2][0], lanes[2][1], lanes[2][2], lanes[2][3]);
+
+			if (hullB != null) {
+				let margin = f32x4.splat(marginW.x);
+				let lowerX = b3SubL(b3MinL(v0x, b3MinL(v1x, v2x)), margin);
+				let lowerY = b3SubL(b3MinL(v0y, b3MinL(v1y, v2y)), margin);
+				let lowerZ = b3SubL(b3MinL(v0z, b3MinL(v1z, v2z)), margin);
+				let upperX = b3AddL(b3MaxL(v0x, b3MaxL(v1x, v2x)), margin);
+				let upperY = b3AddL(b3MaxL(v0y, b3MaxL(v1y, v2y)), margin);
+				let upperZ = b3AddL(b3MaxL(v0z, b3MaxL(v1z, v2z)), margin);
+
+				let separated = v128.or(f32x4.lt(upperX, f32x4.splat(hullLowerX.x)), f32x4.gt(lowerX, f32x4.splat(hullUpperX.x)));
+				separated = v128.or(separated, v128.or(f32x4.lt(upperY, f32x4.splat(hullLowerY.x)), f32x4.gt(lowerY, f32x4.splat(hullUpperY.x))));
+				separated = v128.or(separated, v128.or(f32x4.lt(upperZ, f32x4.splat(hullLowerZ.x)), f32x4.gt(lowerZ, f32x4.splat(hullUpperZ.x))));
+
+				let cullMask = keepMask & <u32>i32x4.bitmask(separated);
+				keepMask &= ~cullMask;
+
+				while (cullMask != 0) {
+					let lane = b3CTZ32(cullMask);
+					cullMask &= cullMask - 1;
+					triangleCaches[baseIndex + <i32>lane].cache.satCache = b3SATCache();
+				}
+			}
+
+			if (keepMask == 0) {
+				continue;
+			}
+
+			b3StoreLanesL(x, 0, v0x);
+			b3StoreLanesL(y, 0, v0y);
+			b3StoreLanesL(z, 0, v0z);
+			b3StoreLanesL(x, 4, v1x);
+			b3StoreLanesL(y, 4, v1y);
+			b3StoreLanesL(z, 4, v1z);
+			b3StoreLanesL(x, 8, v2x);
+			b3StoreLanesL(y, 8, v2y);
+			b3StoreLanesL(z, 8, v2z);
+		} else {
+			// Transform triangle into the shape frame
+			let vx: FixedArray<b3FloatW4, 3>;
+			let vy: FixedArray<b3FloatW4, 3>;
+			let vz: FixedArray<b3FloatW4, 3>;
+			for (let k = 0; k < 3; ++k) {
+				let ax = b3SetW4(lanes[k][0].x, lanes[k][1].x, lanes[k][2].x, lanes[k][3].x);
+				let ay = b3SetW4(lanes[k][0].y, lanes[k][1].y, lanes[k][2].y, lanes[k][3].y);
+				let az = b3SetW4(lanes[k][0].z, lanes[k][1].z, lanes[k][2].z, lanes[k][3].z);
+
+				vx[k] = b3AddW4(b3AddW4(b3AddW4(b3MulW4(cxx, ax), b3MulW4(cyx, ay)), b3MulW4(czx, az)), px);
+				vy[k] = b3AddW4(b3AddW4(b3AddW4(b3MulW4(cxy, ax), b3MulW4(cyy, ay)), b3MulW4(czy, az)), py);
+				vz[k] = b3AddW4(b3AddW4(b3AddW4(b3MulW4(cxz, ax), b3MulW4(cyz, ay)), b3MulW4(czz, az)), pz);
+			}
+
+			if (hullB != null) {
+				let lowerX = b3SubW4(b3MinW4(vx[0], b3MinW4(vx[1], vx[2])), marginW);
+				let lowerY = b3SubW4(b3MinW4(vy[0], b3MinW4(vy[1], vy[2])), marginW);
+				let lowerZ = b3SubW4(b3MinW4(vz[0], b3MinW4(vz[1], vz[2])), marginW);
+				let upperX = b3AddW4(b3MaxW4(vx[0], b3MaxW4(vx[1], vx[2])), marginW);
+				let upperY = b3AddW4(b3MaxW4(vy[0], b3MaxW4(vy[1], vy[2])), marginW);
+				let upperZ = b3AddW4(b3MaxW4(vz[0], b3MaxW4(vz[1], vz[2])), marginW);
+
+				let separated = b3OrW4(b3LessThanW4(upperX, hullLowerX), b3GreaterThanW4(lowerX, hullUpperX));
+				separated = b3OrW4(separated, b3OrW4(b3LessThanW4(upperY, hullLowerY), b3GreaterThanW4(lowerY, hullUpperY)));
+				separated = b3OrW4(separated, b3OrW4(b3LessThanW4(upperZ, hullLowerZ), b3GreaterThanW4(lowerZ, hullUpperZ)));
+
+				let cullMask = keepMask & <u32>b3MoveMaskW4(separated);
+				keepMask &= ~cullMask;
+
+				while (cullMask != 0) {
+					let lane = b3CTZ32(cullMask);
+					cullMask &= cullMask - 1;
+					triangleCaches[baseIndex + <i32>lane].cache.satCache = b3SATCache();
+				}
+			}
+
+			if (keepMask == 0) {
+				continue;
+			}
+
+			for (let k = 0; k < 3; ++k) {
+				b3StoreW4(x, 4 * k, vx[k]);
+				b3StoreW4(y, 4 * k, vy[k]);
+				b3StoreW4(z, 4 * k, vz[k]);
+			}
+		}
+
+		while (keepMask != 0) {
+			let lane = <i32>b3CTZ32(keepMask);
+			keepMask &= keepMask - 1;
+
+			let survivor = 3 * survivorCount;
+			survivorVertices[survivor + 0] = b3Vec3(x[lane], y[lane], z[lane]);
+			survivorVertices[survivor + 1] = b3Vec3(x[4 + lane], y[4 + lane], z[4 + lane]);
+			survivorVertices[survivor + 2] = b3Vec3(x[8 + lane], y[8 + lane], z[8 + lane]);
+			survivorIndices[survivorCount] = baseIndex + lane;
+			survivorCount += 1;
+		}
+	}
+
+	return survivorCount;
+}
+
+// One row of the triangle transform over four lane vertices, ( ( m0 x + m1 y ) + m2 z ) + p as the b3FloatW4 code computes it
+@inline function b3TransformLaneL<T>(m0: f32, m1: f32, m2: f32, p: f32, a: b3Vec3, b: b3Vec3, c: b3Vec3, d: b3Vec3): T {
+	let ax = b3SetL<T>(a.x, b.x, c.x, d.x);
+	let ay = b3SetL<T>(a.y, b.y, c.y, d.y);
+	let az = b3SetL<T>(a.z, b.z, c.z, d.z);
+	return b3AddL(b3AddL(b3AddL(b3MulL(b3SplatL<T>(m0), ax), b3MulL(b3SplatL<T>(m1), ay)), b3MulL(b3SplatL<T>(m2), az)), b3SplatL<T>(p));
+}
+
+// b3StoreW4 of a v128 row into the lane scratch, which has room for three rows
+@inline unsafe function b3StoreLanesL<T>(data: StaticArray<f32>, index: i32, a: T): void {
+	b3StoreL<T>(changetype<usize>(data) + <usize>index * 4, a);
+}
+
 @unchecked
 export function b3ComputeMeshManifolds(
 	world: b3World,
@@ -673,7 +878,6 @@ export function b3ComputeMeshManifolds(
 
 	let survivorIndices = s_survivorIndices;
 	let survivorVertices = s_survivorVertices;
-	let survivorCount = 0;
 
 	let meshTriangles: StaticArray<b3MeshTriangle>? = null;
 	let meshVertices: StaticArray<b3Vec3>? = null;
@@ -686,113 +890,40 @@ export function b3ComputeMeshManifolds(
 		meshFlipped = meshScale.x * meshScale.y * meshScale.z < 0.0;
 	}
 
-	let cxx = b3SplatW4(relativeMatrix.cx.x);
-	let cxy = b3SplatW4(relativeMatrix.cx.y);
-	let cxz = b3SplatW4(relativeMatrix.cx.z);
-	let cyx = b3SplatW4(relativeMatrix.cy.x);
-	let cyy = b3SplatW4(relativeMatrix.cy.y);
-	let cyz = b3SplatW4(relativeMatrix.cy.z);
-	let czx = b3SplatW4(relativeMatrix.cz.x);
-	let czy = b3SplatW4(relativeMatrix.cz.y);
-	let czz = b3SplatW4(relativeMatrix.cz.z);
-	let px = b3SplatW4(transformAtoB.p.x);
-	let py = b3SplatW4(transformAtoB.p.y);
-	let pz = b3SplatW4(transformAtoB.p.z);
-
-	let marginW = b3SplatW4(hullMargin.x);
-	let hullBounds = hullB != null ? hullB.aabb : b3AABB();
-	let hullLowerX = b3SplatW4(hullBounds.lowerBound.x);
-	let hullLowerY = b3SplatW4(hullBounds.lowerBound.y);
-	let hullLowerZ = b3SplatW4(hullBounds.lowerBound.z);
-	let hullUpperX = b3SplatW4(hullBounds.upperBound.x);
-	let hullUpperY = b3SplatW4(hullBounds.upperBound.y);
-	let hullUpperZ = b3SplatW4(hullBounds.upperBound.z);
-
-	// C's x[3][4], y[3][4], z[3][4], row k at index 4 * k
-	let x = s_laneX;
-	let y = s_laneY;
-	let z = s_laneZ;
-
-	for (let baseIndex = 0; baseIndex < triangleCount; baseIndex += 4) {
-		let laneCount = b3MinInt(4, triangleCount - baseIndex);
-
-		let lanes: FixedArray<FixedArray<b3Vec3, 4>, 3>;
-		for (let lane = 0; lane < 4; ++lane) {
-			let index = baseIndex + b3MinInt(lane, laneCount - 1);
-			let triangleIndex = triangleCaches[index].triangleIndex;
-
-			if (meshVertices != null) {
-				let meshTriangle = b3MeshTriangleAt(meshTriangles!, triangleIndex);
-				lanes[0][lane] = b3Mul(meshScale, b3MeshVertexAt(meshVertices, meshTriangle.index1));
-				lanes[1][lane] = b3Mul(meshScale, b3MeshVertexAt(meshVertices, meshFlipped ? meshTriangle.index3 : meshTriangle.index2));
-				lanes[2][lane] = b3Mul(meshScale, b3MeshVertexAt(meshVertices, meshFlipped ? meshTriangle.index2 : meshTriangle.index3));
-			} else {
-				if (B3_ASSERT_ENABLED) B3_ASSERT(shapeA.type == b3_heightShape);
-				let triangle = b3GetHeightFieldTriangle(shapeA.heightField!, triangleIndex);
-				lanes[0][lane] = triangle.vertices[0];
-				lanes[1][lane] = triangle.vertices[1];
-				lanes[2][lane] = triangle.vertices[2];
-			}
-		}
-
-		// Transform triangle into the shape frame
-		let vx: FixedArray<b3FloatW4, 3>;
-		let vy: FixedArray<b3FloatW4, 3>;
-		let vz: FixedArray<b3FloatW4, 3>;
-		for (let k = 0; k < 3; ++k) {
-			let ax = b3SetW4(lanes[k][0].x, lanes[k][1].x, lanes[k][2].x, lanes[k][3].x);
-			let ay = b3SetW4(lanes[k][0].y, lanes[k][1].y, lanes[k][2].y, lanes[k][3].y);
-			let az = b3SetW4(lanes[k][0].z, lanes[k][1].z, lanes[k][2].z, lanes[k][3].z);
-
-			vx[k] = b3AddW4(b3AddW4(b3AddW4(b3MulW4(cxx, ax), b3MulW4(cyx, ay)), b3MulW4(czx, az)), px);
-			vy[k] = b3AddW4(b3AddW4(b3AddW4(b3MulW4(cxy, ax), b3MulW4(cyy, ay)), b3MulW4(czy, az)), py);
-			vz[k] = b3AddW4(b3AddW4(b3AddW4(b3MulW4(cxz, ax), b3MulW4(cyz, ay)), b3MulW4(czz, az)), pz);
-		}
-
-		let keepMask: u32 = (<u32>1 << <u32>laneCount) - 1;
-		if (hullB != null) {
-			let lowerX = b3SubW4(b3MinW4(vx[0], b3MinW4(vx[1], vx[2])), marginW);
-			let lowerY = b3SubW4(b3MinW4(vy[0], b3MinW4(vy[1], vy[2])), marginW);
-			let lowerZ = b3SubW4(b3MinW4(vz[0], b3MinW4(vz[1], vz[2])), marginW);
-			let upperX = b3AddW4(b3MaxW4(vx[0], b3MaxW4(vx[1], vx[2])), marginW);
-			let upperY = b3AddW4(b3MaxW4(vy[0], b3MaxW4(vy[1], vy[2])), marginW);
-			let upperZ = b3AddW4(b3MaxW4(vz[0], b3MaxW4(vz[1], vz[2])), marginW);
-
-			let separated = b3OrW4(b3LessThanW4(upperX, hullLowerX), b3GreaterThanW4(lowerX, hullUpperX));
-			separated = b3OrW4(separated, b3OrW4(b3LessThanW4(upperY, hullLowerY), b3GreaterThanW4(lowerY, hullUpperY)));
-			separated = b3OrW4(separated, b3OrW4(b3LessThanW4(upperZ, hullLowerZ), b3GreaterThanW4(lowerZ, hullUpperZ)));
-
-			let cullMask = keepMask & <u32>b3MoveMaskW4(separated);
-			keepMask &= ~cullMask;
-
-			while (cullMask != 0) {
-				let lane = b3CTZ32(cullMask);
-				cullMask &= cullMask - 1;
-				triangleCaches[baseIndex + <i32>lane].cache.satCache = b3SATCache();
-			}
-		}
-
-		if (keepMask == 0) {
-			continue;
-		}
-
-		for (let k = 0; k < 3; ++k) {
-			b3StoreW4(x, 4 * k, vx[k]);
-			b3StoreW4(y, 4 * k, vy[k]);
-			b3StoreW4(z, 4 * k, vz[k]);
-		}
-
-		while (keepMask != 0) {
-			let lane = <i32>b3CTZ32(keepMask);
-			keepMask &= keepMask - 1;
-
-			let survivor = 3 * survivorCount;
-			survivorVertices[survivor + 0] = b3Vec3(x[lane], y[lane], z[lane]);
-			survivorVertices[survivor + 1] = b3Vec3(x[4 + lane], y[4 + lane], z[4 + lane]);
-			survivorVertices[survivor + 2] = b3Vec3(x[8 + lane], y[8 + lane], z[8 + lane]);
-			survivorIndices[survivorCount] = baseIndex + lane;
-			survivorCount += 1;
-		}
+	// Mesh and height field each call the prefilter, which keeps it a function of its own in the release bake
+	let survivorCount = 0;
+	if (meshVertices != null) {
+		survivorCount = b3PrefilterTriangles(
+			shapeA,
+			triangleCaches,
+			triangleCount,
+			meshTriangles,
+			meshVertices,
+			meshScale,
+			meshFlipped,
+			relativeMatrix,
+			transformAtoB.p,
+			hullB,
+			hullMargin.x,
+			survivorIndices,
+			survivorVertices,
+		);
+	} else {
+		survivorCount = b3PrefilterTriangles(
+			shapeA,
+			triangleCaches,
+			triangleCount,
+			null,
+			null,
+			meshScale,
+			meshFlipped,
+			relativeMatrix,
+			transformAtoB.p,
+			hullB,
+			hullMargin.x,
+			survivorIndices,
+			survivorVertices,
+		);
 	}
 
 	let vertices = s_triangleVertices;
