@@ -190,3 +190,67 @@ monomorphized instance. `isFloat<T>()` folds too and its dead branch never compi
 one generic kernel take `T = v128` under `--enable-simd` and `T = f32` without it (lib/simd.as, the `L`
 helpers). There is no `isVector<T>()`. A constant condition in a ternary still compiles both arms, so the
 two instantiations have to be picked with an `if`.
+
+## WAMR AOT reloads the memory base and bound after every store in a function that makes a call
+
+Found by the third perf pass (notes/perf_3.md). WAMR 2.4.5 decides per function whether linear memory can move
+under it: `create_memory_info` in `core/iwasm/compilation/aot_llvm.c` (near 1220) sets
+`mem_space_unchanged = (!has_op_memory_grow && !has_op_func_call) || !possible_memory_grow`. Our module grows
+memory (the frame collector), so every function that contains a `call` or `call_indirect` loads
+`mem_base` and `mem_bound_check_*` from the module instance at each access instead of once at entry
+(`aot_emit_memory.c` near 115), and LLVM can only reuse them until the next store, which may alias the
+instance. In the arm64 code that is `ldr xB, [x19, #0x1b8]` (bound) and `ldr xM, [x19, #0x178]` (base)
+after every store. Counted in a release bake (`wamrc --format=object`, the ladder's flags): b3ShapeDistance
+had 1125 such loads in 6121 instructions while it called three helpers; with the helpers written into it
+(no calls left) it has 2 loads in 4023 instructions, and the query scene's shape casts ran 27% faster. The
+iteration kernels and prepare, which make no calls, load both once. Repro: any function that stores to memory
+in a loop and also calls a function, compiled by wamrc with `--bounds-checks=1`; remove the call and the
+reloads go. The fix belongs in WAMR (treat the base and bound as invariant between calls, since only a call
+or memory.grow can move them). Until then hot store heavy code should live in functions without calls.
+
+## There is no way to keep a function out of line in the release bake
+
+Binaryen (version 133, `src/passes/Inlining.cpp`, `worthFullInlining`) inlines every function with one
+direct caller regardless of size (`oneCallerInlineMaxSize` is unlimited), and rasc emits no
+`metadata.code.inline` hint that binaryen would honor as never inline. Together with the WAMR finding above
+this means a call free leaf cannot be split out of a caller that makes calls: the leaf is inlined back and
+inherits the reloads. A module constant referencing the function (`const f = leaf;`) is dropped as unused
+and does not help. What works is a second direct call site (lib/mesh_contact.as calls b3PrefilterTriangles
+once for meshes and once for height fields), which is a hack. A `@noinline` decorator, or `@inline(never)`
+emitted as the code annotation, would solve it.
+
+## `@inline` is not honored for functions that take a struct parameter
+
+The docs promise "guaranteed inlining under -O regardless of size". With a value class parameter rasc -O
+keeps the call:
+
+```as
+struct V { x: f32 = 0; y: f32 = 0; z: f32 = 0; }
+@inline function pickS(ax: f32, bx: f32, k: i32): f32 {
+	if (k == 0) {
+		return bx - ax;
+	}
+	return bx + ax;
+}
+@inline function pickV(a: V, b: V): f32 {
+	return b.x - a.x;
+}
+export function f(x: f32, y: f32): f32 {
+	let a: V; a.x = x; let b: V; b.y = y;
+	return pickS(x, y, 0) + pickS(x, y, 1) + pickV(a, b);
+}
+// rasc f.as --runtime stub -O --wat: pickS is inlined, pickV stays `call $pickV`
+```
+
+The release bake's binaryen then inlines it when it is at most 100 nodes, so small helpers are fine, but a
+larger `@inline` helper with struct parameters stays a call (b3BarycentricCoordsTri, which lib/distance.as now
+writes out at its five sites).
+
+## The host clock reads the environment on every call
+
+`rtNowImpl` in `packages/runtime/src/wasm/wasm_scripting_vm.cpp` (near 1756) calls
+`getenv("RIVE_WASM_FIXED_DATE")` on every `clock()`; the date variant next to it caches the lookup in a static.
+b3Profile reads the clock about 40 times per step, as C does with mach time. In the mover scene (a 2 µs step)
+the CPU profile has `__findenv_locked` / `getenv` / `steady_clock::now` / `wasm_runtime_invoke_native_quick`
+under `rtNow` at about 17% of all samples, against 26% for all AOT script code, which is why the smallest
+scenes run 4 to 7 times native per step. A static flag, as `rtDateNowImpl` has, would fix it.
