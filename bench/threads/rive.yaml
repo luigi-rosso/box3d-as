@@ -1,0 +1,16 @@
+name: box3d_threads
+main: main
+scripting: wasm
+dangerouslyFast: true
+exclude:
+  - micro
+  - out
+artboard:
+  width: 64
+  height: 64
+  background: "#000000"
+output:
+  dir: build
+logs:
+  file: build/rive.log
+  problems: build/problems.log

@@ -526,11 +526,11 @@ function b3DefaultAddTaskFcn(task: b3TaskCallback, taskContext: u64, userContext
 
 function b3DefaultFinishTaskFcn(userTask: u64, userContext: u64): void {}
 
-function b3DefaultFrictionCallback(frictionA: f32, materialA: u64, frictionB: f32, materialB: u64): f32 {
+export function b3DefaultFrictionCallback(frictionA: f32, materialA: u64, frictionB: f32, materialB: u64): f32 {
 	return Mathf.sqrt(frictionA * frictionB);
 }
 
-function b3DefaultRestitutionCallback(restitutionA: f32, materialA: u64, restitutionB: f32, materialB: u64): f32 {
+export function b3DefaultRestitutionCallback(restitutionA: f32, materialA: u64, restitutionB: f32, materialB: u64): f32 {
 	return b3MaxFloat(restitutionA, restitutionB);
 }
 
@@ -765,7 +765,16 @@ function b3ResolveContactBodySims(
 	return world.bodies[bodyId].localIndex;
 }
 
-function b3CollideTask(startIndex: i32, endIndex: i32, workerIndex: i32, stepContext: b3StepContext): void {
+// Runs the collide tasks of a step somewhere else, such as on script lanes, or answers false to leave them here
+export type b3LaneCollideFcn = (context: b3StepContext, contactCount: i32) => bool;
+
+let b3_laneCollide: b3LaneCollideFcn? = null;
+
+export function b3SetLaneCollide(fcn: b3LaneCollideFcn?): void {
+	b3_laneCollide = fcn;
+}
+
+export function b3CollideTask(startIndex: i32, endIndex: i32, workerIndex: i32, stepContext: b3StepContext): void {
 	let world = stepContext.world;
 	let graph = world.constraintGraph;
 	let taskContext = world.taskContexts[workerIndex];
@@ -1070,14 +1079,17 @@ function b3Collide(context: b3StepContext): void {
 
 	// Task should take at least 40us on a 4GHz CPU (10K cycles)
 	let minRange = 20;
-	b3ParallelFor(
-		world,
-		(startIndex: i32, endIndex: i32, workerIndex: i32): void =>
-			b3CollideTask(startIndex, endIndex, workerIndex, context),
-		contactCount,
-		minRange,
-		"collide",
-	);
+	let laneCollide = b3_laneCollide;
+	if (laneCollide == null || laneCollide(context, contactCount) == false) {
+		b3ParallelFor(
+			world,
+			(startIndex: i32, endIndex: i32, workerIndex: i32): void =>
+				b3CollideTask(startIndex, endIndex, workerIndex, context),
+			contactCount,
+			minRange,
+			"collide",
+		);
+	}
 
 	context.awakeContactIndices = b3_emptyContactIndices;
 

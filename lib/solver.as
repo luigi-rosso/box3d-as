@@ -1444,7 +1444,16 @@ function b3InitColorStages(
 	return stageIndex;
 }
 
-function b3ExecuteBlock(stage: b3SolverStage, context: b3StepContext, block: b3SolverBlock, workerIndex: i32): void {
+// Runs the solver stages of a step somewhere else, such as on script lanes, or answers false to leave them here
+export type b3LaneSolveFcn = (context: b3StepContext) => bool;
+
+let b3_laneSolve: b3LaneSolveFcn? = null;
+
+export function b3SetLaneSolve(fcn: b3LaneSolveFcn?): void {
+	b3_laneSolve = fcn;
+}
+
+export function b3ExecuteBlock(stage: b3SolverStage, context: b3StepContext, block: b3SolverBlock, workerIndex: i32): void {
 	let stageType = stage.type;
 	let blockType = <b3SolverBlockType>block.blockType;
 
@@ -2467,6 +2476,12 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 
 		let jointIdCapacity = b3GetIdCapacity(world.jointIdPool);
 		let contactIdCapacity = b3GetIdCapacity(world.contactIdPool);
+		let laneSolve = b3_laneSolve;
+		if (laneSolve != null && laneSolve(stepContext)) {
+			// The lanes ran every stage, so the caller's b3SolverTask below finds the orchestrator claimed
+			b3AtomicStoreInt(stepContext.mainClaimed, 1);
+			workerCount = 0;
+		}
 		for (let i = 0; i < workerCount; ++i) {
 			let taskContext = world.taskContexts[i];
 			b3SetBitCountAndClear(taskContext.jointStateBitSet, <u32>jointIdCapacity);
