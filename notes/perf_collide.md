@@ -154,13 +154,16 @@ every query kind's hash and hit count and the movers' poses after each of 200 qu
 village steps, so query results are checked bit exact, not only their effect on bodies. The bench
 prints the hashes too (`qRayHash=...`); AnimaScript and native match at 60 and 1500 steps.
 
-Bench: `--define=SCENE=3..11` runs `capsule_mesh, heightfield, mesh_drop, village, queries, mover,
-card_house, chains, bullets` through the scene mirror (run.sh and profile.sh copy
-`verify/scenes/scenes.as` into `bench/as/scenes.as` with the import path rewritten), timed per
-`Scene_Step` as bench/native does, and the result line adds `qRay qRayAll qShapeCast qOverlap
-qMover` (ms per step) and their hashes; `bench/native/bench.c` prints the same fields and
-`table.py` adds a query table. `--define=STEPLOG` logs every step's time and its stages over 0.5 ms.
-Example: `AOT_SCENES="mesh_drop:170:5 village:200:6 queries:600:7" bench/as/run.sh`.
+Bench: `--define=SCENE=n` from 3 on runs the scene mirror (run.sh and profile.sh copy
+`verify/scenes/scenes.as` into `bench/as/scenes/` with the import path rewritten), timed per
+`Scene_Step` as bench/native does. After the merge with main's round 2 the numbering is 3 chains,
+4 plank_pile, 5 mesh_drop, 6 village, 7 queries, 8 capsule_mesh, 9 heightfield, 10 mover, 11 card_house,
+12 bullets (notes/bench.md). The measurements in this file were taken before that merge, when
+capsule_mesh was 3 and heightfield 4; mesh_drop, village and queries kept 5, 6 and 7. The result line
+adds `qRay qRayAll qShapeCast qOverlap qMover` (ms per step) and their hashes;
+`bench/native/bench.c` prints the same fields and `table.py` adds a query table.
+`--define=STEPLOG` logs every step's time and its stages over 0.5 ms.
+Example: `AOT_SCENES="mesh_drop:170:5 village:200:6 queries:600:7 capsule_mesh:300:8 heightfield:300:9" bench/as/run.sh`.
 
 ## Changes
 

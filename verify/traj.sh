@@ -20,7 +20,7 @@ for a in "$@"; do
 	if [ "$a" = "--large" ]; then large=1; else scenes+=("$a"); fi
 done
 if [ ${#scenes[@]} -eq 0 ]; then
-	scenes=(pyramid card_house chains capsule_mesh heightfield bullets mover queries)
+	scenes=(pyramid card_house chains capsule_mesh heightfield bullets mover plank_pile queries)
 	[ $large -eq 1 ] && scenes+=(large_pyramid many_bodies mesh_drop village)
 fi
 

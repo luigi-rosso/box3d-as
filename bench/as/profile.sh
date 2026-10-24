@@ -15,11 +15,11 @@ OUT=${OUT:-$(mktemp -d)}
 CACHE=${RIVE_AOT_CACHE_DIR:-$OUT/aotcache}
 mkdir -p "$OUT" "$CACHE"
 rsync -a --delete "$HERE/../../lib/" "$HERE/lib/"
-sed 's|"\.\./\.\./lib/|"./lib/|' "$HERE/../../verify/scenes/scenes.as" > "$HERE/scenes.as"
+mkdir -p "$HERE/scenes" && sed "s|\"../../lib/|\"../lib/|" "$HERE/../../verify/scenes/scenes.as" > "$HERE/scenes/scenes.as"
 # WASM_SIMD=off bakes the scalar artifact from a copy of the project with wasmSimd: off
 PROJECT=$HERE
 if [ "${WASM_SIMD:-on}" = off ]; then
-	PROJECT=${TMPDIR:-/tmp}/box3d_bench_scalar_project
+	PROJECT=${TMPDIR:-/tmp}/box3d_bench_scalar_$(echo "$HERE" | md5 | cut -c1-8)
 	mkdir -p "$PROJECT"
 	rsync -a --delete --exclude out --exclude build "$HERE/" "$PROJECT/"
 	echo "wasmSimd: off" >> "$PROJECT/rive.yaml"

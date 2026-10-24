@@ -1,8 +1,10 @@
 // Step timing for the port, the AnimaScript side of bench/native.
-// --define=SCENE=0 pyramid (base 10), 1 large_pyramid (base 100), 2 many_bodies; 3 and up run the
-// verify/scenes mirror (SCENE_NAMES below, copied in as ./scenes by run.sh); --define=STEPS=n;
-// --define=STEPLOG logs every step; --define=DELAY=s spins s seconds before the first step.
-// One world step per frame; the scene is built in init and the result logged after the last step.
+// --define=SCENE=0 pyramid (base 10), 1 large_pyramid (base 100), 2 many_bodies, built here; 3 and up are
+// built by the verify/scenes mirror (SCENE_NAMES below, copied in as ./scenes/scenes.as by run.sh):
+// 3 chains, 4 plank_pile, 5 mesh_drop, 6 village, 7 queries, 8 capsule_mesh, 9 heightfield, 10 mover,
+// 11 card_house, 12 bullets. --define=STEPS=n; --define=STEPLOG logs every step; --define=DELAY=s spins
+// s seconds before the first step. One world step per frame; the scene is built in init and the result
+// logged after the last step.
 
 import { Layout, Context } from "rive/host";
 import { clock } from "rive/os";
@@ -24,22 +26,51 @@ import {
 	b3World_GetProfile,
 	b3World_Step,
 	b3_dynamicBody,
+	b3Body_GetPosition,
+	b3Body_GetRotation,
+	b3Body_GetLinearVelocity,
+	b3Body_GetAngularVelocity,
 } from "./lib/box3d";
-import { Scene, Scene_Create, Scene_Step, SCENE_QUERY_KIND_COUNT } from "./scenes";
+// run.sh copies verify/scenes/scenes.as here, the mirror of the native bench's scenes.c
+import { Scene, Scene_Create, Scene_Step, SCENE_QUERY_KIND_COUNT } from "./scenes/scenes";
+
+// Every body in creation order, for the state hash
+const g_bodies = new Array<b3BodyId>();
+
+// FNV-1a over the float bits of each body's pose and velocities, as verify/scenes/hash.mjs reads them from a
+// native recording, so a run on any tier or artifact can be checked bit exact
+function stateHash(): u32 {
+	let h: u32 = 2166136261;
+	for (let i = 0; i < g_bodies.length; ++i) {
+		let id = g_bodies[i];
+		let p = b3Body_GetPosition(id);
+		let q = b3Body_GetRotation(id);
+		let v = b3Body_GetLinearVelocity(id);
+		let w = b3Body_GetAngularVelocity(id);
+		let words: StaticArray<f32> = [p.x, p.y, p.z, q.v.x, q.v.y, q.v.z, q.s, v.x, v.y, v.z, w.x, w.y, w.z];
+		for (let k = 0; k < words.length; ++k) {
+			let bits = reinterpret<u32>(words[k]);
+			for (let b = 0; b < 4; ++b) {
+				h = (h ^ ((bits >> (8 * <u32>b)) & 0xff)) * 16777619;
+			}
+		}
+	}
+	return h;
+}
 
 const SCENE_PYRAMID: i32 = 0;
 const SCENE_LARGE_PYRAMID: i32 = 1;
 const SCENE_MANY_BODIES: i32 = 2;
+// From here on built by verify/scenes, as the native bench builds them
+const SCENE_CHAINS: i32 = 3;
+const SCENE_NAMES: StaticArray<string> = [
+	"chains", "plank_pile", "mesh_drop", "village", "queries", "capsule_mesh", "heightfield", "mover", "card_house",
+	"bullets",
+];
+const QUERY_NAMES: StaticArray<string> = ["qRay", "qRayAll", "qShapeCast", "qOverlap", "qMover"];
 const STAGE_COUNT: i32 = 23;
 const WARMUP_STEPS: i32 = 1;
 const SUBSTEP_COUNT: i32 = 4;
-
-// Scenes from verify/scenes, from SCENE=3 on, timed per Scene_Step as bench/native does
-const SCENE_FIRST_MIRRORED: i32 = 3;
-const SCENE_NAMES: StaticArray<string> = [
-	"capsule_mesh", "heightfield", "mesh_drop", "village", "queries", "mover", "card_house", "chains", "bullets",
-];
-const QUERY_NAMES: StaticArray<string> = ["qRay", "qRayAll", "qShapeCast", "qOverlap", "qMover"];
 
 const STAGE_NAMES: StaticArray<string> = [
 	"step", "pairs", "collide", "solve", "solverSetup", "constraints", "prepareConstraints",
@@ -56,17 +87,23 @@ function sceneIndex(): i32 {
 }
 
 function sceneName(scene: i32): string {
-	if (scene >= SCENE_FIRST_MIRRORED) {
-		return SCENE_NAMES[scene - SCENE_FIRST_MIRRORED];
+	if (scene == SCENE_PYRAMID) {
+		return "pyramid";
 	}
-	return scene == SCENE_PYRAMID ? "pyramid" : scene == SCENE_LARGE_PYRAMID ? "large_pyramid" : "many_bodies";
+	if (scene == SCENE_LARGE_PYRAMID) {
+		return "large_pyramid";
+	}
+	if (scene >= SCENE_CHAINS) {
+		return SCENE_NAMES[scene - SCENE_CHAINS];
+	}
+	return "many_bodies";
 }
 
 function stepCount(scene: i32): i32 {
 	if (isDefined(STEPS)) {
 		return STEPS;
 	}
-	return scene == SCENE_MANY_BODIES ? 100 : 200;
+	return scene == SCENE_MANY_BODIES ? 100 : scene >= SCENE_CHAINS ? 300 : 200;
 }
 
 function profileToArray(p: b3Profile, out: Float64Array): void {
@@ -103,6 +140,7 @@ function createPyramid(worldId: b3WorldId, baseCount: i32): void {
 		let bodyDef = b3DefaultBodyDef();
 		bodyDef.position = b3Vec3(0.0, -1.0, 0.0);
 		let groundId = b3CreateBody(worldId, bodyDef);
+		g_bodies.push(groundId);
 
 		let box = b3MakeBoxHull(400.0, 1.0, 400.0);
 		let shapeDef = b3DefaultShapeDef();
@@ -129,6 +167,7 @@ function createPyramid(worldId: b3WorldId, baseCount: i32): void {
 			bodyDef.position = b3Vec3(x, y, 0.0);
 
 			let bodyId: b3BodyId = b3CreateBody(worldId, bodyDef);
+			g_bodies.push(bodyId);
 			b3CreateHullShape(bodyId, shapeDef, box.base);
 		}
 	}
@@ -153,6 +192,7 @@ function createSmallPyramid(worldId: b3WorldId, baseCount: i32, extent: f32, cen
 			bodyDef.position = b3Vec3(x, y, baseZ);
 
 			let bodyId: b3BodyId = b3CreateBody(worldId, bodyDef);
+			g_bodies.push(bodyId);
 			b3CreateHullShape(bodyId, shapeDef, box.base);
 		}
 	}
@@ -170,6 +210,7 @@ function createManyPyramids(worldId: b3WorldId): void {
 		let bodyDef = b3DefaultBodyDef();
 		bodyDef.position = b3Vec3(0.0, -1.0, 0.0);
 		let groundId = b3CreateBody(worldId, bodyDef);
+		g_bodies.push(groundId);
 
 		let shapeDef = b3DefaultShapeDef();
 		let box = b3MakeBoxHull(groundExtent, 1.0, groundExtent);
@@ -202,9 +243,10 @@ export class Main extends Layout {
 	worldId: b3WorldId = b3WorldId();
 	stepMs: Float64Array = new Float64Array(0);
 	stageSum: Float64Array = new Float64Array(STAGE_COUNT);
+	stageMin: Float64Array = new Float64Array(STAGE_COUNT);
 	stages: Float64Array = new Float64Array(STAGE_COUNT);
 	createMs: f64 = 0;
-	mirror: Scene = new Scene();
+	sceneData: Scene = new Scene();
 
 	override init(context: Context): bool {
 		this.scene = sceneIndex();
@@ -212,12 +254,15 @@ export class Main extends Layout {
 		this.stepMs = new Float64Array(this.steps - WARMUP_STEPS);
 
 		let t0 = clock();
-		let worldDef = b3DefaultWorldDef();
-		worldDef.workerCount = 1;
-		if (this.scene >= SCENE_FIRST_MIRRORED) {
-			Scene_Create(this.mirror, sceneName(this.scene), 1);
-			this.worldId = this.mirror.worldId;
+		if (this.scene >= SCENE_CHAINS) {
+			Scene_Create(this.sceneData, sceneName(this.scene), 1);
+			this.worldId = this.sceneData.worldId;
+			for (let i = 0; i < this.sceneData.bodies.length; ++i) {
+				g_bodies.push(this.sceneData.bodies[i]);
+			}
 		} else {
+			let worldDef = b3DefaultWorldDef();
+			worldDef.workerCount = 1;
 			this.worldId = b3CreateWorld(worldDef);
 			if (this.scene == SCENE_PYRAMID) {
 				createPyramid(this.worldId, 10);
@@ -247,8 +292,8 @@ export class Main extends Layout {
 		}
 
 		let t0 = clock();
-		if (this.scene >= SCENE_FIRST_MIRRORED) {
-			Scene_Step(this.mirror, this.stepIndex);
+		if (this.scene >= SCENE_CHAINS) {
+			Scene_Step(this.sceneData, this.stepIndex);
 		} else {
 			b3World_Step(this.worldId, 1.0 / 60.0, SUBSTEP_COUNT);
 		}
@@ -268,6 +313,7 @@ export class Main extends Layout {
 			}
 			for (let k = 0; k < STAGE_COUNT; ++k) {
 				this.stageSum[k] += this.stages[k];
+				this.stageMin[k] = this.stepIndex == WARMUP_STEPS ? this.stages[k] : Math.min(this.stageMin[k], this.stages[k]);
 			}
 		}
 
@@ -296,15 +342,20 @@ export class Main extends Layout {
 		for (let k = 0; k < STAGE_COUNT; ++k) {
 			line += " " + STAGE_NAMES[k] + "=" + formatFixed(this.stageSum[k] / <f64>timed, 4);
 		}
-		if (this.scene >= SCENE_FIRST_MIRRORED) {
+		// Per stage minimum over the timed steps, which a loaded machine disturbs least
+		for (let k = 0; k < STAGE_COUNT; ++k) {
+			line += " min_" + STAGE_NAMES[k] + "=" + formatFixed(this.stageMin[k], 4);
+		}
+		if (this.scene >= SCENE_CHAINS) {
 			for (let k = 0; k < SCENE_QUERY_KIND_COUNT; ++k) {
-				line += " " + QUERY_NAMES[k] + "=" + formatFixed(this.mirror.queryMs[k] / <f64>this.steps, 4);
+				line += " " + QUERY_NAMES[k] + "=" + formatFixed(this.sceneData.queryMs[k] / <f64>this.steps, 4);
 			}
 			for (let k = 0; k < SCENE_QUERY_KIND_COUNT; ++k) {
-				let hash = this.mirror.queryHash[k];
+				let hash = this.sceneData.queryHash[k];
 				line += " " + QUERY_NAMES[k] + "Hash=" + hash.toString(16).padStart(8, "0");
 			}
 		}
+		line += " hash=" + stateHash().toString();
 		console.log(line);
 	}
 }

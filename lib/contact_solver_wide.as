@@ -44,7 +44,7 @@ import {
 	b3AllZeroAt,
 	b3Vec3W,
 } from "./simd";
-import { b3BodySim, b3BodyState, b3DecodeAwakeIndex, b3_dynamicFlag, b3_identityBodyState } from "./body";
+import { b3ArrayData, b3BodySim, b3BodyState, b3DecodeAwakeIndex, b3_identityStates, b3_dynamicFlag } from "./body";
 import { b3Contact, b3_simEnableHitEvent } from "./contact";
 import { b3SolverBlock, b3StepContext } from "./solver";
 import {
@@ -125,6 +125,12 @@ const BS_DP = offsetof<b3BodyState>("deltaPosition");
 const BS_FLAGS = offsetof<b3BodyState>("flags");
 const BS_DQ = offsetof<b3BodyState>("deltaRotation");
 const CT_FRICTION = offsetof<b3Contact>("friction");
+const CT_MANIFOLDS = offsetof<b3Contact>("manifolds");
+const CT_MANIFOLDCOUNT = offsetof<b3Contact>("manifoldCount");
+const CT_FLAGS = offsetof<b3Contact>("flags");
+const CT_CONTACTID = offsetof<b3Contact>("contactId");
+const CT_ENCODEDBODYSIMA = offsetof<b3Contact>("encodedBodySimA");
+const CT_ENCODEDBODYSIMB = offsetof<b3Contact>("encodedBodySimB");
 const CT_RESTITUTION = offsetof<b3Contact>("restitution");
 const CT_ROLLINGRESISTANCE = offsetof<b3Contact>("rollingResistance");
 const CT_TANGENTVELOCITY = offsetof<b3Contact>("tangentVelocity");
@@ -139,6 +145,7 @@ const MP_ANCHORB = offsetof<b3ManifoldPoint>("anchorB");
 const MP_SEPARATION = offsetof<b3ManifoldPoint>("separation");
 const MP_NORMALIMPULSE = offsetof<b3ManifoldPoint>("normalImpulse");
 const MP_NORMALVELOCITY = offsetof<b3ManifoldPoint>("normalVelocity");
+const MP_TOTALNORMALIMPULSE = offsetof<b3ManifoldPoint>("totalNormalImpulse");
 const BSIM_INVMASS = offsetof<b3BodySim>("invMass");
 const BSIM_INVINERTIA = offsetof<b3BodySim>("invInertiaWorld");
 const M3_CX = offsetof<b3Matrix3>("cx");
@@ -150,14 +157,7 @@ const M3_CZ = offsetof<b3Matrix3>("cz");
 	return isFloat<T>() ? 4 : 1;
 }
 
-function b3MakeIdentityStates(): StaticArray<b3BodyState> {
-	let states = new StaticArray<b3BodyState>(1);
-	states[0] = b3_identityBodyState;
-	return states;
-}
-
-// C points static lanes at b3_identityBodyState and null sims at b3_zeroBodySim.
-const b3_identityStates = b3MakeIdentityStates();
+// C points null sims at b3_zeroBodySim.
 const b3_zeroSims = new StaticArray<b3BodySim>(1);
 
 @inline unsafe function b3StatesData(states: Array<b3BodyState>): usize {
@@ -298,15 +298,10 @@ unsafe function b3PrepareConstraintL<T>(
 	let manifoldData = changetype<usize>(manifolds);
 
 	let warmStartScale = b3SplatL<T>(warmStartScaleValue);
-	let zeroW = b3SplatL<T>(0.0);
-	let oneW = b3SplatL<T>(1.0);
-	let twoW = b3SplatL<T>(2.0);
-	let halfW = b3SplatL<T>(0.5);
-	let invTau = b3SplatL<T>(<f32>1.0 / B3_SPECULATIVE_DISTANCE());
-	let minFrictionWeight = b3SplatL<T>(B3_MIN_FRICTION_WEIGHT);
-	let minDet = b3SplatL<T>(1000.0 * FLT_MIN);
+	let invTau: f32 = <f32>1.0 / B3_SPECULATIVE_DISTANCE();
 
 	// C's pointer lanes: each lane's contact object and its manifold data, which stay put during the step
+	let contactData = b3ArrayData(world.contacts);
 	let zeroContact = changetype<usize>(b3_zeroContact);
 	let zeroManifold = changetype<usize>(b3_zeroManifolds);
 	let contactLanes: FixedArray<usize, 4>;
@@ -323,23 +318,24 @@ unsafe function b3PrepareConstraintL<T>(
 		store<i32>(c0 + CW_CONTACTS + <usize>lane * 4, contactId);
 
 		if (contactId != B3_NULL_INDEX) {
-			let contact = world.contacts[contactId];
-			let indexA = b3DecodeAwakeIndex(contact.encodedBodySimA);
-			let indexB = b3DecodeAwakeIndex(contact.encodedBodySimB);
+			let contact = load<usize>(contactData + <usize>contactId * sizeof<usize>());
+			let indexA = b3DecodeAwakeIndex(load<i32>(contact + CT_ENCODEDBODYSIMA));
+			let indexB = b3DecodeAwakeIndex(load<i32>(contact + CT_ENCODEDBODYSIMB));
+			let contactManifoldCount = load<i32>(contact + CT_MANIFOLDCOUNT);
 
 			store<i32>(c0 + CW_INDEXA + <usize>lane * 4, indexA + 1);
 			store<i32>(c0 + CW_INDEXB + <usize>lane * 4, indexB + 1);
-			manifoldCounts[lane] = contact.manifoldCount;
+			manifoldCounts[lane] = contactManifoldCount;
 
-			contactLanes[lane] = changetype<usize>(contact);
-			laneManifolds[lane] = changetype<usize>(contact.manifolds);
+			contactLanes[lane] = contact;
+			laneManifolds[lane] = load<usize>(contact + CT_MANIFOLDS);
 			simLanesA[lane] = indexA;
 			simLanesB[lane] = indexB;
-			hitEventLanes |= (contact.flags & b3_simEnableHitEvent) != 0 ? 1 << lane : 0;
-			maxManifoldCount = b3MaxInt(maxManifoldCount, contact.manifoldCount);
+			hitEventLanes |= (load<u32>(contact + CT_FLAGS) & b3_simEnableHitEvent) != 0 ? 1 << lane : 0;
+			maxManifoldCount = b3MaxInt(maxManifoldCount, contactManifoldCount);
 
 			// b3AllZeroW( c->rollingResistance ) == false, which the lanes share
-			anyRolling = anyRolling || contact.rollingResistance != 0.0;
+			anyRolling = anyRolling || load<f32>(contact + CT_ROLLINGRESISTANCE) != 0.0;
 		} else {
 			store<i32>(c0 + CW_INDEXA + <usize>lane * 4, 0);
 			store<i32>(c0 + CW_INDEXB + <usize>lane * 4, 0);
@@ -429,19 +425,17 @@ unsafe function b3PrepareConstraintL<T>(
 		b3StoreL<T>(c + CW_FRICTION, b3SetL<T>(load<f32>(cl0 + CT_FRICTION), load<f32>(cl1 + CT_FRICTION), load<f32>(cl2 + CT_FRICTION), load<f32>(cl3 + CT_FRICTION)));
 		b3StoreL<T>(c + CW_ROLLINGRESISTANCE, rollingResistance);
 		b3StoreL<T>(c + CW_RESTITUTION, b3SetL<T>(load<f32>(cl0 + CT_RESTITUTION), load<f32>(cl1 + CT_RESTITUTION), load<f32>(cl2 + CT_RESTITUTION), load<f32>(cl3 + CT_RESTITUTION)));
-		let tangentVelocityX = b3SetL<T>(load<f32>(cl0 + CT_TANGENTVELOCITY), load<f32>(cl1 + CT_TANGENTVELOCITY), load<f32>(cl2 + CT_TANGENTVELOCITY), load<f32>(cl3 + CT_TANGENTVELOCITY));
-		let tangentVelocityY = b3SetL<T>(load<f32>(cl0 + CT_TANGENTVELOCITY + 4), load<f32>(cl1 + CT_TANGENTVELOCITY + 4), load<f32>(cl2 + CT_TANGENTVELOCITY + 4), load<f32>(cl3 + CT_TANGENTVELOCITY + 4));
-		let tangentVelocityZ = b3SetL<T>(load<f32>(cl0 + CT_TANGENTVELOCITY + 8), load<f32>(cl1 + CT_TANGENTVELOCITY + 8), load<f32>(cl2 + CT_TANGENTVELOCITY + 8), load<f32>(cl3 + CT_TANGENTVELOCITY + 8));
 
-		// b3AddSymW( iA, iB )
-		let invIABxx = b3AddL(iAxx, iBxx);
-		let invIABxy = b3AddL(iAxy, iBxy);
-		let invIABxz = b3AddL(iAxz, iBxz);
-		let invIAByy = b3AddL(iAyy, iByy);
-		let invIAByz = b3AddL(iAyz, iByz);
-		let invIABzz = b3AddL(iAzz, iBzz);
 		let rm = c + CW_ROLLINGMASS;
 		if (anyRolling) {
+			// b3AddSymW( iA, iB )
+			let invIABxx = b3AddL(iAxx, iBxx);
+			let invIABxy = b3AddL(iAxy, iBxy);
+			let invIABxz = b3AddL(iAxz, iBxz);
+			let invIAByy = b3AddL(iAyy, iByy);
+			let invIAByz = b3AddL(iAyz, iByz);
+			let invIABzz = b3AddL(iAzz, iBzz);
+
 			// b3InvertSymW( invIAB )
 			let cxx = b3SubL(b3MulL(invIAByy, invIABzz), b3MulL(invIAByz, invIAByz));
 			let cxy = b3SubL(b3MulL(invIABxz, invIAByz), b3MulL(invIABxy, invIABzz));
@@ -451,8 +445,8 @@ unsafe function b3PrepareConstraintL<T>(
 			let czz = b3SubL(b3MulL(invIABxx, invIAByy), b3MulL(invIABxy, invIABxy));
 
 			let det = b3AddL(b3MulL(invIABxx, cxx), b3AddL(b3MulL(invIABxy, cxy), b3MulL(invIABxz, cxz)));
-			let valid = b3GreaterThanL(b3AbsL(det), minDet);
-			let invDet = b3BlendL(zeroW, b3DivL(oneW, det), valid);
+			let valid = b3GreaterThanL(b3AbsL(det), b3SplatL<T>(1000.0 * FLT_MIN));
+			let invDet = b3BlendL(b3SplatL<T>(0.0), b3DivL(b3SplatL<T>(1.0), det), valid);
 
 			b3StoreL<T>(rm + S_CXX, b3MulL(invDet, cxx));
 			b3StoreL<T>(rm + S_CXY, b3MulL(invDet, cxy));
@@ -461,19 +455,22 @@ unsafe function b3PrepareConstraintL<T>(
 			b3StoreL<T>(rm + S_CYZ, b3MulL(invDet, cyz));
 			b3StoreL<T>(rm + S_CZZ, b3MulL(invDet, czz));
 		} else {
-			b3StoreL<T>(rm + S_CXX, zeroW);
-			b3StoreL<T>(rm + S_CXY, zeroW);
-			b3StoreL<T>(rm + S_CXZ, zeroW);
-			b3StoreL<T>(rm + S_CYY, zeroW);
-			b3StoreL<T>(rm + S_CYZ, zeroW);
-			b3StoreL<T>(rm + S_CZZ, zeroW);
+			b3StoreL<T>(rm + S_CXX, b3SplatL<T>(0.0));
+			b3StoreL<T>(rm + S_CXY, b3SplatL<T>(0.0));
+			b3StoreL<T>(rm + S_CXZ, b3SplatL<T>(0.0));
+			b3StoreL<T>(rm + S_CYY, b3SplatL<T>(0.0));
+			b3StoreL<T>(rm + S_CYZ, b3SplatL<T>(0.0));
+			b3StoreL<T>(rm + S_CZZ, b3SplatL<T>(0.0));
 		}
 
-		let rollingResistanceMask = b3GreaterThanL(rollingResistance, zeroW);
+		let rollingResistanceMask = b3GreaterThanL(rollingResistance, b3SplatL<T>(0.0));
 
 		for (let manifoldIndex = 0; manifoldIndex < manifoldCount; ++manifoldIndex) {
 			let cm0 = manifoldData + <usize>(manifoldBase + manifoldIndex) * sizeof<b3ContactManifoldWide>();
 			let cm = cm0 + <usize>lane * 4;
+			let tangentVelocityX = b3SetL<T>(load<f32>(cl0 + CT_TANGENTVELOCITY), load<f32>(cl1 + CT_TANGENTVELOCITY), load<f32>(cl2 + CT_TANGENTVELOCITY), load<f32>(cl3 + CT_TANGENTVELOCITY));
+			let tangentVelocityY = b3SetL<T>(load<f32>(cl0 + CT_TANGENTVELOCITY + 4), load<f32>(cl1 + CT_TANGENTVELOCITY + 4), load<f32>(cl2 + CT_TANGENTVELOCITY + 4), load<f32>(cl3 + CT_TANGENTVELOCITY + 4));
+			let tangentVelocityZ = b3SetL<T>(load<f32>(cl0 + CT_TANGENTVELOCITY + 8), load<f32>(cl1 + CT_TANGENTVELOCITY + 8), load<f32>(cl2 + CT_TANGENTVELOCITY + 8), load<f32>(cl3 + CT_TANGENTVELOCITY + 8));
 
 			let manifoldLanes: FixedArray<usize, 4>;
 			let activeLanes: FixedArray<i32, 4>;
@@ -496,7 +493,7 @@ unsafe function b3PrepareConstraintL<T>(
 			store<i32>(cm0 + MW_POINTCOUNT, pointCount);
 
 			let activeLanesW = b3SetL<T>(<f32>activeLanes[l0], <f32>activeLanes[l1], <f32>activeLanes[l2], <f32>activeLanes[l3]);
-			let rollingMask = b3AndL(rollingResistanceMask, b3GreaterThanL(activeLanesW, zeroW));
+			let rollingMask = b3AndL(rollingResistanceMask, b3GreaterThanL(activeLanesW, b3SplatL<T>(0.0)));
 			b3StoreL<T>(cm + MW_ROLLINGMASK, b3MaskValueL(rollingMask));
 
 			let m0 = manifoldLanes[l0];
@@ -517,13 +514,13 @@ unsafe function b3PrepareConstraintL<T>(
 			let rollingImpulseZ = b3SetL<T>(load<f32>(m0 + M_ROLLINGIMPULSE + 8), load<f32>(m1 + M_ROLLINGIMPULSE + 8), load<f32>(m2 + M_ROLLINGIMPULSE + 8), load<f32>(m3 + M_ROLLINGIMPULSE + 8));
 
 			// b3PerpW( normal )
-			let perpMask = b3OrL(b3LessThanL(normalX, b3NegL(halfW)), b3GreaterThanL(normalX, halfW));
-			let pX = b3BlendL(zeroW, normalY, perpMask);
+			let perpMask = b3OrL(b3LessThanL(normalX, b3NegL(b3SplatL<T>(0.5))), b3GreaterThanL(normalX, b3SplatL<T>(0.5)));
+			let pX = b3BlendL(b3SplatL<T>(0.0), normalY, perpMask);
 			let pY = b3BlendL(normalZ, b3NegL(normalX), perpMask);
-			let pZ = b3BlendL(b3NegL(normalY), zeroW, perpMask);
+			let pZ = b3BlendL(b3NegL(normalY), b3SplatL<T>(0.0), perpMask);
 			let perpLengthSquared = b3DotL(pX, pY, pZ, pX, pY, pZ);
-			let perpValid = b3GreaterThanL(perpLengthSquared, minDet);
-			let perpScale = b3BlendL(zeroW, b3DivL(oneW, b3SqrtL(perpLengthSquared)), perpValid);
+			let perpValid = b3GreaterThanL(perpLengthSquared, b3SplatL<T>(1000.0 * FLT_MIN));
+			let perpScale = b3BlendL(b3SplatL<T>(0.0), b3DivL(b3SplatL<T>(1.0), b3SqrtL(perpLengthSquared)), perpValid);
 			let tangent1X = b3MulL(perpScale, pX);
 			let tangent1Y = b3MulL(perpScale, pY);
 			let tangent1Z = b3MulL(perpScale, pZ);
@@ -544,9 +541,9 @@ unsafe function b3PrepareConstraintL<T>(
 			b3StoreL<T>(cm + MW_TANGENTVELOCITY2, b3DotL(tangentVelocityX, tangentVelocityY, tangentVelocityZ, tangent2X, tangent2Y, tangent2Z));
 
 			b3StoreL<T>(cm + MW_TWISTIMPULSE, b3MulL(warmStartScale, twistImpulse));
-			b3StoreL<T>(cm + MW_ROLLINGIMPULSE + V_X, b3BlendL(zeroW, b3MulL(warmStartScale, rollingImpulseX), rollingMask));
-			b3StoreL<T>(cm + MW_ROLLINGIMPULSE + V_Y, b3BlendL(zeroW, b3MulL(warmStartScale, rollingImpulseY), rollingMask));
-			b3StoreL<T>(cm + MW_ROLLINGIMPULSE + V_Z, b3BlendL(zeroW, b3MulL(warmStartScale, rollingImpulseZ), rollingMask));
+			b3StoreL<T>(cm + MW_ROLLINGIMPULSE + V_X, b3BlendL(b3SplatL<T>(0.0), b3MulL(warmStartScale, rollingImpulseX), rollingMask));
+			b3StoreL<T>(cm + MW_ROLLINGIMPULSE + V_Y, b3BlendL(b3SplatL<T>(0.0), b3MulL(warmStartScale, rollingImpulseY), rollingMask));
+			b3StoreL<T>(cm + MW_ROLLINGIMPULSE + V_Z, b3BlendL(b3SplatL<T>(0.0), b3MulL(warmStartScale, rollingImpulseZ), rollingMask));
 			b3StoreL<T>(
 				cm + MW_FRICTIONIMPULSE + V2_X,
 				b3MulL(warmStartScale, b3DotL(frictionImpulseX, frictionImpulseY, frictionImpulseZ, tangent1X, tangent1Y, tangent1Z))
@@ -558,13 +555,13 @@ unsafe function b3PrepareConstraintL<T>(
 
 			let pointCountW = b3SetL<T>(<f32>pointCounts[l0], <f32>pointCounts[l1], <f32>pointCounts[l2], <f32>pointCounts[l3]);
 
-			let centerAX = zeroW;
-			let centerAY = zeroW;
-			let centerAZ = zeroW;
-			let centerBX = zeroW;
-			let centerBY = zeroW;
-			let centerBZ = zeroW;
-			let totalFrictionWeight = zeroW;
+			let centerAX = b3SplatL<T>(0.0);
+			let centerAY = b3SplatL<T>(0.0);
+			let centerAZ = b3SplatL<T>(0.0);
+			let centerBX = b3SplatL<T>(0.0);
+			let centerBY = b3SplatL<T>(0.0);
+			let centerBZ = b3SplatL<T>(0.0);
+			let totalFrictionWeight = b3SplatL<T>(0.0);
 
 			for (let pointIndex = 0; pointIndex < pointCount; ++pointIndex) {
 				let cp = cm + MW_POINTS + <usize>pointIndex * sizeof<b3ContactConstraintPointWide>();
@@ -577,23 +574,26 @@ unsafe function b3PrepareConstraintL<T>(
 				let p3 = m3 + pointOffset;
 
 				// C transposes anchorA, anchorB, separation and normalImpulse of each lane
-				let rAX = b3BlendL(zeroW, b3SetL<T>(load<f32>(p0 + MP_ANCHORA), load<f32>(p1 + MP_ANCHORA), load<f32>(p2 + MP_ANCHORA), load<f32>(p3 + MP_ANCHORA)), pointMask);
-				let rAY = b3BlendL(zeroW, b3SetL<T>(load<f32>(p0 + MP_ANCHORA + 4), load<f32>(p1 + MP_ANCHORA + 4), load<f32>(p2 + MP_ANCHORA + 4), load<f32>(p3 + MP_ANCHORA + 4)), pointMask);
-				let rAZ = b3BlendL(zeroW, b3SetL<T>(load<f32>(p0 + MP_ANCHORA + 8), load<f32>(p1 + MP_ANCHORA + 8), load<f32>(p2 + MP_ANCHORA + 8), load<f32>(p3 + MP_ANCHORA + 8)), pointMask);
-				let rBX = b3BlendL(zeroW, b3SetL<T>(load<f32>(p0 + MP_ANCHORB), load<f32>(p1 + MP_ANCHORB), load<f32>(p2 + MP_ANCHORB), load<f32>(p3 + MP_ANCHORB)), pointMask);
-				let rBY = b3BlendL(zeroW, b3SetL<T>(load<f32>(p0 + MP_ANCHORB + 4), load<f32>(p1 + MP_ANCHORB + 4), load<f32>(p2 + MP_ANCHORB + 4), load<f32>(p3 + MP_ANCHORB + 4)), pointMask);
-				let rBZ = b3BlendL(zeroW, b3SetL<T>(load<f32>(p0 + MP_ANCHORB + 8), load<f32>(p1 + MP_ANCHORB + 8), load<f32>(p2 + MP_ANCHORB + 8), load<f32>(p3 + MP_ANCHORB + 8)), pointMask);
-				let separation = b3BlendL(zeroW, b3SetL<T>(load<f32>(p0 + MP_SEPARATION), load<f32>(p1 + MP_SEPARATION), load<f32>(p2 + MP_SEPARATION), load<f32>(p3 + MP_SEPARATION)), pointMask);
+				let rAX = b3BlendL(b3SplatL<T>(0.0), b3SetL<T>(load<f32>(p0 + MP_ANCHORA), load<f32>(p1 + MP_ANCHORA), load<f32>(p2 + MP_ANCHORA), load<f32>(p3 + MP_ANCHORA)), pointMask);
+				let rAY = b3BlendL(b3SplatL<T>(0.0), b3SetL<T>(load<f32>(p0 + MP_ANCHORA + 4), load<f32>(p1 + MP_ANCHORA + 4), load<f32>(p2 + MP_ANCHORA + 4), load<f32>(p3 + MP_ANCHORA + 4)), pointMask);
+				let rAZ = b3BlendL(b3SplatL<T>(0.0), b3SetL<T>(load<f32>(p0 + MP_ANCHORA + 8), load<f32>(p1 + MP_ANCHORA + 8), load<f32>(p2 + MP_ANCHORA + 8), load<f32>(p3 + MP_ANCHORA + 8)), pointMask);
+				let rBX = b3BlendL(b3SplatL<T>(0.0), b3SetL<T>(load<f32>(p0 + MP_ANCHORB), load<f32>(p1 + MP_ANCHORB), load<f32>(p2 + MP_ANCHORB), load<f32>(p3 + MP_ANCHORB)), pointMask);
+				let rBY = b3BlendL(b3SplatL<T>(0.0), b3SetL<T>(load<f32>(p0 + MP_ANCHORB + 4), load<f32>(p1 + MP_ANCHORB + 4), load<f32>(p2 + MP_ANCHORB + 4), load<f32>(p3 + MP_ANCHORB + 4)), pointMask);
+				let rBZ = b3BlendL(b3SplatL<T>(0.0), b3SetL<T>(load<f32>(p0 + MP_ANCHORB + 8), load<f32>(p1 + MP_ANCHORB + 8), load<f32>(p2 + MP_ANCHORB + 8), load<f32>(p3 + MP_ANCHORB + 8)), pointMask);
+				let separation = b3BlendL(b3SplatL<T>(0.0), b3SetL<T>(load<f32>(p0 + MP_SEPARATION), load<f32>(p1 + MP_SEPARATION), load<f32>(p2 + MP_SEPARATION), load<f32>(p3 + MP_SEPARATION)), pointMask);
 				let normalImpulse = b3BlendL(
-					zeroW,
+					b3SplatL<T>(0.0),
 					b3SetL<T>(load<f32>(p0 + MP_NORMALIMPULSE), load<f32>(p1 + MP_NORMALIMPULSE), load<f32>(p2 + MP_NORMALIMPULSE), load<f32>(p3 + MP_NORMALIMPULSE)),
 					pointMask
 				);
 
 				// C0 friction center decay. Needed to prevent spinning top drift (GyroscopicPrecession sample).
 				// See details in b3PrepareContacts_Mesh. This code should stay in sync.
-				let weight = b3MinL(b3MaxL(b3SubL(twoW, b3MulL(separation, invTau)), minFrictionWeight), oneW);
-				weight = b3BlendL(zeroW, weight, pointMask);
+				let weight = b3MinL(
+					b3MaxL(b3SubL(b3SplatL<T>(2.0), b3MulL(separation, b3SplatL<T>(invTau))), b3SplatL<T>(B3_MIN_FRICTION_WEIGHT)),
+					b3SplatL<T>(1.0)
+				);
+				weight = b3BlendL(b3SplatL<T>(0.0), weight, pointMask);
 				centerAX = b3MulAddL(centerAX, weight, rAX);
 				centerAY = b3MulAddL(centerAY, weight, rAY);
 				centerAZ = b3MulAddL(centerAZ, weight, rAZ);
@@ -613,9 +613,9 @@ unsafe function b3PrepareConstraintL<T>(
 					b3SubL(separation, b3DotL(b3SubL(rBX, rAX), b3SubL(rBY, rAY), b3SubL(rBZ, rAZ), normalX, normalY, normalZ))
 				);
 				b3StoreL<T>(cp + PW_NORMALIMPULSE, b3MulL(warmStartScale, normalImpulse));
-				b3StoreL<T>(cp + PW_TOTALNORMALIMPULSE, zeroW);
-				b3StoreL<T>(cp + PW_RELATIVEVELOCITY, zeroW);
-				b3StoreL<T>(cp + PW_RESTITUTIONIMPULSE, zeroW);
+				b3StoreL<T>(cp + PW_TOTALNORMALIMPULSE, b3SplatL<T>(0.0));
+				b3StoreL<T>(cp + PW_RELATIVEVELOCITY, b3SplatL<T>(0.0));
+				b3StoreL<T>(cp + PW_RESTITUTIONIMPULSE, b3SplatL<T>(0.0));
 
 				let rnAX = b3CrossL(rAY, rAZ, normalY, normalZ);
 				let rnAY = b3CrossL(rAZ, rAX, normalZ, normalX);
@@ -646,12 +646,12 @@ unsafe function b3PrepareConstraintL<T>(
 						b3MulRowL(iBxz, iByz, iBzz, rnBX, rnBY, rnBZ)
 					)
 				);
-				let valid = b3AndL(b3GreaterThanL(kNormal, zeroW), pointMask);
-				b3StoreL<T>(cp + PW_NORMALMASS, b3BlendL(zeroW, b3DivL(oneW, kNormal), valid));
+				let valid = b3AndL(b3GreaterThanL(kNormal, b3SplatL<T>(0.0)), pointMask);
+				b3StoreL<T>(cp + PW_NORMALMASS, b3BlendL(b3SplatL<T>(0.0), b3DivL(b3SplatL<T>(1.0), kNormal), valid));
 			}
 
-			let frictionValid = b3GreaterThanL(totalFrictionWeight, zeroW);
-			let invWeight = b3BlendL(zeroW, b3DivL(oneW, totalFrictionWeight), frictionValid);
+			let frictionValid = b3GreaterThanL(totalFrictionWeight, b3SplatL<T>(0.0));
+			let invWeight = b3BlendL(b3SplatL<T>(0.0), b3DivL(b3SplatL<T>(1.0), totalFrictionWeight), frictionValid);
 			centerAX = b3MulL(invWeight, centerAX);
 			centerAY = b3MulL(invWeight, centerAY);
 			centerAZ = b3MulL(invWeight, centerAZ);
@@ -671,7 +671,7 @@ unsafe function b3PrepareConstraintL<T>(
 				let dX = b3SubL(b3LoadL<T>(cp + PW_ANCHORA + V_X), centerAX);
 				let dY = b3SubL(b3LoadL<T>(cp + PW_ANCHORA + V_Y), centerAY);
 				let dZ = b3SubL(b3LoadL<T>(cp + PW_ANCHORA + V_Z), centerAZ);
-				b3StoreL<T>(cp + PW_LEVERARM, b3BlendL(zeroW, b3SqrtL(b3DotL(dX, dY, dZ, dX, dY, dZ)), pointMask));
+				b3StoreL<T>(cp + PW_LEVERARM, b3BlendL(b3SplatL<T>(0.0), b3SqrtL(b3DotL(dX, dY, dZ, dX, dY, dZ)), pointMask));
 			}
 
 			{
@@ -714,8 +714,8 @@ unsafe function b3PrepareConstraintL<T>(
 				);
 
 				let det = b3SubL(b3MulL(kxx, kyy), b3MulL(kxy, kxy));
-				let valid = b3AndL(b3GreaterThanL(b3AbsL(det), minDet), frictionValid);
-				let invDet = b3BlendL(zeroW, b3DivL(oneW, det), valid);
+				let valid = b3AndL(b3GreaterThanL(b3AbsL(det), b3SplatL<T>(1000.0 * FLT_MIN)), frictionValid);
+				let invDet = b3BlendL(b3SplatL<T>(0.0), b3DivL(b3SplatL<T>(1.0), det), valid);
 				let tm = cm + MW_TANGENTMASS;
 				b3StoreL<T>(tm + S2_CXX, b3MulL(invDet, kyy));
 				b3StoreL<T>(tm + S2_CXY, b3NegL(b3MulL(invDet, kxy)));
@@ -723,6 +723,13 @@ unsafe function b3PrepareConstraintL<T>(
 			}
 
 			{
+				// b3AddSymW( iA, iB ), recomputed to keep fewer lanes live
+				let invIABxx = b3AddL(iAxx, iBxx);
+				let invIABxy = b3AddL(iAxy, iBxy);
+				let invIABxz = b3AddL(iAxz, iBxz);
+				let invIAByy = b3AddL(iAyy, iByy);
+				let invIAByz = b3AddL(iAyz, iByz);
+				let invIABzz = b3AddL(iAzz, iBzz);
 				let kTwist = b3DotL(
 					normalX,
 					normalY,
@@ -731,7 +738,7 @@ unsafe function b3PrepareConstraintL<T>(
 					b3MulRowL(invIABxy, invIAByy, invIAByz, normalX, normalY, normalZ),
 					b3MulRowL(invIABxz, invIAByz, invIABzz, normalX, normalY, normalZ)
 				);
-				b3StoreL<T>(cm + MW_TWISTMASS, b3BlendL(zeroW, b3DivL(oneW, kTwist), b3GreaterThanL(kTwist, zeroW)));
+				b3StoreL<T>(cm + MW_TWISTMASS, b3BlendL(b3SplatL<T>(0.0), b3DivL(b3SplatL<T>(1.0), kTwist), b3GreaterThanL(kTwist, b3SplatL<T>(0.0))));
 			}
 		}
 	}
@@ -987,7 +994,6 @@ unsafe function b3WarmStartContactsL<T>(
 				continue;
 			}
 
-
 			let linearImpulseX = zeroW;
 			let linearImpulseY = zeroW;
 			let linearImpulseZ = zeroW;
@@ -1188,10 +1194,8 @@ unsafe function b3PushContactsL<T>(
 	let identity = changetype<usize>(b3_identityStates);
 	let constraintData = changetype<usize>(constraints);
 	let manifoldData = changetype<usize>(manifolds);
-	let inv_h = b3SplatL<T>(context.inv_h);
+	let invH = context.inv_h;
 	let contactSpeed = b3SplatL<T>(-context.world.contactSpeed);
-	let oneW = b3SplatL<T>(1.0);
-	let zeroW = b3SplatL<T>(0.0);
 
 	let dynamicBiasRate = b3SplatL<T>(context.contactSoftness.massScale * context.contactSoftness.biasRate);
 	let dynamicMassScale = b3SplatL<T>(context.contactSoftness.massScale);
@@ -1213,7 +1217,6 @@ unsafe function b3PushContactsL<T>(
 				continue;
 			}
 
-
 			let pA1 = b3StatePointer(states, identity, load<i32>(c + CW_INDEXA));
 			let pA2 = isFloat<T>() ? pA1 : b3StatePointer(states, identity, load<i32>(c + CW_INDEXA + 4));
 			let pA3 = isFloat<T>() ? pA1 : b3StatePointer(states, identity, load<i32>(c + CW_INDEXA + 8));
@@ -1228,26 +1231,12 @@ unsafe function b3PushContactsL<T>(
 			let wAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_W);
 			let wAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_W);
 			let wAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_W);
-			let dpAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_DP);
-			let dpAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_DP);
-			let dpAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_DP);
-			let dqAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_DQ);
-			let dqAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_DQ);
-			let dqAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_DQ);
-			let dqAS = b3GatherWL<T>(pA1, pA2, pA3, pA4, BS_DQ);
 			let vBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_V);
 			let vBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_V);
 			let vBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_V);
 			let wBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_W);
 			let wBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_W);
 			let wBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_W);
-			let dpBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_DP);
-			let dpBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_DP);
-			let dpBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_DP);
-			let dqBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_DQ);
-			let dqBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_DQ);
-			let dqBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_DQ);
-			let dqBS = b3GatherWL<T>(pB1, pB2, pB3, pB4, BS_DQ);
 
 			// b3SoftMaskW
 			let softMask = b3SoftMaskL<T>(c + CW_INDEXA, c + CW_INDEXB);
@@ -1255,28 +1244,32 @@ unsafe function b3PushContactsL<T>(
 			let massScale = b3BlendL(dynamicMassScale, staticMassScale, softMask);
 			let impulseScale = b3BlendL(dynamicImpulseScale, staticImpulseScale, softMask);
 
-			let dpX = b3SubL(dpBX, dpAX);
-			let dpY = b3SubL(dpBY, dpAY);
-			let dpZ = b3SubL(dpBZ, dpAZ);
 			let invMassA = b3LoadL<T>(c + CW_INVMASSA);
 			let invMassB = b3LoadL<T>(c + CW_INVMASSB);
 			let invMass = b3AddL(invMassA, invMassB);
-			let iAxx = b3LoadL<T>(c + CW_INVIA + S_CXX);
-			let iAxy = b3LoadL<T>(c + CW_INVIA + S_CXY);
-			let iAxz = b3LoadL<T>(c + CW_INVIA + S_CXZ);
-			let iAyy = b3LoadL<T>(c + CW_INVIA + S_CYY);
-			let iAyz = b3LoadL<T>(c + CW_INVIA + S_CYZ);
-			let iAzz = b3LoadL<T>(c + CW_INVIA + S_CZZ);
-			let iBxx = b3LoadL<T>(c + CW_INVIB + S_CXX);
-			let iBxy = b3LoadL<T>(c + CW_INVIB + S_CXY);
-			let iBxz = b3LoadL<T>(c + CW_INVIB + S_CXZ);
-			let iByy = b3LoadL<T>(c + CW_INVIB + S_CYY);
-			let iByz = b3LoadL<T>(c + CW_INVIB + S_CYZ);
-			let iBzz = b3LoadL<T>(c + CW_INVIB + S_CZZ);
 
 			for (let manifoldIndex = 0; manifoldIndex < manifoldCount; ++manifoldIndex) {
 				let cm0 = manifoldData + <usize>(mi + manifoldIndex) * sizeof<b3ContactManifoldWide>();
 				let cm = cm0 + <usize>lane * 4;
+
+				let dpAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_DP);
+				let dpAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_DP);
+				let dpAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_DP);
+				let dqAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_DQ);
+				let dqAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_DQ);
+				let dqAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_DQ);
+				let dqAS = b3GatherWL<T>(pA1, pA2, pA3, pA4, BS_DQ);
+				let dpBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_DP);
+				let dpBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_DP);
+				let dpBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_DP);
+				let dqBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_DQ);
+				let dqBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_DQ);
+				let dqBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_DQ);
+				let dqBS = b3GatherWL<T>(pB1, pB2, pB3, pB4, BS_DQ);
+				let dpX = b3SubL(dpBX, dpAX);
+				let dpY = b3SubL(dpBY, dpAY);
+				let dpZ = b3SubL(dpBZ, dpAZ);
+
 				let normalX = b3LoadL<T>(cm + MW_NORMAL + V_X);
 				let normalY = b3LoadL<T>(cm + MW_NORMAL + V_Y);
 				let normalZ = b3LoadL<T>(cm + MW_NORMAL + V_Z);
@@ -1307,7 +1300,7 @@ unsafe function b3PushContactsL<T>(
 				let normalBZ = b3AddL(b3MulSubL(normalZ, dqBS, tBZ), b3CrossL(dqBX, dqBY, tBX, tBY));
 
 				let linearNormalVelocity = b3DotL(normalX, normalY, normalZ, b3SubL(vBX, vAX), b3SubL(vBY, vAY), b3SubL(vBZ, vAZ));
-				let manifoldImpulse = zeroW;
+				let manifoldImpulse = b3SplatL<T>(0.0);
 
 				let pointCount = load<i32>(cm0 + MW_POINTCOUNT);
 				for (let pointIndex = 0; pointIndex < pointCount; ++pointIndex) {
@@ -1330,17 +1323,17 @@ unsafe function b3PushContactsL<T>(
 					);
 
 					// Apply speculative bias if separation is greater than zero, otherwise apply soft constraint bias
-					let separated = b3GreaterThanL(s, zeroW);
+					let separated = b3GreaterThanL(s, b3SplatL<T>(0.0));
 
 					// Speculative bias - positive
-					let specBias = b3MulL(s, inv_h);
+					let specBias = b3MulL(s, b3SplatL<T>(invH));
 
 					// Overlap bias - negative
 					let overlapBias = b3MaxL(b3MulL(biasRate, s), contactSpeed);
 					let velocityBias = b3BlendL(overlapBias, specBias, separated);
 
-					let pointMassScale = b3BlendL(massScale, oneW, separated);
-					let pointImpulseScale = b3BlendL(impulseScale, zeroW, separated);
+					let pointMassScale = b3BlendL(massScale, b3SplatL<T>(1.0), separated);
+					let pointImpulseScale = b3BlendL(impulseScale, b3SplatL<T>(0.0), separated);
 
 					let uAX = b3CrossL(rAY, rAZ, normalY, normalZ);
 					let uAY = b3CrossL(rAZ, rAX, normalZ, normalX);
@@ -1348,12 +1341,12 @@ unsafe function b3PushContactsL<T>(
 					let uBX = b3CrossL(rBY, rBZ, normalY, normalZ);
 					let uBY = b3CrossL(rBZ, rBX, normalZ, normalX);
 					let uBZ = b3CrossL(rBX, rBY, normalX, normalY);
-					let gAX = b3MulRowL(iAxx, iAxy, iAxz, uAX, uAY, uAZ);
-					let gAY = b3MulRowL(iAxy, iAyy, iAyz, uAX, uAY, uAZ);
-					let gAZ = b3MulRowL(iAxz, iAyz, iAzz, uAX, uAY, uAZ);
-					let gBX = b3MulRowL(iBxx, iBxy, iBxz, uBX, uBY, uBZ);
-					let gBY = b3MulRowL(iBxy, iByy, iByz, uBX, uBY, uBZ);
-					let gBZ = b3MulRowL(iBxz, iByz, iBzz, uBX, uBY, uBZ);
+					let gAX = b3MulRowL(b3LoadL<T>(c + CW_INVIA + S_CXX), b3LoadL<T>(c + CW_INVIA + S_CXY), b3LoadL<T>(c + CW_INVIA + S_CXZ), uAX, uAY, uAZ);
+					let gAY = b3MulRowL(b3LoadL<T>(c + CW_INVIA + S_CXY), b3LoadL<T>(c + CW_INVIA + S_CYY), b3LoadL<T>(c + CW_INVIA + S_CYZ), uAX, uAY, uAZ);
+					let gAZ = b3MulRowL(b3LoadL<T>(c + CW_INVIA + S_CXZ), b3LoadL<T>(c + CW_INVIA + S_CYZ), b3LoadL<T>(c + CW_INVIA + S_CZZ), uAX, uAY, uAZ);
+					let gBX = b3MulRowL(b3LoadL<T>(c + CW_INVIB + S_CXX), b3LoadL<T>(c + CW_INVIB + S_CXY), b3LoadL<T>(c + CW_INVIB + S_CXZ), uBX, uBY, uBZ);
+					let gBY = b3MulRowL(b3LoadL<T>(c + CW_INVIB + S_CXY), b3LoadL<T>(c + CW_INVIB + S_CYY), b3LoadL<T>(c + CW_INVIB + S_CYZ), uBX, uBY, uBZ);
+					let gBZ = b3MulRowL(b3LoadL<T>(c + CW_INVIB + S_CXZ), b3LoadL<T>(c + CW_INVIB + S_CYZ), b3LoadL<T>(c + CW_INVIB + S_CZZ), uBX, uBY, uBZ);
 
 					let vn = b3AddL(linearNormalVelocity, b3SubL(b3DotL(uBX, uBY, uBZ, wBX, wBY, wBZ), b3DotL(uAX, uAY, uAZ, wAX, wAY, wAZ)));
 
@@ -1409,10 +1402,7 @@ unsafe function b3SolveContactsL<T>(
 	let identity = changetype<usize>(b3_identityStates);
 	let constraintData = changetype<usize>(constraints);
 	let manifoldData = changetype<usize>(manifolds);
-	let inv_h = b3SplatL<T>(context.inv_h);
-	let oneW = b3SplatL<T>(1.0);
-	let zeroW = b3SplatL<T>(0.0);
-	let epsilonW = b3SplatL<T>(FLT_EPSILON);
+	let invH = context.inv_h;
 
 	let ci = constraintBase + block.startIndex;
 	let mi = fixedManifoldCount > 0 ? ci : manifoldStarts[block.startIndex];
@@ -1428,7 +1418,6 @@ unsafe function b3SolveContactsL<T>(
 				continue;
 			}
 
-
 			let pA1 = b3StatePointer(states, identity, load<i32>(c + CW_INDEXA));
 			let pA2 = isFloat<T>() ? pA1 : b3StatePointer(states, identity, load<i32>(c + CW_INDEXA + 4));
 			let pA3 = isFloat<T>() ? pA1 : b3StatePointer(states, identity, load<i32>(c + CW_INDEXA + 8));
@@ -1443,49 +1432,39 @@ unsafe function b3SolveContactsL<T>(
 			let wAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_W);
 			let wAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_W);
 			let wAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_W);
-			let dpAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_DP);
-			let dpAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_DP);
-			let dpAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_DP);
-			let dqAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_DQ);
-			let dqAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_DQ);
-			let dqAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_DQ);
-			let dqAS = b3GatherWL<T>(pA1, pA2, pA3, pA4, BS_DQ);
 			let vBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_V);
 			let vBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_V);
 			let vBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_V);
 			let wBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_W);
 			let wBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_W);
 			let wBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_W);
-			let dpBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_DP);
-			let dpBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_DP);
-			let dpBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_DP);
-			let dqBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_DQ);
-			let dqBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_DQ);
-			let dqBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_DQ);
-			let dqBS = b3GatherWL<T>(pB1, pB2, pB3, pB4, BS_DQ);
 
-			let dpX = b3SubL(dpBX, dpAX);
-			let dpY = b3SubL(dpBY, dpAY);
-			let dpZ = b3SubL(dpBZ, dpAZ);
 			let invMassA = b3LoadL<T>(c + CW_INVMASSA);
 			let invMassB = b3LoadL<T>(c + CW_INVMASSB);
 			let invMass = b3AddL(invMassA, invMassB);
-			let iAxx = b3LoadL<T>(c + CW_INVIA + S_CXX);
-			let iAxy = b3LoadL<T>(c + CW_INVIA + S_CXY);
-			let iAxz = b3LoadL<T>(c + CW_INVIA + S_CXZ);
-			let iAyy = b3LoadL<T>(c + CW_INVIA + S_CYY);
-			let iAyz = b3LoadL<T>(c + CW_INVIA + S_CYZ);
-			let iAzz = b3LoadL<T>(c + CW_INVIA + S_CZZ);
-			let iBxx = b3LoadL<T>(c + CW_INVIB + S_CXX);
-			let iBxy = b3LoadL<T>(c + CW_INVIB + S_CXY);
-			let iBxz = b3LoadL<T>(c + CW_INVIB + S_CXZ);
-			let iByy = b3LoadL<T>(c + CW_INVIB + S_CYY);
-			let iByz = b3LoadL<T>(c + CW_INVIB + S_CYZ);
-			let iBzz = b3LoadL<T>(c + CW_INVIB + S_CZZ);
 
 			for (let manifoldIndex = 0; manifoldIndex < manifoldCount; ++manifoldIndex) {
 				let cm0 = manifoldData + <usize>(mi + manifoldIndex) * sizeof<b3ContactManifoldWide>();
 				let cm = cm0 + <usize>lane * 4;
+
+				let dpAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_DP);
+				let dpAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_DP);
+				let dpAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_DP);
+				let dqAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_DQ);
+				let dqAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_DQ);
+				let dqAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_DQ);
+				let dqAS = b3GatherWL<T>(pA1, pA2, pA3, pA4, BS_DQ);
+				let dpBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_DP);
+				let dpBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_DP);
+				let dpBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_DP);
+				let dqBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_DQ);
+				let dqBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_DQ);
+				let dqBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_DQ);
+				let dqBS = b3GatherWL<T>(pB1, pB2, pB3, pB4, BS_DQ);
+				let dpX = b3SubL(dpBX, dpAX);
+				let dpY = b3SubL(dpBY, dpAY);
+				let dpZ = b3SubL(dpBZ, dpAZ);
+
 				let normalX = b3LoadL<T>(cm + MW_NORMAL + V_X);
 				let normalY = b3LoadL<T>(cm + MW_NORMAL + V_Y);
 				let normalZ = b3LoadL<T>(cm + MW_NORMAL + V_Z);
@@ -1532,10 +1511,10 @@ unsafe function b3SolveContactsL<T>(
 					b3DotL(tangent2X, tangent2Y, tangent2Z, dvX, dvY, dvZ),
 					b3LoadL<T>(cm + MW_TANGENTVELOCITY2)
 				);
-				let manifoldImpulse = zeroW;
+				let manifoldImpulse = b3SplatL<T>(0.0);
 
-				let totalNormalImpulse = zeroW;
-				let totalTwistLimit = zeroW;
+				let totalNormalImpulse = b3SplatL<T>(0.0);
+				let totalTwistLimit = b3SplatL<T>(0.0);
 
 				// Normal contraints
 				let pointCount = load<i32>(cm0 + MW_POINTCOUNT);
@@ -1559,7 +1538,7 @@ unsafe function b3SolveContactsL<T>(
 					);
 
 					// Speculative bias, positive if separated and zero if overlapped
-					let velocityBias = b3MaxL(zeroW, b3MulL(s, inv_h));
+					let velocityBias = b3MaxL(b3SplatL<T>(0.0), b3MulL(s, b3SplatL<T>(invH)));
 
 					let uAX = b3CrossL(rAY, rAZ, normalY, normalZ);
 					let uAY = b3CrossL(rAZ, rAX, normalZ, normalX);
@@ -1567,12 +1546,12 @@ unsafe function b3SolveContactsL<T>(
 					let uBX = b3CrossL(rBY, rBZ, normalY, normalZ);
 					let uBY = b3CrossL(rBZ, rBX, normalZ, normalX);
 					let uBZ = b3CrossL(rBX, rBY, normalX, normalY);
-					let gAX = b3MulRowL(iAxx, iAxy, iAxz, uAX, uAY, uAZ);
-					let gAY = b3MulRowL(iAxy, iAyy, iAyz, uAX, uAY, uAZ);
-					let gAZ = b3MulRowL(iAxz, iAyz, iAzz, uAX, uAY, uAZ);
-					let gBX = b3MulRowL(iBxx, iBxy, iBxz, uBX, uBY, uBZ);
-					let gBY = b3MulRowL(iBxy, iByy, iByz, uBX, uBY, uBZ);
-					let gBZ = b3MulRowL(iBxz, iByz, iBzz, uBX, uBY, uBZ);
+					let gAX = b3MulRowL(b3LoadL<T>(c + CW_INVIA + S_CXX), b3LoadL<T>(c + CW_INVIA + S_CXY), b3LoadL<T>(c + CW_INVIA + S_CXZ), uAX, uAY, uAZ);
+					let gAY = b3MulRowL(b3LoadL<T>(c + CW_INVIA + S_CXY), b3LoadL<T>(c + CW_INVIA + S_CYY), b3LoadL<T>(c + CW_INVIA + S_CYZ), uAX, uAY, uAZ);
+					let gAZ = b3MulRowL(b3LoadL<T>(c + CW_INVIA + S_CXZ), b3LoadL<T>(c + CW_INVIA + S_CYZ), b3LoadL<T>(c + CW_INVIA + S_CZZ), uAX, uAY, uAZ);
+					let gBX = b3MulRowL(b3LoadL<T>(c + CW_INVIB + S_CXX), b3LoadL<T>(c + CW_INVIB + S_CXY), b3LoadL<T>(c + CW_INVIB + S_CXZ), uBX, uBY, uBZ);
+					let gBY = b3MulRowL(b3LoadL<T>(c + CW_INVIB + S_CXY), b3LoadL<T>(c + CW_INVIB + S_CYY), b3LoadL<T>(c + CW_INVIB + S_CYZ), uBX, uBY, uBZ);
+					let gBZ = b3MulRowL(b3LoadL<T>(c + CW_INVIB + S_CXZ), b3LoadL<T>(c + CW_INVIB + S_CYZ), b3LoadL<T>(c + CW_INVIB + S_CZZ), uBX, uBY, uBZ);
 
 					let vn = b3AddL(linearNormalVelocity, b3SubL(b3DotL(uBX, uBY, uBZ, wBX, wBY, wBZ), b3DotL(uAX, uAY, uAZ, wAX, wAY, wAZ)));
 
@@ -1615,17 +1594,17 @@ unsafe function b3SolveContactsL<T>(
 					let maxImpulse = b3MulL(b3LoadL<T>(c + CW_ROLLINGRESISTANCE), totalNormalImpulse);
 					let lengthSquared = b3DotL(rollingImpulseX, rollingImpulseY, rollingImpulseZ, rollingImpulseX, rollingImpulseY, rollingImpulseZ);
 
-					let mask = b3GreaterThanL(lengthSquared, b3MulAddL(epsilonW, maxImpulse, maxImpulse));
+					let mask = b3GreaterThanL(lengthSquared, b3MulAddL(b3SplatL<T>(FLT_EPSILON), maxImpulse, maxImpulse));
 
 					// No approximate _mm_rsqrt_ps here to maintain cross-platform determinism
-					let normalize = b3DivL(maxImpulse, b3AddL(b3SqrtL(lengthSquared), epsilonW));
-					let scale = b3BlendL(oneW, normalize, mask);
+					let normalize = b3DivL(maxImpulse, b3AddL(b3SqrtL(lengthSquared), b3SplatL<T>(FLT_EPSILON)));
+					let scale = b3BlendL(b3SplatL<T>(1.0), normalize, mask);
 
 					// Blend the result to ensure there are no +/-0 determinism problems, since 0 * -1 == -0.
 					let rollingMask = b3MaskL(b3LoadL<T>(cm + MW_ROLLINGMASK));
-					rollingImpulseX = b3BlendL(zeroW, b3MulL(scale, rollingImpulseX), rollingMask);
-					rollingImpulseY = b3BlendL(zeroW, b3MulL(scale, rollingImpulseY), rollingMask);
-					rollingImpulseZ = b3BlendL(zeroW, b3MulL(scale, rollingImpulseZ), rollingMask);
+					rollingImpulseX = b3BlendL(b3SplatL<T>(0.0), b3MulL(scale, rollingImpulseX), rollingMask);
+					rollingImpulseY = b3BlendL(b3SplatL<T>(0.0), b3MulL(scale, rollingImpulseY), rollingMask);
+					rollingImpulseZ = b3BlendL(b3SplatL<T>(0.0), b3MulL(scale, rollingImpulseZ), rollingMask);
 					b3StoreL<T>(cm + MW_ROLLINGIMPULSE + V_X, rollingImpulseX);
 					b3StoreL<T>(cm + MW_ROLLINGIMPULSE + V_Y, rollingImpulseY);
 					b3StoreL<T>(cm + MW_ROLLINGIMPULSE + V_Z, rollingImpulseZ);
@@ -1634,12 +1613,12 @@ unsafe function b3SolveContactsL<T>(
 					deltaImpulseY = b3SubL(rollingImpulseY, oldImpulseY);
 					deltaImpulseZ = b3SubL(rollingImpulseZ, oldImpulseZ);
 
-					wAX = b3SubL(wAX, b3MulRowL(iAxx, iAxy, iAxz, deltaImpulseX, deltaImpulseY, deltaImpulseZ));
-					wAY = b3SubL(wAY, b3MulRowL(iAxy, iAyy, iAyz, deltaImpulseX, deltaImpulseY, deltaImpulseZ));
-					wAZ = b3SubL(wAZ, b3MulRowL(iAxz, iAyz, iAzz, deltaImpulseX, deltaImpulseY, deltaImpulseZ));
-					wBX = b3AddL(wBX, b3MulRowL(iBxx, iBxy, iBxz, deltaImpulseX, deltaImpulseY, deltaImpulseZ));
-					wBY = b3AddL(wBY, b3MulRowL(iBxy, iByy, iByz, deltaImpulseX, deltaImpulseY, deltaImpulseZ));
-					wBZ = b3AddL(wBZ, b3MulRowL(iBxz, iByz, iBzz, deltaImpulseX, deltaImpulseY, deltaImpulseZ));
+					wAX = b3SubL(wAX, b3MulRowL(b3LoadL<T>(c + CW_INVIA + S_CXX), b3LoadL<T>(c + CW_INVIA + S_CXY), b3LoadL<T>(c + CW_INVIA + S_CXZ), deltaImpulseX, deltaImpulseY, deltaImpulseZ));
+					wAY = b3SubL(wAY, b3MulRowL(b3LoadL<T>(c + CW_INVIA + S_CXY), b3LoadL<T>(c + CW_INVIA + S_CYY), b3LoadL<T>(c + CW_INVIA + S_CYZ), deltaImpulseX, deltaImpulseY, deltaImpulseZ));
+					wAZ = b3SubL(wAZ, b3MulRowL(b3LoadL<T>(c + CW_INVIA + S_CXZ), b3LoadL<T>(c + CW_INVIA + S_CYZ), b3LoadL<T>(c + CW_INVIA + S_CZZ), deltaImpulseX, deltaImpulseY, deltaImpulseZ));
+					wBX = b3AddL(wBX, b3MulRowL(b3LoadL<T>(c + CW_INVIB + S_CXX), b3LoadL<T>(c + CW_INVIB + S_CXY), b3LoadL<T>(c + CW_INVIB + S_CXZ), deltaImpulseX, deltaImpulseY, deltaImpulseZ));
+					wBY = b3AddL(wBY, b3MulRowL(b3LoadL<T>(c + CW_INVIB + S_CXY), b3LoadL<T>(c + CW_INVIB + S_CYY), b3LoadL<T>(c + CW_INVIB + S_CYZ), deltaImpulseX, deltaImpulseY, deltaImpulseZ));
+					wBZ = b3AddL(wBZ, b3MulRowL(b3LoadL<T>(c + CW_INVIB + S_CXZ), b3LoadL<T>(c + CW_INVIB + S_CYZ), b3LoadL<T>(c + CW_INVIB + S_CZZ), deltaImpulseX, deltaImpulseY, deltaImpulseZ));
 				}
 
 				let friction = b3LoadL<T>(c + CW_FRICTION);
@@ -1653,12 +1632,12 @@ unsafe function b3SolveContactsL<T>(
 					impulse = b3MaxL(b3SubL(b3NegL(maxLambda), oldImpulse), b3MinL(impulse, b3SubL(maxLambda, oldImpulse)));
 					b3StoreL<T>(cm + MW_TWISTIMPULSE, b3AddL(oldImpulse, impulse));
 
-					wAX = b3MulSubL(wAX, impulse, b3MulRowL(iAxx, iAxy, iAxz, normalX, normalY, normalZ));
-					wAY = b3MulSubL(wAY, impulse, b3MulRowL(iAxy, iAyy, iAyz, normalX, normalY, normalZ));
-					wAZ = b3MulSubL(wAZ, impulse, b3MulRowL(iAxz, iAyz, iAzz, normalX, normalY, normalZ));
-					wBX = b3MulAddL(wBX, impulse, b3MulRowL(iBxx, iBxy, iBxz, normalX, normalY, normalZ));
-					wBY = b3MulAddL(wBY, impulse, b3MulRowL(iBxy, iByy, iByz, normalX, normalY, normalZ));
-					wBZ = b3MulAddL(wBZ, impulse, b3MulRowL(iBxz, iByz, iBzz, normalX, normalY, normalZ));
+					wAX = b3MulSubL(wAX, impulse, b3MulRowL(b3LoadL<T>(c + CW_INVIA + S_CXX), b3LoadL<T>(c + CW_INVIA + S_CXY), b3LoadL<T>(c + CW_INVIA + S_CXZ), normalX, normalY, normalZ));
+					wAY = b3MulSubL(wAY, impulse, b3MulRowL(b3LoadL<T>(c + CW_INVIA + S_CXY), b3LoadL<T>(c + CW_INVIA + S_CYY), b3LoadL<T>(c + CW_INVIA + S_CYZ), normalX, normalY, normalZ));
+					wAZ = b3MulSubL(wAZ, impulse, b3MulRowL(b3LoadL<T>(c + CW_INVIA + S_CXZ), b3LoadL<T>(c + CW_INVIA + S_CYZ), b3LoadL<T>(c + CW_INVIA + S_CZZ), normalX, normalY, normalZ));
+					wBX = b3MulAddL(wBX, impulse, b3MulRowL(b3LoadL<T>(c + CW_INVIB + S_CXX), b3LoadL<T>(c + CW_INVIB + S_CXY), b3LoadL<T>(c + CW_INVIB + S_CXZ), normalX, normalY, normalZ));
+					wBY = b3MulAddL(wBY, impulse, b3MulRowL(b3LoadL<T>(c + CW_INVIB + S_CXY), b3LoadL<T>(c + CW_INVIB + S_CYY), b3LoadL<T>(c + CW_INVIB + S_CYZ), normalX, normalY, normalZ));
+					wBZ = b3MulAddL(wBZ, impulse, b3MulRowL(b3LoadL<T>(c + CW_INVIB + S_CXZ), b3LoadL<T>(c + CW_INVIB + S_CYZ), b3LoadL<T>(c + CW_INVIB + S_CZZ), normalX, normalY, normalZ));
 				}
 
 				// Central friction. Friction goes last to improve stacking stability.
@@ -1707,8 +1686,8 @@ unsafe function b3SolveContactsL<T>(
 
 					// No approximate _mm_rsqrt_ps here to maintain cross-platform determinism. Add epsilon to avoid divide by
 					// zero.
-					let normalize = b3DivL(maxImpulse, b3AddL(b3SqrtL(lengthSquared), epsilonW));
-					let scale = b3BlendL(oneW, normalize, mask);
+					let normalize = b3DivL(maxImpulse, b3AddL(b3SqrtL(lengthSquared), b3SplatL<T>(FLT_EPSILON)));
+					let scale = b3BlendL(b3SplatL<T>(1.0), normalize, mask);
 					newImpulseX = b3MulL(scale, newImpulseX);
 					newImpulseY = b3MulL(scale, newImpulseY);
 
@@ -1728,12 +1707,12 @@ unsafe function b3SolveContactsL<T>(
 					let rPBX = b3CrossL(rBY, rBZ, PY, PZ);
 					let rPBY = b3CrossL(rBZ, rBX, PZ, PX);
 					let rPBZ = b3CrossL(rBX, rBY, PX, PY);
-					wAX = b3SubL(wAX, b3MulRowL(iAxx, iAxy, iAxz, rPAX, rPAY, rPAZ));
-					wAY = b3SubL(wAY, b3MulRowL(iAxy, iAyy, iAyz, rPAX, rPAY, rPAZ));
-					wAZ = b3SubL(wAZ, b3MulRowL(iAxz, iAyz, iAzz, rPAX, rPAY, rPAZ));
-					wBX = b3AddL(wBX, b3MulRowL(iBxx, iBxy, iBxz, rPBX, rPBY, rPBZ));
-					wBY = b3AddL(wBY, b3MulRowL(iBxy, iByy, iByz, rPBX, rPBY, rPBZ));
-					wBZ = b3AddL(wBZ, b3MulRowL(iBxz, iByz, iBzz, rPBX, rPBY, rPBZ));
+					wAX = b3SubL(wAX, b3MulRowL(b3LoadL<T>(c + CW_INVIA + S_CXX), b3LoadL<T>(c + CW_INVIA + S_CXY), b3LoadL<T>(c + CW_INVIA + S_CXZ), rPAX, rPAY, rPAZ));
+					wAY = b3SubL(wAY, b3MulRowL(b3LoadL<T>(c + CW_INVIA + S_CXY), b3LoadL<T>(c + CW_INVIA + S_CYY), b3LoadL<T>(c + CW_INVIA + S_CYZ), rPAX, rPAY, rPAZ));
+					wAZ = b3SubL(wAZ, b3MulRowL(b3LoadL<T>(c + CW_INVIA + S_CXZ), b3LoadL<T>(c + CW_INVIA + S_CYZ), b3LoadL<T>(c + CW_INVIA + S_CZZ), rPAX, rPAY, rPAZ));
+					wBX = b3AddL(wBX, b3MulRowL(b3LoadL<T>(c + CW_INVIB + S_CXX), b3LoadL<T>(c + CW_INVIB + S_CXY), b3LoadL<T>(c + CW_INVIB + S_CXZ), rPBX, rPBY, rPBZ));
+					wBY = b3AddL(wBY, b3MulRowL(b3LoadL<T>(c + CW_INVIB + S_CXY), b3LoadL<T>(c + CW_INVIB + S_CYY), b3LoadL<T>(c + CW_INVIB + S_CYZ), rPBX, rPBY, rPBZ));
+					wBZ = b3AddL(wBZ, b3MulRowL(b3LoadL<T>(c + CW_INVIB + S_CXZ), b3LoadL<T>(c + CW_INVIB + S_CYZ), b3LoadL<T>(c + CW_INVIB + S_CZZ), rPBX, rPBY, rPBZ));
 
 					PX = b3MulAddL(PX, manifoldImpulse, normalX);
 					PY = b3MulAddL(PY, manifoldImpulse, normalY);
@@ -1769,9 +1748,8 @@ unsafe function b3ApplyRestitutionL<T>(
 	let identity = changetype<usize>(b3_identityStates);
 	let constraintData = changetype<usize>(constraints);
 	let manifoldData = changetype<usize>(manifolds);
-	let inv_h = b3SplatL<T>(context.inv_h);
+	let invH = context.inv_h;
 	let negRestitutionThreshold = b3SplatL<T>(-context.world.restitutionThreshold);
-	let zeroW = b3SplatL<T>(0.0);
 	let propagate = context.world.enableRestitutionPropagation;
 
 	let nextCi = constraintBase + block.startIndex;
@@ -1810,50 +1788,40 @@ unsafe function b3ApplyRestitutionL<T>(
 			let wAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_W);
 			let wAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_W);
 			let wAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_W);
-			let dpAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_DP);
-			let dpAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_DP);
-			let dpAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_DP);
-			let dqAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_DQ);
-			let dqAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_DQ);
-			let dqAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_DQ);
-			let dqAS = b3GatherWL<T>(pA1, pA2, pA3, pA4, BS_DQ);
 			let vBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_V);
 			let vBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_V);
 			let vBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_V);
 			let wBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_W);
 			let wBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_W);
 			let wBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_W);
-			let dpBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_DP);
-			let dpBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_DP);
-			let dpBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_DP);
-			let dqBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_DQ);
-			let dqBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_DQ);
-			let dqBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_DQ);
-			let dqBS = b3GatherWL<T>(pB1, pB2, pB3, pB4, BS_DQ);
 
 			let restitution = b3LoadL<T>(c + CW_RESTITUTION);
-			let restitutionMask = b3GreaterThanL(restitution, zeroW);
-			let dpX = b3SubL(dpBX, dpAX);
-			let dpY = b3SubL(dpBY, dpAY);
-			let dpZ = b3SubL(dpBZ, dpAZ);
+			let restitutionMask = b3GreaterThanL(restitution, b3SplatL<T>(0.0));
 			let invMassA = b3LoadL<T>(c + CW_INVMASSA);
 			let invMassB = b3LoadL<T>(c + CW_INVMASSB);
-			let iAxx = b3LoadL<T>(c + CW_INVIA + S_CXX);
-			let iAxy = b3LoadL<T>(c + CW_INVIA + S_CXY);
-			let iAxz = b3LoadL<T>(c + CW_INVIA + S_CXZ);
-			let iAyy = b3LoadL<T>(c + CW_INVIA + S_CYY);
-			let iAyz = b3LoadL<T>(c + CW_INVIA + S_CYZ);
-			let iAzz = b3LoadL<T>(c + CW_INVIA + S_CZZ);
-			let iBxx = b3LoadL<T>(c + CW_INVIB + S_CXX);
-			let iBxy = b3LoadL<T>(c + CW_INVIB + S_CXY);
-			let iBxz = b3LoadL<T>(c + CW_INVIB + S_CXZ);
-			let iByy = b3LoadL<T>(c + CW_INVIB + S_CYY);
-			let iByz = b3LoadL<T>(c + CW_INVIB + S_CYZ);
-			let iBzz = b3LoadL<T>(c + CW_INVIB + S_CZZ);
 
 			for (let manifoldIndex = 0; manifoldIndex < manifoldCount; ++manifoldIndex) {
 				let cm0 = manifoldData + <usize>(mi + manifoldIndex) * sizeof<b3ContactManifoldWide>();
 				let cm = cm0 + <usize>lane * 4;
+
+				let dpAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_DP);
+				let dpAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_DP);
+				let dpAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_DP);
+				let dqAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_DQ);
+				let dqAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_DQ);
+				let dqAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_DQ);
+				let dqAS = b3GatherWL<T>(pA1, pA2, pA3, pA4, BS_DQ);
+				let dpBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_DP);
+				let dpBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_DP);
+				let dpBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_DP);
+				let dqBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_DQ);
+				let dqBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_DQ);
+				let dqBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_DQ);
+				let dqBS = b3GatherWL<T>(pB1, pB2, pB3, pB4, BS_DQ);
+				let dpX = b3SubL(dpBX, dpAX);
+				let dpY = b3SubL(dpBY, dpAY);
+				let dpZ = b3SubL(dpBZ, dpAZ);
+
 				let normalX = b3LoadL<T>(cm + MW_NORMAL + V_X);
 				let normalY = b3LoadL<T>(cm + MW_NORMAL + V_Y);
 				let normalZ = b3LoadL<T>(cm + MW_NORMAL + V_Z);
@@ -1903,7 +1871,7 @@ unsafe function b3ApplyRestitutionL<T>(
 					);
 
 					let normalMasses = b3LoadL<T>(cp + PW_NORMALMASS);
-					let normalMass = propagate ? normalMasses : b3BlendL(zeroW, normalMasses, restitutionMask);
+					let normalMass = propagate ? normalMasses : b3BlendL(b3SplatL<T>(0.0), normalMasses, restitutionMask);
 
 					let normalImpulses = b3LoadL<T>(cp + PW_NORMALIMPULSE);
 					let totalNormalImpulses = b3LoadL<T>(cp + PW_TOTALNORMALIMPULSE);
@@ -1912,10 +1880,10 @@ unsafe function b3ApplyRestitutionL<T>(
 					let compressionImpulse = b3SubL(totalNormalImpulses, restitutionImpulses);
 					let armed = b3AndL(
 						b3AndL(restitutionMask, b3LessThanL(relativeVelocities, negRestitutionThreshold)),
-						b3GreaterThanL(compressionImpulse, zeroW)
+						b3GreaterThanL(compressionImpulse, b3SplatL<T>(0.0))
 					);
 
-					let specBias = b3MaxL(zeroW, b3MulL(s, inv_h));
+					let specBias = b3MaxL(b3SplatL<T>(0.0), b3MulL(s, b3SplatL<T>(invH)));
 					let velocityBias = b3BlendL(specBias, b3MulL(restitution, relativeVelocities), armed);
 
 					let vrAX = b3AddL(vAX, b3CrossL(wAY, wAZ, rAY, rAZ));
@@ -1928,12 +1896,12 @@ unsafe function b3ApplyRestitutionL<T>(
 
 					let negImpulse = b3MulL(normalMass, b3AddL(vn, velocityBias));
 
-					let newImpulse = b3MaxL(b3SubL(normalImpulses, negImpulse), zeroW);
+					let newImpulse = b3MaxL(b3SubL(normalImpulses, negImpulse), b3SplatL<T>(0.0));
 					let impulse = b3SubL(newImpulse, normalImpulses);
 
-					let approachImpulse = b3MinL(b3MaxL(b3NegL(b3MulL(normalMass, vn)), zeroW), b3MaxL(impulse, zeroW));
+					let approachImpulse = b3MinL(b3MaxL(b3NegL(b3MulL(normalMass, vn)), b3SplatL<T>(0.0)), b3MaxL(impulse, b3SplatL<T>(0.0)));
 					let allowance = b3SubL(b3MulL(restitution, b3AddL(compressionImpulse, approachImpulse)), restitutionImpulses);
-					let maxImpulse = b3AddL(approachImpulse, b3MaxL(allowance, zeroW));
+					let maxImpulse = b3AddL(approachImpulse, b3MaxL(allowance, b3SplatL<T>(0.0)));
 					impulse = b3BlendL(impulse, b3MinL(impulse, maxImpulse), armed);
 
 					b3StoreL<T>(cp + PW_NORMALIMPULSE, b3AddL(normalImpulses, impulse));
@@ -1949,15 +1917,15 @@ unsafe function b3ApplyRestitutionL<T>(
 					let rPBX = b3CrossL(rBY, rBZ, PY, PZ);
 					let rPBY = b3CrossL(rBZ, rBX, PZ, PX);
 					let rPBZ = b3CrossL(rBX, rBY, PX, PY);
-					wAX = b3SubL(wAX, b3MulRowL(iAxx, iAxy, iAxz, rPAX, rPAY, rPAZ));
-					wAY = b3SubL(wAY, b3MulRowL(iAxy, iAyy, iAyz, rPAX, rPAY, rPAZ));
-					wAZ = b3SubL(wAZ, b3MulRowL(iAxz, iAyz, iAzz, rPAX, rPAY, rPAZ));
+					wAX = b3SubL(wAX, b3MulRowL(b3LoadL<T>(c + CW_INVIA + S_CXX), b3LoadL<T>(c + CW_INVIA + S_CXY), b3LoadL<T>(c + CW_INVIA + S_CXZ), rPAX, rPAY, rPAZ));
+					wAY = b3SubL(wAY, b3MulRowL(b3LoadL<T>(c + CW_INVIA + S_CXY), b3LoadL<T>(c + CW_INVIA + S_CYY), b3LoadL<T>(c + CW_INVIA + S_CYZ), rPAX, rPAY, rPAZ));
+					wAZ = b3SubL(wAZ, b3MulRowL(b3LoadL<T>(c + CW_INVIA + S_CXZ), b3LoadL<T>(c + CW_INVIA + S_CYZ), b3LoadL<T>(c + CW_INVIA + S_CZZ), rPAX, rPAY, rPAZ));
 					vAX = b3MulSubL(vAX, invMassA, PX);
 					vAY = b3MulSubL(vAY, invMassA, PY);
 					vAZ = b3MulSubL(vAZ, invMassA, PZ);
-					wBX = b3AddL(wBX, b3MulRowL(iBxx, iBxy, iBxz, rPBX, rPBY, rPBZ));
-					wBY = b3AddL(wBY, b3MulRowL(iBxy, iByy, iByz, rPBX, rPBY, rPBZ));
-					wBZ = b3AddL(wBZ, b3MulRowL(iBxz, iByz, iBzz, rPBX, rPBY, rPBZ));
+					wBX = b3AddL(wBX, b3MulRowL(b3LoadL<T>(c + CW_INVIB + S_CXX), b3LoadL<T>(c + CW_INVIB + S_CXY), b3LoadL<T>(c + CW_INVIB + S_CXZ), rPBX, rPBY, rPBZ));
+					wBY = b3AddL(wBY, b3MulRowL(b3LoadL<T>(c + CW_INVIB + S_CXY), b3LoadL<T>(c + CW_INVIB + S_CYY), b3LoadL<T>(c + CW_INVIB + S_CYZ), rPBX, rPBY, rPBZ));
+					wBZ = b3AddL(wBZ, b3MulRowL(b3LoadL<T>(c + CW_INVIB + S_CXZ), b3LoadL<T>(c + CW_INVIB + S_CYZ), b3LoadL<T>(c + CW_INVIB + S_CZZ), rPBX, rPBY, rPBZ));
 					vBX = b3MulAddL(vBX, invMassB, PX);
 					vBY = b3MulAddL(vBY, invMassB, PY);
 					vBZ = b3MulAddL(vBZ, invMassB, PZ);
@@ -1989,6 +1957,7 @@ unsafe function b3StoreImpulsesW(
 	let negHitThreshold = -world.hitEventThreshold;
 	let constraintData = changetype<usize>(constraints);
 	let manifoldData = changetype<usize>(manifolds);
+	let contactData = b3ArrayData(world.contacts);
 
 	let ci = constraintBase + block.startIndex;
 	let mi = fixedManifoldCount > 0 ? ci : manifoldStarts[block.startIndex];
@@ -1996,17 +1965,27 @@ unsafe function b3StoreImpulsesW(
 		let c = constraintData + <usize>ci * sizeof<b3ContactConstraintWide>();
 		let manifoldCount = fixedManifoldCount > 0 ? fixedManifoldCount : load<i32>(c + CW_MANIFOLDCOUNT);
 
+		// Pay the cache misses up front. Contact ids come from prepare; 0 stands for C's NULL contact.
+		let contactLanes: FixedArray<usize, 4>;
+		let laneManifoldData: FixedArray<usize, 4>;
 		for (let lane = 0; lane < 4; ++lane) {
 			let contactId = load<i32>(c + CW_CONTACTS + <usize>lane * 4);
-			if (contactId == B3_NULL_INDEX) {
+			let contact = contactId != B3_NULL_INDEX ? load<usize>(contactData + <usize>contactId * sizeof<usize>()) : 0;
+			contactLanes[lane] = contact;
+			laneManifoldData[lane] = contact != 0 ? load<usize>(contact + CT_MANIFOLDS) : 0;
+		}
+
+		for (let lane = 0; lane < 4; ++lane) {
+			let contact = contactLanes[lane];
+			if (contact == 0) {
 				continue;
 			}
 
-			let contact = world.contacts[contactId];
-			let laneManifolds = changetype<usize>(contact.manifolds);
+			let laneManifolds = laneManifoldData[lane];
+			let contactManifoldCount = load<i32>(contact + CT_MANIFOLDCOUNT);
 
-			let laneManifoldCount = fixedManifoldCount > 0 ? fixedManifoldCount : contact.manifoldCount;
-			B3_ASSERT(laneManifoldCount == contact.manifoldCount && laneManifoldCount <= manifoldCount);
+			let laneManifoldCount = fixedManifoldCount > 0 ? fixedManifoldCount : contactManifoldCount;
+			B3_ASSERT(laneManifoldCount == contactManifoldCount && laneManifoldCount <= manifoldCount);
 
 			let laneOffset = <usize>lane * 4;
 			for (let manifoldIndex = 0; manifoldIndex < laneManifoldCount; ++manifoldIndex) {
@@ -2035,17 +2014,20 @@ unsafe function b3StoreImpulsesW(
 				}
 			}
 
-			if ((contact.flags & b3_simEnableHitEvent) != 0) {
-				let contactManifolds = contact.manifolds;
+			if ((load<u32>(contact + CT_FLAGS) & b3_simEnableHitEvent) != 0) {
 				let flagged = false;
 				for (let manifoldIndex = 0; manifoldIndex < laneManifoldCount && flagged == false; ++manifoldIndex) {
-					ref m = contactManifolds[manifoldIndex];
-					for (let pointIndex = 0; pointIndex < m.pointCount; ++pointIndex) {
-						ref mp = m.points[pointIndex];
+					let m = laneManifolds + <usize>manifoldIndex * sizeof<b3Manifold>();
+					let pointCount = load<i32>(m + M_POINTCOUNT);
+					for (let pointIndex = 0; pointIndex < pointCount; ++pointIndex) {
+						let mp = m + M_POINTS + <usize>pointIndex * sizeof<b3ManifoldPoint>();
 
 						// Need to check total impulse because the point may be speculative and not colliding
-						if (mp.normalVelocity < negHitThreshold && mp.totalNormalImpulse > 0.0) {
-							b3SetBit(hitEventBitSet, <u32>contact.contactId);
+						if (
+							load<f32>(mp + MP_NORMALVELOCITY) < negHitThreshold &&
+							load<f32>(mp + MP_TOTALNORMALIMPULSE) > 0.0
+						) {
+							b3SetBit(hitEventBitSet, <u32>load<i32>(contact + CT_CONTACTID));
 							hasHitEvents = true;
 							flagged = true;
 							break;

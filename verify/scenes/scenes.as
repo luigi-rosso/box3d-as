@@ -23,6 +23,9 @@ import {
 	b3CollisionPlane,
 	b3CreateBody,
 	b3CreateCapsuleShape,
+	b3CreateDistanceJoint,
+	b3ComputeCosSin,
+	b3DefaultDistanceJointDef,
 	b3CreateFilterJoint,
 	b3CreateHeightFieldShape,
 	b3CreateHullShape,
@@ -104,7 +107,6 @@ import {
 	b3CompoundHullDef,
 	b3CompoundMeshDef,
 	b3CompoundSphereDef,
-	b3ComputeCosSin,
 	b3CreateBakedCompoundShape,
 	b3CreateCompound,
 	b3DefaultSurfaceMaterial,
@@ -195,6 +197,7 @@ const s_sceneNames: StaticArray<string> = [
 	"bullets",
 	"mover",
 	"many_bodies",
+	"plank_pile",
 	"mesh_drop",
 	"village",
 	"queries",
@@ -2031,6 +2034,68 @@ function Scene_StepQueries(scene: Scene, stepIndex: i32, timeStep: f32): void {
 }
 
 // Returns false for an unknown scene name
+// Not a sample: two layers of 16 x 16 boxes, each under a dynamic plank that touches all 256, so the plank's
+// contacts overflow the graph colors, plus a hub with 40 distance joint spokes that overflows the joint colors.
+// Sleep is off so every step solves the whole pile.
+function CreatePlankPile(scene: Scene): void {
+	b3World_EnableSleeping(scene.worldId, false);
+	Scene_AddGroundBox(scene, 30.0);
+
+	let shapeDef = b3DefaultShapeDef();
+	let box = b3MakeBoxHull(0.4, 0.4, 0.4);
+	let plank = b3MakeBoxHull(8.2, 0.25, 8.2);
+
+	let y: f32 = 0.4;
+	for (let layer = 0; layer < 2; ++layer) {
+		for (let i = 0; i < 16; ++i) {
+			for (let j = 0; j < 16; ++j) {
+				let bodyDef = b3DefaultBodyDef();
+				bodyDef.type = b3_dynamicBody;
+				bodyDef.position = b3Vec3(-7.5 + 1.0 * <f32>i, y, -7.5 + 1.0 * <f32>j);
+				let bodyId = Scene_AddBody(scene, bodyDef);
+				b3CreateHullShape(bodyId, shapeDef, box.base);
+			}
+		}
+
+		y += 0.4 + 0.25;
+		let bodyDef = b3DefaultBodyDef();
+		bodyDef.type = b3_dynamicBody;
+		bodyDef.position = b3Vec3(0.0, y, 0.0);
+		let plankId = Scene_AddBody(scene, bodyDef);
+		b3CreateHullShape(plankId, shapeDef, plank.base);
+		y += 0.25 + 0.4;
+	}
+
+	let hubDef = b3DefaultBodyDef();
+	hubDef.type = b3_dynamicBody;
+	hubDef.position = b3Vec3(0.0, 10.0, 15.0);
+	hubDef.gravityScale = 0.0;
+	hubDef.angularVelocity = b3Vec3(0.0, 1.0, 0.2);
+	let hubId = Scene_AddBody(scene, hubDef);
+	b3CreateSphereShape(hubId, shapeDef, b3Sphere(b3Vec3(0.0, 0.0, 0.0), 0.5));
+
+	for (let i = 0; i < 40; ++i) {
+		let angle: f32 = (2.0 * B3_PI * <f32>i) / 40.0;
+		let cs = b3ComputeCosSin(angle);
+
+		let bodyDef = b3DefaultBodyDef();
+		bodyDef.type = b3_dynamicBody;
+		bodyDef.position = b3Vec3(3.0 * cs.cosine, 10.0 + 0.1 * <f32>(i % 3), 15.0 + 3.0 * cs.sine);
+		bodyDef.gravityScale = 0.0;
+		let bodyId = Scene_AddBody(scene, bodyDef);
+		b3CreateSphereShape(bodyId, shapeDef, b3Sphere(b3Vec3(0.0, 0.0, 0.0), 0.15));
+
+		let jointDef = b3DefaultDistanceJointDef();
+		jointDef.base.bodyIdA = hubId;
+		jointDef.base.bodyIdB = bodyId;
+		jointDef.length = 3.0;
+		jointDef.enableSpring = i % 2 == 0;
+		jointDef.hertz = 2.0;
+		jointDef.dampingRatio = 0.3;
+		b3CreateDistanceJoint(scene.worldId, jointDef);
+	}
+}
+
 export function Scene_Create(scene: Scene, name: string, workerCount: i32): bool {
 	scene.name = name;
 	scene.bulletId = b3_nullBodyId;
@@ -2057,6 +2122,8 @@ export function Scene_Create(scene: Scene, name: string, workerCount: i32): bool
 		CreateMover(scene);
 	} else if (name == "many_bodies") {
 		CreateManyPyramids(scene);
+	} else if (name == "plank_pile") {
+		CreatePlankPile(scene);
 	} else if (name == "mesh_drop") {
 		CreateMeshDrop(scene);
 	} else if (name == "village") {

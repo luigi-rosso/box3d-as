@@ -166,7 +166,9 @@ function many(x: f32, count: i32): f32 {
 
 prints its result with `--aot` and traps with `invalid local type` without `RIVE_WAMRC`. The fix belongs in
 WAMR (a v128 case in the generic set/tee handlers, as the 64 bit one). Until then a project that may run
-on the interpreter needs `wasmSimd: off`; `bench/as/run.sh` runs its interpreter scenes on that artifact.
+on the interpreter needs `wasmSimd: off`, or functions that keep their v128 locals below cell 256. The solver
+kernels now do (notes/perf_solver.md, round 2), and `bench/as/tools/v128cells.py <module.wasm>` lists each
+function's last v128 offset in a bake; `bench/as/run.sh` runs it after a SIMD session.
 
 ## `@inline` does not reach binaryen
 

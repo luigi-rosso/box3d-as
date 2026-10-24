@@ -31,8 +31,12 @@ virtual tree, and it does not follow a symlinked `lib`), so `run.sh` and `profil
 builders it needs from `verify/scenes/scenes.c` (`CreatePyramid`, `CreateSmallPyramid`,
 `CreateManyPyramids`), rather than importing the parity agent's `scenes.as`, which is still moving.
 
-- `--define=SCENE=0` pyramid base 10, `1` large_pyramid base 100, `2` many_bodies; `--define=STEPS=n`
-  (defaults 200, 200, 100).
+- `--define=SCENE=0` pyramid base 10, `1` large_pyramid base 100, `2` many_bodies, built by main.as; from
+  `3` on the scene comes from the `verify/scenes` mirror (run.sh and profile.sh copy `scenes.as` into
+  `bench/as/scenes/`), timed per `Scene_Step` as bench/native does: `3` chains, `4` plank_pile,
+  `5` mesh_drop, `6` village, `7` queries, `8` capsule_mesh, `9` heightfield, `10` mover, `11` card_house,
+  `12` bullets. `--define=STEPS=n` (defaults 200, 200, 100, then 300). `--define=STEPLOG` logs every
+  step; `--define=DELAY=s` spins s seconds before the first step (profile.sh passes `DELAY`).
 - The world is built in `init` with `workerCount = 1`; `advance` takes one `b3World_Step(1/60, 4)` per
   frame, timed with `clock()`; the first step is untimed (as native). After the last step it logs
   `BENCH RESULT` with mean, min, median and max ms per step over the timed steps and the mean per step of
@@ -44,7 +48,7 @@ Commands:
 
 ```sh
 bench/as/run.sh                                  # ROUNDS=3 NATIVE_REPEATS=3; writes bench/as/out/session_*.log, prints the tables
-WASM_SIMD=off bench/as/run.sh                    # the same on the scalar artifact (wasmSimd: off); interp scenes always use it
+WASM_SIMD=off bench/as/run.sh                    # the same on the scalar artifact (wasmSimd: off)
 bench/as/profile.sh 1 300 15                     # scene, steps, seconds of Time Profiler; OUT= keeps the trace
 # one run by hand, after an rsync of lib/ into bench/as/lib/
 RIVE=~/Projects/rive-master/packages/rive-cli/out/release/rive

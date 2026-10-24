@@ -35,7 +35,7 @@ import {
 } from "./math_functions";
 import { b3Add2, b3Blend3, b3DeltaQuatToRotation, b3Matrix2, b3MulSV2, b3Solve2, b3Sub2 } from "./math_internal";
 import { b3JointId, b3_prismaticJoint } from "./types";
-import { b3GetBodySim, b3GetBodyState, b3GetBodyTransform, b3_dynamicFlag, b3_identityBodyState } from "./body";
+import { b3GetBodySim, b3GetBodyState, b3GetBodyTransform, b3_dynamicFlag, b3BodyState, b3StateAddress, b3StoreStateVelocities } from "./body";
 import { b3GetWorld, b3World, b3_awakeSet } from "./physics_world";
 import { b3MakeSoft, b3StepContext } from "./solver";
 import { b3GetJointSimCheckType, b3JointSim } from "./joint";
@@ -336,7 +336,7 @@ export function b3PreparePrismaticJoint(base: b3JointSim, context: b3StepContext
 	}
 }
 
-export function b3WarmStartPrismaticJoint(base: b3JointSim, context: b3StepContext): void {
+export unsafe function b3WarmStartPrismaticJoint(base: b3JointSim, context: b3StepContext): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(base.type == b3_prismaticJoint);
 
 	let mA = base.invMassA;
@@ -348,8 +348,8 @@ export function b3WarmStartPrismaticJoint(base: b3JointSim, context: b3StepConte
 
 	// dummy state for static bodies
 	let states = context.states;
-	let stateA = joint.indexA == B3_NULL_INDEX ? b3_identityBodyState : states[joint.indexA];
-	let stateB = joint.indexB == B3_NULL_INDEX ? b3_identityBodyState : states[joint.indexB];
+	let stateA = load<b3BodyState>(b3StateAddress(states, joint.indexA));
+	let stateB = load<b3BodyState>(b3StateAddress(states, joint.indexB));
 
 	// todo make this code and the wheel joint more similar
 
@@ -384,17 +384,15 @@ export function b3WarmStartPrismaticJoint(base: b3JointSim, context: b3StepConte
 	wB = b3Add(wB, b3MulMV(iB, LB));
 
 	if (stateA.flags & b3_dynamicFlag) {
-		states[joint.indexA].linearVelocity = vA;
-		states[joint.indexA].angularVelocity = wA;
+		b3StoreStateVelocities(states, joint.indexA, vA, wA);
 	}
 
 	if (stateB.flags & b3_dynamicFlag) {
-		states[joint.indexB].linearVelocity = vB;
-		states[joint.indexB].angularVelocity = wB;
+		b3StoreStateVelocities(states, joint.indexB, vB, wB);
 	}
 }
 
-export function b3SolvePrismaticJoint(base: b3JointSim, context: b3StepContext, useBias: bool): void {
+export unsafe function b3SolvePrismaticJoint(base: b3JointSim, context: b3StepContext, useBias: bool): void {
 	let mA = base.invMassA;
 	let mB = base.invMassB;
 	let iA = base.invIA;
@@ -403,8 +401,8 @@ export function b3SolvePrismaticJoint(base: b3JointSim, context: b3StepContext, 
 	// dummy state for static bodies
 	ref joint = base.prismaticJoint;
 	let states = context.states;
-	let stateA = joint.indexA == B3_NULL_INDEX ? b3_identityBodyState : states[joint.indexA];
-	let stateB = joint.indexB == B3_NULL_INDEX ? b3_identityBodyState : states[joint.indexB];
+	let stateA = load<b3BodyState>(b3StateAddress(states, joint.indexA));
+	let stateB = load<b3BodyState>(b3StateAddress(states, joint.indexB));
 
 	let vA = stateA.linearVelocity;
 	let wA = stateA.angularVelocity;
@@ -634,12 +632,10 @@ export function b3SolvePrismaticJoint(base: b3JointSim, context: b3StepContext, 
 	}
 
 	if (stateA.flags & b3_dynamicFlag) {
-		states[joint.indexA].linearVelocity = vA;
-		states[joint.indexA].angularVelocity = wA;
+		b3StoreStateVelocities(states, joint.indexA, vA, wA);
 	}
 
 	if (stateB.flags & b3_dynamicFlag) {
-		states[joint.indexB].linearVelocity = vB;
-		states[joint.indexB].angularVelocity = wB;
+		b3StoreStateVelocities(states, joint.indexB, vB, wB);
 	}
 }

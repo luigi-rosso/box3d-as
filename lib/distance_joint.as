@@ -24,7 +24,7 @@ import {
 	b3Vec3,
 } from "./math_functions";
 import { b3JointId, b3_distanceJoint } from "./types";
-import { b3_identityBodyState, b3_dynamicFlag } from "./body";
+import { b3_dynamicFlag, b3BodyState, b3StateAddress, b3StoreStateVelocities } from "./body";
 import { b3GetBodyTransform } from "./body";
 import { b3GetUnlockedWorld, b3GetWorld, b3World, b3_awakeSet } from "./physics_world";
 import { b3MakeSoft, b3StepContext } from "./solver";
@@ -277,7 +277,7 @@ export function b3PrepareDistanceJoint(base: b3JointSim, context: b3StepContext)
 	}
 }
 
-export function b3WarmStartDistanceJoint(base: b3JointSim, context: b3StepContext): void {
+export unsafe function b3WarmStartDistanceJoint(base: b3JointSim, context: b3StepContext): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(base.type == b3_distanceJoint);
 
 	let mA = base.invMassA;
@@ -288,8 +288,8 @@ export function b3WarmStartDistanceJoint(base: b3JointSim, context: b3StepContex
 	// dummy state for static bodies
 	ref joint = base.distanceJoint;
 	let states = context.states;
-	let stateA = joint.indexA == B3_NULL_INDEX ? b3_identityBodyState : states[joint.indexA];
-	let stateB = joint.indexB == B3_NULL_INDEX ? b3_identityBodyState : states[joint.indexB];
+	let stateA = load<b3BodyState>(b3StateAddress(states, joint.indexA));
+	let stateB = load<b3BodyState>(b3StateAddress(states, joint.indexB));
 
 	let rA = b3RotateVector(stateA.deltaRotation, joint.anchorA);
 	let rB = b3RotateVector(stateB.deltaRotation, joint.anchorB);
@@ -313,7 +313,7 @@ export function b3WarmStartDistanceJoint(base: b3JointSim, context: b3StepContex
 	}
 }
 
-export function b3SolveDistanceJoint(base: b3JointSim, context: b3StepContext, useBias: bool): void {
+export unsafe function b3SolveDistanceJoint(base: b3JointSim, context: b3StepContext, useBias: bool): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(base.type == b3_distanceJoint);
 
 	let mA = base.invMassA;
@@ -324,8 +324,8 @@ export function b3SolveDistanceJoint(base: b3JointSim, context: b3StepContext, u
 	// dummy state for static bodies
 	ref joint = base.distanceJoint;
 	let states = context.states;
-	let stateA = joint.indexA == B3_NULL_INDEX ? b3_identityBodyState : states[joint.indexA];
-	let stateB = joint.indexB == B3_NULL_INDEX ? b3_identityBodyState : states[joint.indexB];
+	let stateA = load<b3BodyState>(b3StateAddress(states, joint.indexA));
+	let stateB = load<b3BodyState>(b3StateAddress(states, joint.indexB));
 
 	let vA = stateA.linearVelocity;
 	let wA = stateA.angularVelocity;
@@ -475,12 +475,10 @@ export function b3SolveDistanceJoint(base: b3JointSim, context: b3StepContext, u
 	}
 
 	if (stateA.flags & b3_dynamicFlag) {
-		states[joint.indexA].linearVelocity = vA;
-		states[joint.indexA].angularVelocity = wA;
+		b3StoreStateVelocities(states, joint.indexA, vA, wA);
 	}
 
 	if (stateB.flags & b3_dynamicFlag) {
-		states[joint.indexB].linearVelocity = vB;
-		states[joint.indexB].angularVelocity = wB;
+		b3StoreStateVelocities(states, joint.indexB, vB, wB);
 	}
 }
