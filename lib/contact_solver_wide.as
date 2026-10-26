@@ -42,6 +42,8 @@ import {
 	b3Transpose2L,
 	b3Transpose3L,
 	b3AllZeroAt,
+	b3ColumnsL,
+	b3TransposeL,
 	b3Vec3W,
 } from "./simd";
 import { b3ArrayData, b3BodySim, b3BodyState, b3DecodeAwakeIndex, b3_identityStates, b3_dynamicFlag } from "./body";
@@ -240,16 +242,46 @@ const b3_zeroSims = new StaticArray<b3BodySim>(1);
 	v128.store(state + BS_W, w);
 }
 
+// One 16 byte row of each lane's state transposed into lanes at once, as C's b3TransposeW4: c0 to c2 are x, y and z
+// of the row. An f32 kernel reads its lane's three floats.
+@inline unsafe function b3GatherRow3L<T>(p1: usize, p2: usize, p3: usize, p4: usize, offset: usize): b3ColumnsL<T> {
+	if (isFloat<T>()) {
+		let c: b3ColumnsL<T>;
+		c.c0 = load<f32>(p1 + offset);
+		c.c1 = load<f32>(p1 + offset + 4);
+		c.c2 = load<f32>(p1 + offset + 8);
+		return c;
+	} else {
+		return b3TransposeL<T>(v128.load(p1 + offset), v128.load(p2 + offset), v128.load(p3 + offset), v128.load(p4 + offset));
+	}
+}
+
+// b3GatherRow3L with the row's w in c3
+@inline unsafe function b3GatherRowL<T>(p1: usize, p2: usize, p3: usize, p4: usize, offset: usize): b3ColumnsL<T> {
+	if (isFloat<T>()) {
+		let c: b3ColumnsL<T>;
+		c.c0 = load<f32>(p1 + offset);
+		c.c1 = load<f32>(p1 + offset + 4);
+		c.c2 = load<f32>(p1 + offset + 8);
+		c.c3 = load<f32>(p1 + offset + 12);
+		return c;
+	} else {
+		return b3TransposeL<T>(v128.load(p1 + offset), v128.load(p2 + offset), v128.load(p3 + offset), v128.load(p4 + offset));
+	}
+}
+
 // This writes only the velocities back to the solver bodies. indices points at the lane's body index.
 @inline unsafe function b3ScatterBodiesL<T>(data: usize, indices: usize, vX: T, vY: T, vZ: T, wX: T, wY: T, wZ: T): void {
 	if (isFloat<T>()) {
 		b3StoreBodyVelocity(data, load<i32>(indices), vX, vY, vZ, wX, wY, wZ);
 	} else {
 		let zero = f32x4.splat(0.0);
-		b3StoreBodyVelocityV(data, load<i32>(indices), b3Transpose0L(vX, vY, vZ, zero), b3Transpose0L(wX, wY, wZ, zero));
-		b3StoreBodyVelocityV(data, load<i32>(indices + 4), b3Transpose1L(vX, vY, vZ, zero), b3Transpose1L(wX, wY, wZ, zero));
-		b3StoreBodyVelocityV(data, load<i32>(indices + 8), b3Transpose2L(vX, vY, vZ, zero), b3Transpose2L(wX, wY, wZ, zero));
-		b3StoreBodyVelocityV(data, load<i32>(indices + 12), b3Transpose3L(vX, vY, vZ, zero), b3Transpose3L(wX, wY, wZ, zero));
+		let v = b3TransposeL<T>(vX, vY, vZ, zero);
+		let w = b3TransposeL<T>(wX, wY, wZ, zero);
+		b3StoreBodyVelocityV(data, load<i32>(indices), v.c0, w.c0);
+		b3StoreBodyVelocityV(data, load<i32>(indices + 4), v.c1, w.c1);
+		b3StoreBodyVelocityV(data, load<i32>(indices + 8), v.c2, w.c2);
+		b3StoreBodyVelocityV(data, load<i32>(indices + 12), v.c3, w.c3);
 	}
 }
 
@@ -385,15 +417,17 @@ unsafe function b3PrepareConstraintL<T>(
 		let iB1 = sB1 + BSIM_INVINERTIA;
 		let iB2 = sB2 + BSIM_INVINERTIA;
 		let iB3 = sB3 + BSIM_INVINERTIA;
-		let iAxx = b3GatherXL<T>(iA0, iA1, iA2, iA3, M3_CX);
-		let iAxy = b3GatherYL<T>(iA0, iA1, iA2, iA3, M3_CX);
-		let iAxz = b3GatherZL<T>(iA0, iA1, iA2, iA3, M3_CX);
+		let iAx = b3GatherRow3L<T>(iA0, iA1, iA2, iA3, M3_CX);
+		let iAxx = iAx.c0;
+		let iAxy = iAx.c1;
+		let iAxz = iAx.c2;
 		let iAyy = b3GatherYL<T>(iA0, iA1, iA2, iA3, M3_CY);
 		let iAyz = b3GatherZL<T>(iA0, iA1, iA2, iA3, M3_CY);
 		let iAzz = b3SetL<T>(load<f32>(iA0 + M3_CZ + 8), load<f32>(iA1 + M3_CZ + 8), load<f32>(iA2 + M3_CZ + 8), load<f32>(iA3 + M3_CZ + 8));
-		let iBxx = b3GatherXL<T>(iB0, iB1, iB2, iB3, M3_CX);
-		let iBxy = b3GatherYL<T>(iB0, iB1, iB2, iB3, M3_CX);
-		let iBxz = b3GatherZL<T>(iB0, iB1, iB2, iB3, M3_CX);
+		let iBx = b3GatherRow3L<T>(iB0, iB1, iB2, iB3, M3_CX);
+		let iBxx = iBx.c0;
+		let iBxy = iBx.c1;
+		let iBxz = iBx.c2;
 		let iByy = b3GatherYL<T>(iB0, iB1, iB2, iB3, M3_CY);
 		let iByz = b3GatherZL<T>(iB0, iB1, iB2, iB3, M3_CY);
 		let iBzz = b3SetL<T>(load<f32>(iB0 + M3_CZ + 8), load<f32>(iB1 + M3_CZ + 8), load<f32>(iB2 + M3_CZ + 8), load<f32>(iB3 + M3_CZ + 8));
@@ -497,14 +531,16 @@ unsafe function b3PrepareConstraintL<T>(
 
 			// C transposes the normal, twist, friction and rolling impulse floats of each lane as two rows of four,
 			// so these fields stay contiguous in that order
-			let normalX = b3GatherXL<T>(m0, m1, m2, m3, M_NORMAL);
-			let normalY = b3GatherYL<T>(m0, m1, m2, m3, M_NORMAL);
-			let normalZ = b3GatherZL<T>(m0, m1, m2, m3, M_NORMAL);
-			let twistImpulse = b3GatherWL<T>(m0, m1, m2, m3, M_NORMAL);
-			let frictionImpulseX = b3GatherXL<T>(m0, m1, m2, m3, M_FRICTIONIMPULSE);
-			let frictionImpulseY = b3GatherYL<T>(m0, m1, m2, m3, M_FRICTIONIMPULSE);
-			let frictionImpulseZ = b3GatherZL<T>(m0, m1, m2, m3, M_FRICTIONIMPULSE);
-			let rollingImpulseX = b3GatherWL<T>(m0, m1, m2, m3, M_FRICTIONIMPULSE);
+			let headerRow = b3GatherRowL<T>(m0, m1, m2, m3, M_NORMAL);
+			let normalX = headerRow.c0;
+			let normalY = headerRow.c1;
+			let normalZ = headerRow.c2;
+			let twistImpulse = headerRow.c3;
+			let impulseRow = b3GatherRowL<T>(m0, m1, m2, m3, M_FRICTIONIMPULSE);
+			let frictionImpulseX = impulseRow.c0;
+			let frictionImpulseY = impulseRow.c1;
+			let frictionImpulseZ = impulseRow.c2;
+			let rollingImpulseX = impulseRow.c3;
 			let rollingImpulseY = b3SetL<T>(load<f32>(m0 + M_ROLLINGIMPULSE + 4), load<f32>(m1 + M_ROLLINGIMPULSE + 4), load<f32>(m2 + M_ROLLINGIMPULSE + 4), load<f32>(m3 + M_ROLLINGIMPULSE + 4));
 			let rollingImpulseZ = b3SetL<T>(load<f32>(m0 + M_ROLLINGIMPULSE + 8), load<f32>(m1 + M_ROLLINGIMPULSE + 8), load<f32>(m2 + M_ROLLINGIMPULSE + 8), load<f32>(m3 + M_ROLLINGIMPULSE + 8));
 
@@ -532,9 +568,10 @@ unsafe function b3PrepareConstraintL<T>(
 			b3StoreL<T>(cm + MW_TANGENT2 + V_X, tangent2X);
 			b3StoreL<T>(cm + MW_TANGENT2 + V_Y, tangent2Y);
 			b3StoreL<T>(cm + MW_TANGENT2 + V_Z, tangent2Z);
-			let tangentVelocityX = b3GatherXL<T>(cl0, cl1, cl2, cl3, CT_TANGENTVELOCITY);
-			let tangentVelocityY = b3GatherYL<T>(cl0, cl1, cl2, cl3, CT_TANGENTVELOCITY);
-			let tangentVelocityZ = b3GatherZL<T>(cl0, cl1, cl2, cl3, CT_TANGENTVELOCITY);
+			let tangentVelocity = b3GatherRow3L<T>(cl0, cl1, cl2, cl3, CT_TANGENTVELOCITY);
+			let tangentVelocityX = tangentVelocity.c0;
+			let tangentVelocityY = tangentVelocity.c1;
+			let tangentVelocityZ = tangentVelocity.c2;
 			b3StoreL<T>(cm + MW_TANGENTVELOCITY1, b3DotL(tangentVelocityX, tangentVelocityY, tangentVelocityZ, tangent1X, tangent1Y, tangent1Z));
 			b3StoreL<T>(cm + MW_TANGENTVELOCITY2, b3DotL(tangentVelocityX, tangentVelocityY, tangentVelocityZ, tangent2X, tangent2Y, tangent2Z));
 
@@ -572,14 +609,16 @@ unsafe function b3PrepareConstraintL<T>(
 				let p3 = m3 + pointOffset;
 
 				// C transposes anchorA, anchorB, separation and normalImpulse of each lane as two rows of four
-				let rAX = b3BlendL(b3SplatL<T>(0.0), b3GatherXL<T>(p0, p1, p2, p3, MP_ANCHORA), pointMask);
-				let rAY = b3BlendL(b3SplatL<T>(0.0), b3GatherYL<T>(p0, p1, p2, p3, MP_ANCHORA), pointMask);
-				let rAZ = b3BlendL(b3SplatL<T>(0.0), b3GatherZL<T>(p0, p1, p2, p3, MP_ANCHORA), pointMask);
-				let rBX = b3BlendL(b3SplatL<T>(0.0), b3GatherWL<T>(p0, p1, p2, p3, MP_ANCHORA), pointMask);
-				let rBY = b3BlendL(b3SplatL<T>(0.0), b3GatherXL<T>(p0, p1, p2, p3, MP_ANCHORB + 4), pointMask);
-				let rBZ = b3BlendL(b3SplatL<T>(0.0), b3GatherYL<T>(p0, p1, p2, p3, MP_ANCHORB + 4), pointMask);
-				let separation = b3BlendL(b3SplatL<T>(0.0), b3GatherZL<T>(p0, p1, p2, p3, MP_ANCHORB + 4), pointMask);
-				let normalImpulse = b3BlendL(b3SplatL<T>(0.0), b3GatherWL<T>(p0, p1, p2, p3, MP_ANCHORB + 4), pointMask);
+				let anchorRow = b3GatherRowL<T>(p0, p1, p2, p3, MP_ANCHORA);
+				let pointRow = b3GatherRowL<T>(p0, p1, p2, p3, MP_ANCHORB + 4);
+				let rAX = b3BlendL(b3SplatL<T>(0.0), anchorRow.c0, pointMask);
+				let rAY = b3BlendL(b3SplatL<T>(0.0), anchorRow.c1, pointMask);
+				let rAZ = b3BlendL(b3SplatL<T>(0.0), anchorRow.c2, pointMask);
+				let rBX = b3BlendL(b3SplatL<T>(0.0), anchorRow.c3, pointMask);
+				let rBY = b3BlendL(b3SplatL<T>(0.0), pointRow.c0, pointMask);
+				let rBZ = b3BlendL(b3SplatL<T>(0.0), pointRow.c1, pointMask);
+				let separation = b3BlendL(b3SplatL<T>(0.0), pointRow.c2, pointMask);
+				let normalImpulse = b3BlendL(b3SplatL<T>(0.0), pointRow.c3, pointMask);
 
 				// C0 friction center decay. Needed to prevent spinning top drift (GyroscopicPrecession sample).
 				// See details in b3PrepareContacts_Mesh. This code should stay in sync.
@@ -763,18 +802,22 @@ unsafe function b3PrepareConstraintL<T>(
 			let pB2 = isFloat<T>() ? pB1 : b3StatePointer(states, identity, load<i32>(c + CW_INDEXB + 4));
 			let pB3 = isFloat<T>() ? pB1 : b3StatePointer(states, identity, load<i32>(c + CW_INDEXB + 8));
 			let pB4 = isFloat<T>() ? pB1 : b3StatePointer(states, identity, load<i32>(c + CW_INDEXB + 12));
-			let vAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_V);
-			let vAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_V);
-			let vAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_V);
-			let wAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_W);
-			let wAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_W);
-			let wAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_W);
-			let vBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_V);
-			let vBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_V);
-			let vBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_V);
-			let wBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_W);
-			let wBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_W);
-			let wBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_W);
+			let vA = b3GatherRow3L<T>(pA1, pA2, pA3, pA4, BS_V);
+			let vAX = vA.c0;
+			let vAY = vA.c1;
+			let vAZ = vA.c2;
+			let wA = b3GatherRow3L<T>(pA1, pA2, pA3, pA4, BS_W);
+			let wAX = wA.c0;
+			let wAY = wA.c1;
+			let wAZ = wA.c2;
+			let vB = b3GatherRow3L<T>(pB1, pB2, pB3, pB4, BS_V);
+			let vBX = vB.c0;
+			let vBY = vB.c1;
+			let vBZ = vB.c2;
+			let wB = b3GatherRow3L<T>(pB1, pB2, pB3, pB4, BS_W);
+			let wBX = wB.c0;
+			let wBY = wB.c1;
+			let wBZ = wB.c2;
 
 			// The lanes this kernel writes hit event velocities for
 			let laneBegin = isFloat<T>() ? lane : 0;
@@ -1132,18 +1175,22 @@ unsafe function b3WarmStartContactsL<T>(
 			let pB2 = isFloat<T>() ? pB1 : b3StatePointer(states, identity, load<i32>(c + CW_INDEXB + 4));
 			let pB3 = isFloat<T>() ? pB1 : b3StatePointer(states, identity, load<i32>(c + CW_INDEXB + 8));
 			let pB4 = isFloat<T>() ? pB1 : b3StatePointer(states, identity, load<i32>(c + CW_INDEXB + 12));
-			let vAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_V);
-			let vAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_V);
-			let vAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_V);
-			let wAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_W);
-			let wAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_W);
-			let wAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_W);
-			let vBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_V);
-			let vBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_V);
-			let vBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_V);
-			let wBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_W);
-			let wBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_W);
-			let wBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_W);
+			let vA = b3GatherRow3L<T>(pA1, pA2, pA3, pA4, BS_V);
+			let vAX = vA.c0;
+			let vAY = vA.c1;
+			let vAZ = vA.c2;
+			let wA = b3GatherRow3L<T>(pA1, pA2, pA3, pA4, BS_W);
+			let wAX = wA.c0;
+			let wAY = wA.c1;
+			let wAZ = wA.c2;
+			let vB = b3GatherRow3L<T>(pB1, pB2, pB3, pB4, BS_V);
+			let vBX = vB.c0;
+			let vBY = vB.c1;
+			let vBZ = vB.c2;
+			let wB = b3GatherRow3L<T>(pB1, pB2, pB3, pB4, BS_W);
+			let wBX = wB.c0;
+			let wBY = wB.c1;
+			let wBZ = wB.c2;
 
 			let iAxx = b3LoadL<T>(c + CW_INVIA + S_CXX);
 			let iAxy = b3LoadL<T>(c + CW_INVIA + S_CXY);
@@ -1226,18 +1273,22 @@ unsafe function b3PushContactsL<T>(
 			let pB2 = isFloat<T>() ? pB1 : b3StatePointer(states, identity, load<i32>(c + CW_INDEXB + 4));
 			let pB3 = isFloat<T>() ? pB1 : b3StatePointer(states, identity, load<i32>(c + CW_INDEXB + 8));
 			let pB4 = isFloat<T>() ? pB1 : b3StatePointer(states, identity, load<i32>(c + CW_INDEXB + 12));
-			let vAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_V);
-			let vAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_V);
-			let vAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_V);
-			let wAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_W);
-			let wAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_W);
-			let wAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_W);
-			let vBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_V);
-			let vBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_V);
-			let vBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_V);
-			let wBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_W);
-			let wBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_W);
-			let wBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_W);
+			let vA = b3GatherRow3L<T>(pA1, pA2, pA3, pA4, BS_V);
+			let vAX = vA.c0;
+			let vAY = vA.c1;
+			let vAZ = vA.c2;
+			let wA = b3GatherRow3L<T>(pA1, pA2, pA3, pA4, BS_W);
+			let wAX = wA.c0;
+			let wAY = wA.c1;
+			let wAZ = wA.c2;
+			let vB = b3GatherRow3L<T>(pB1, pB2, pB3, pB4, BS_V);
+			let vBX = vB.c0;
+			let vBY = vB.c1;
+			let vBZ = vB.c2;
+			let wB = b3GatherRow3L<T>(pB1, pB2, pB3, pB4, BS_W);
+			let wBX = wB.c0;
+			let wBY = wB.c1;
+			let wBZ = wB.c2;
 
 			// b3SoftMaskW
 			let softMask = b3SoftMaskL<T>(c + CW_INDEXA, c + CW_INDEXB);
@@ -1253,20 +1304,24 @@ unsafe function b3PushContactsL<T>(
 				let cm0 = manifoldData + <usize>(mi + manifoldIndex) * sizeof<b3ContactManifoldWide>();
 				let cm = cm0 + <usize>lane * 4;
 
-				let dpAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_DP);
-				let dpAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_DP);
-				let dpAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_DP);
-				let dqAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_DQ);
-				let dqAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_DQ);
-				let dqAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_DQ);
-				let dqAS = b3GatherWL<T>(pA1, pA2, pA3, pA4, BS_DQ);
-				let dpBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_DP);
-				let dpBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_DP);
-				let dpBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_DP);
-				let dqBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_DQ);
-				let dqBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_DQ);
-				let dqBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_DQ);
-				let dqBS = b3GatherWL<T>(pB1, pB2, pB3, pB4, BS_DQ);
+				let dpA = b3GatherRow3L<T>(pA1, pA2, pA3, pA4, BS_DP);
+				let dpAX = dpA.c0;
+				let dpAY = dpA.c1;
+				let dpAZ = dpA.c2;
+				let dqA = b3GatherRowL<T>(pA1, pA2, pA3, pA4, BS_DQ);
+				let dqAX = dqA.c0;
+				let dqAY = dqA.c1;
+				let dqAZ = dqA.c2;
+				let dqAS = dqA.c3;
+				let dpB = b3GatherRow3L<T>(pB1, pB2, pB3, pB4, BS_DP);
+				let dpBX = dpB.c0;
+				let dpBY = dpB.c1;
+				let dpBZ = dpB.c2;
+				let dqB = b3GatherRowL<T>(pB1, pB2, pB3, pB4, BS_DQ);
+				let dqBX = dqB.c0;
+				let dqBY = dqB.c1;
+				let dqBZ = dqB.c2;
+				let dqBS = dqB.c3;
 				let dpX = b3SubL(dpBX, dpAX);
 				let dpY = b3SubL(dpBY, dpAY);
 				let dpZ = b3SubL(dpBZ, dpAZ);
@@ -1427,18 +1482,22 @@ unsafe function b3SolveContactsL<T>(
 			let pB2 = isFloat<T>() ? pB1 : b3StatePointer(states, identity, load<i32>(c + CW_INDEXB + 4));
 			let pB3 = isFloat<T>() ? pB1 : b3StatePointer(states, identity, load<i32>(c + CW_INDEXB + 8));
 			let pB4 = isFloat<T>() ? pB1 : b3StatePointer(states, identity, load<i32>(c + CW_INDEXB + 12));
-			let vAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_V);
-			let vAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_V);
-			let vAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_V);
-			let wAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_W);
-			let wAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_W);
-			let wAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_W);
-			let vBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_V);
-			let vBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_V);
-			let vBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_V);
-			let wBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_W);
-			let wBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_W);
-			let wBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_W);
+			let vA = b3GatherRow3L<T>(pA1, pA2, pA3, pA4, BS_V);
+			let vAX = vA.c0;
+			let vAY = vA.c1;
+			let vAZ = vA.c2;
+			let wA = b3GatherRow3L<T>(pA1, pA2, pA3, pA4, BS_W);
+			let wAX = wA.c0;
+			let wAY = wA.c1;
+			let wAZ = wA.c2;
+			let vB = b3GatherRow3L<T>(pB1, pB2, pB3, pB4, BS_V);
+			let vBX = vB.c0;
+			let vBY = vB.c1;
+			let vBZ = vB.c2;
+			let wB = b3GatherRow3L<T>(pB1, pB2, pB3, pB4, BS_W);
+			let wBX = wB.c0;
+			let wBY = wB.c1;
+			let wBZ = wB.c2;
 
 			let invMassA = b3LoadL<T>(c + CW_INVMASSA);
 			let invMassB = b3LoadL<T>(c + CW_INVMASSB);
@@ -1448,20 +1507,24 @@ unsafe function b3SolveContactsL<T>(
 				let cm0 = manifoldData + <usize>(mi + manifoldIndex) * sizeof<b3ContactManifoldWide>();
 				let cm = cm0 + <usize>lane * 4;
 
-				let dpAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_DP);
-				let dpAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_DP);
-				let dpAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_DP);
-				let dqAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_DQ);
-				let dqAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_DQ);
-				let dqAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_DQ);
-				let dqAS = b3GatherWL<T>(pA1, pA2, pA3, pA4, BS_DQ);
-				let dpBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_DP);
-				let dpBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_DP);
-				let dpBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_DP);
-				let dqBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_DQ);
-				let dqBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_DQ);
-				let dqBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_DQ);
-				let dqBS = b3GatherWL<T>(pB1, pB2, pB3, pB4, BS_DQ);
+				let dpA = b3GatherRow3L<T>(pA1, pA2, pA3, pA4, BS_DP);
+				let dpAX = dpA.c0;
+				let dpAY = dpA.c1;
+				let dpAZ = dpA.c2;
+				let dqA = b3GatherRowL<T>(pA1, pA2, pA3, pA4, BS_DQ);
+				let dqAX = dqA.c0;
+				let dqAY = dqA.c1;
+				let dqAZ = dqA.c2;
+				let dqAS = dqA.c3;
+				let dpB = b3GatherRow3L<T>(pB1, pB2, pB3, pB4, BS_DP);
+				let dpBX = dpB.c0;
+				let dpBY = dpB.c1;
+				let dpBZ = dpB.c2;
+				let dqB = b3GatherRowL<T>(pB1, pB2, pB3, pB4, BS_DQ);
+				let dqBX = dqB.c0;
+				let dqBY = dqB.c1;
+				let dqBZ = dqB.c2;
+				let dqBS = dqB.c3;
 				let dpX = b3SubL(dpBX, dpAX);
 				let dpY = b3SubL(dpBY, dpAY);
 				let dpZ = b3SubL(dpBZ, dpAZ);
@@ -1783,18 +1846,22 @@ unsafe function b3ApplyRestitutionL<T>(
 			let pB2 = isFloat<T>() ? pB1 : b3StatePointer(states, identity, load<i32>(c + CW_INDEXB + 4));
 			let pB3 = isFloat<T>() ? pB1 : b3StatePointer(states, identity, load<i32>(c + CW_INDEXB + 8));
 			let pB4 = isFloat<T>() ? pB1 : b3StatePointer(states, identity, load<i32>(c + CW_INDEXB + 12));
-			let vAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_V);
-			let vAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_V);
-			let vAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_V);
-			let wAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_W);
-			let wAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_W);
-			let wAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_W);
-			let vBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_V);
-			let vBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_V);
-			let vBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_V);
-			let wBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_W);
-			let wBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_W);
-			let wBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_W);
+			let vA = b3GatherRow3L<T>(pA1, pA2, pA3, pA4, BS_V);
+			let vAX = vA.c0;
+			let vAY = vA.c1;
+			let vAZ = vA.c2;
+			let wA = b3GatherRow3L<T>(pA1, pA2, pA3, pA4, BS_W);
+			let wAX = wA.c0;
+			let wAY = wA.c1;
+			let wAZ = wA.c2;
+			let vB = b3GatherRow3L<T>(pB1, pB2, pB3, pB4, BS_V);
+			let vBX = vB.c0;
+			let vBY = vB.c1;
+			let vBZ = vB.c2;
+			let wB = b3GatherRow3L<T>(pB1, pB2, pB3, pB4, BS_W);
+			let wBX = wB.c0;
+			let wBY = wB.c1;
+			let wBZ = wB.c2;
 
 			let restitution = b3LoadL<T>(c + CW_RESTITUTION);
 			let restitutionMask = b3GreaterThanL(restitution, b3SplatL<T>(0.0));
@@ -1805,20 +1872,24 @@ unsafe function b3ApplyRestitutionL<T>(
 				let cm0 = manifoldData + <usize>(mi + manifoldIndex) * sizeof<b3ContactManifoldWide>();
 				let cm = cm0 + <usize>lane * 4;
 
-				let dpAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_DP);
-				let dpAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_DP);
-				let dpAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_DP);
-				let dqAX = b3GatherXL<T>(pA1, pA2, pA3, pA4, BS_DQ);
-				let dqAY = b3GatherYL<T>(pA1, pA2, pA3, pA4, BS_DQ);
-				let dqAZ = b3GatherZL<T>(pA1, pA2, pA3, pA4, BS_DQ);
-				let dqAS = b3GatherWL<T>(pA1, pA2, pA3, pA4, BS_DQ);
-				let dpBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_DP);
-				let dpBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_DP);
-				let dpBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_DP);
-				let dqBX = b3GatherXL<T>(pB1, pB2, pB3, pB4, BS_DQ);
-				let dqBY = b3GatherYL<T>(pB1, pB2, pB3, pB4, BS_DQ);
-				let dqBZ = b3GatherZL<T>(pB1, pB2, pB3, pB4, BS_DQ);
-				let dqBS = b3GatherWL<T>(pB1, pB2, pB3, pB4, BS_DQ);
+				let dpA = b3GatherRow3L<T>(pA1, pA2, pA3, pA4, BS_DP);
+				let dpAX = dpA.c0;
+				let dpAY = dpA.c1;
+				let dpAZ = dpA.c2;
+				let dqA = b3GatherRowL<T>(pA1, pA2, pA3, pA4, BS_DQ);
+				let dqAX = dqA.c0;
+				let dqAY = dqA.c1;
+				let dqAZ = dqA.c2;
+				let dqAS = dqA.c3;
+				let dpB = b3GatherRow3L<T>(pB1, pB2, pB3, pB4, BS_DP);
+				let dpBX = dpB.c0;
+				let dpBY = dpB.c1;
+				let dpBZ = dpB.c2;
+				let dqB = b3GatherRowL<T>(pB1, pB2, pB3, pB4, BS_DQ);
+				let dqBX = dqB.c0;
+				let dqBY = dqB.c1;
+				let dqBZ = dqB.c2;
+				let dqBS = dqB.c3;
 				let dpX = b3SubL(dpBX, dpAX);
 				let dpY = b3SubL(dpBY, dpAY);
 				let dpZ = b3SubL(dpBZ, dpAZ);

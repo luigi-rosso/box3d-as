@@ -1038,21 +1038,42 @@ export {
 	return b3AddL(b3MulL(m0, x), b3AddL(b3MulL(m1, y), b3MulL(m2, z)));
 }
 
-// Lane k of each row, one column of b3TransposeW4; v128 only
+// b3TransposeW4 as SSE2 computes it, unpacklo and unpackhi of row pairs, so every step is one zip; v128 only
+export struct b3ColumnsL<T> {
+	c0: T;
+	c1: T;
+	c2: T;
+	c3: T;
+}
+
+@inline export function b3TransposeL<T>(r0: T, r1: T, r2: T, r3: T): b3ColumnsL<T> {
+	let t0 = v128.shuffle<f32>(r0, r2, 0, 4, 1, 5);
+	let t1 = v128.shuffle<f32>(r1, r3, 0, 4, 1, 5);
+	let t2 = v128.shuffle<f32>(r0, r2, 2, 6, 3, 7);
+	let t3 = v128.shuffle<f32>(r1, r3, 2, 6, 3, 7);
+	let c: b3ColumnsL<T>;
+	c.c0 = v128.shuffle<f32>(t0, t1, 0, 4, 1, 5);
+	c.c1 = v128.shuffle<f32>(t0, t1, 2, 6, 3, 7);
+	c.c2 = v128.shuffle<f32>(t2, t3, 0, 4, 1, 5);
+	c.c3 = v128.shuffle<f32>(t2, t3, 2, 6, 3, 7);
+	return c;
+}
+
+// Lane k of each row, one column of b3TransposeL; v128 only
 @inline export function b3Transpose0L<T>(r0: T, r1: T, r2: T, r3: T): T {
-	return v128.shuffle<f32>(v128.shuffle<f32>(r0, r1, 0, 4, 0, 4), v128.shuffle<f32>(r2, r3, 0, 4, 0, 4), 0, 1, 4, 5);
+	return v128.shuffle<f32>(v128.shuffle<f32>(r0, r2, 0, 4, 1, 5), v128.shuffle<f32>(r1, r3, 0, 4, 1, 5), 0, 4, 1, 5);
 }
 
 @inline export function b3Transpose1L<T>(r0: T, r1: T, r2: T, r3: T): T {
-	return v128.shuffle<f32>(v128.shuffle<f32>(r0, r1, 1, 5, 1, 5), v128.shuffle<f32>(r2, r3, 1, 5, 1, 5), 0, 1, 4, 5);
+	return v128.shuffle<f32>(v128.shuffle<f32>(r0, r2, 0, 4, 1, 5), v128.shuffle<f32>(r1, r3, 0, 4, 1, 5), 2, 6, 3, 7);
 }
 
 @inline export function b3Transpose2L<T>(r0: T, r1: T, r2: T, r3: T): T {
-	return v128.shuffle<f32>(v128.shuffle<f32>(r0, r1, 2, 6, 2, 6), v128.shuffle<f32>(r2, r3, 2, 6, 2, 6), 0, 1, 4, 5);
+	return v128.shuffle<f32>(v128.shuffle<f32>(r0, r2, 2, 6, 3, 7), v128.shuffle<f32>(r1, r3, 2, 6, 3, 7), 0, 4, 1, 5);
 }
 
 @inline export function b3Transpose3L<T>(r0: T, r1: T, r2: T, r3: T): T {
-	return v128.shuffle<f32>(v128.shuffle<f32>(r0, r1, 3, 7, 3, 7), v128.shuffle<f32>(r2, r3, 3, 7, 3, 7), 0, 1, 4, 5);
+	return v128.shuffle<f32>(v128.shuffle<f32>(r0, r2, 2, 6, 3, 7), v128.shuffle<f32>(r1, r3, 2, 6, 3, 7), 2, 6, 3, 7);
 }
 
 // b3AllZeroW over four floats in memory, for decisions a lane kernel shares across lanes
