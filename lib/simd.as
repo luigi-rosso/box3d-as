@@ -864,6 +864,19 @@ export {
 	}
 }
 
+// b3SetL of the floats at four addresses, read straight into their lanes as C's b3SetW of loads compiles; a lane
+// kernel reads a
+@inline export unsafe function b3SetLoadL<T>(a: usize, b: usize, c: usize, d: usize): T {
+	if (isFloat<T>()) {
+		return load<f32>(a);
+	} else {
+		let v = f32x4.splat(load<f32>(a));
+		v = v128.load32_lane(b, v, 1);
+		v = v128.load32_lane(c, v, 2);
+		return v128.load32_lane(d, v, 3);
+	}
+}
+
 // ( (const float*)&w )[lane]
 @inline export function b3LaneL<T>(a: T, lane: i32): f32 {
 	if (isFloat<T>()) {

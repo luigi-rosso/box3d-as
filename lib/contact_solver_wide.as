@@ -15,6 +15,7 @@ import {
 	b3LoadL,
 	b3StoreL,
 	b3SetL,
+	b3SetLoadL,
 	b3LaneL,
 	b3AddL,
 	b3SubL,
@@ -280,6 +281,18 @@ const b3_zeroSims = new StaticArray<b3BodySim>(1);
 	}
 }
 
+// b3GatherRow3L for the row's x and y only, which the v128 path takes from the low zips
+@inline unsafe function b3GatherRow2L<T>(p1: usize, p2: usize, p3: usize, p4: usize, offset: usize): b3ColumnsL<T> {
+	if (isFloat<T>()) {
+		let c: b3ColumnsL<T>;
+		c.c0 = load<f32>(p1 + offset);
+		c.c1 = load<f32>(p1 + offset + 4);
+		return c;
+	} else {
+		return b3TransposeL<T>(v128.load(p1 + offset), v128.load(p2 + offset), v128.load(p3 + offset), v128.load(p4 + offset));
+	}
+}
+
 // b3GatherRow3L with the row's w in c3
 @inline unsafe function b3GatherRowL<T>(p1: usize, p2: usize, p3: usize, p4: usize, offset: usize): b3ColumnsL<T> {
 	if (isFloat<T>()) {
@@ -398,20 +411,10 @@ unsafe function b3PrepareConstraintL<T>(
 		let sB3 = b3SimLane(simData, zeroSim, c0 + CW_INDEXB, l3);
 
 		// B3_GATHER_LANES over the sims
-		let mA = b3SetL<T>(
-			load<f32>(sA0 + BSIM_INVMASS),
-			load<f32>(sA1 + BSIM_INVMASS),
-			load<f32>(sA2 + BSIM_INVMASS),
-			load<f32>(sA3 + BSIM_INVMASS)
-		);
-		let mB = b3SetL<T>(
-			load<f32>(sB0 + BSIM_INVMASS),
-			load<f32>(sB1 + BSIM_INVMASS),
-			load<f32>(sB2 + BSIM_INVMASS),
-			load<f32>(sB3 + BSIM_INVMASS)
-		);
+		let mA = b3SetLoadL<T>(sA0 + BSIM_INVMASS, sA1 + BSIM_INVMASS, sA2 + BSIM_INVMASS, sA3 + BSIM_INVMASS);
+		let mB = b3SetLoadL<T>(sB0 + BSIM_INVMASS, sB1 + BSIM_INVMASS, sB2 + BSIM_INVMASS, sB3 + BSIM_INVMASS);
 
-		// C transposes the first nine floats of each lane's invInertiaWorld
+		// C transposes the first nine floats of each lane's invInertiaWorld as rows from cx.x and cy.y
 		let iA0 = sA0 + BSIM_INVINERTIA;
 		let iA1 = sA1 + BSIM_INVINERTIA;
 		let iA2 = sA2 + BSIM_INVINERTIA;
@@ -424,16 +427,18 @@ unsafe function b3PrepareConstraintL<T>(
 		let iAxx = iAx.c0;
 		let iAxy = iAx.c1;
 		let iAxz = iAx.c2;
-		let iAyy = b3GatherYL<T>(iA0, iA1, iA2, iA3, M3_CY);
-		let iAyz = b3GatherZL<T>(iA0, iA1, iA2, iA3, M3_CY);
-		let iAzz = b3SetL<T>(load<f32>(iA0 + M3_CZ + 8), load<f32>(iA1 + M3_CZ + 8), load<f32>(iA2 + M3_CZ + 8), load<f32>(iA3 + M3_CZ + 8));
+		let iAy = b3GatherRow2L<T>(iA0, iA1, iA2, iA3, M3_CY + 4);
+		let iAyy = iAy.c0;
+		let iAyz = iAy.c1;
+		let iAzz = b3SetLoadL<T>(iA0 + M3_CZ + 8, iA1 + M3_CZ + 8, iA2 + M3_CZ + 8, iA3 + M3_CZ + 8);
 		let iBx = b3GatherRow3L<T>(iB0, iB1, iB2, iB3, M3_CX);
 		let iBxx = iBx.c0;
 		let iBxy = iBx.c1;
 		let iBxz = iBx.c2;
-		let iByy = b3GatherYL<T>(iB0, iB1, iB2, iB3, M3_CY);
-		let iByz = b3GatherZL<T>(iB0, iB1, iB2, iB3, M3_CY);
-		let iBzz = b3SetL<T>(load<f32>(iB0 + M3_CZ + 8), load<f32>(iB1 + M3_CZ + 8), load<f32>(iB2 + M3_CZ + 8), load<f32>(iB3 + M3_CZ + 8));
+		let iBy = b3GatherRow2L<T>(iB0, iB1, iB2, iB3, M3_CY + 4);
+		let iByy = iBy.c0;
+		let iByz = iBy.c1;
+		let iBzz = b3SetLoadL<T>(iB0 + M3_CZ + 8, iB1 + M3_CZ + 8, iB2 + M3_CZ + 8, iB3 + M3_CZ + 8);
 
 		b3StoreL<T>(c + CW_INVMASSA, mA);
 		b3StoreL<T>(c + CW_INVMASSB, mB);
@@ -455,20 +460,22 @@ unsafe function b3PrepareConstraintL<T>(
 		let cl2 = b3ContactLane(c0, l2, zeroContact);
 		let cl3 = b3ContactLane(c0, l3, zeroContact);
 		// friction, restitution and rolling resistance are one row of each contact
-		let rollingResistance = b3GatherZL<T>(cl0, cl1, cl2, cl3, CT_FRICTION);
-		b3StoreL<T>(c + CW_FRICTION, b3GatherXL<T>(cl0, cl1, cl2, cl3, CT_FRICTION));
+		let materialRow = b3GatherRow3L<T>(cl0, cl1, cl2, cl3, CT_FRICTION);
+		let rollingResistance = materialRow.c2;
+		b3StoreL<T>(c + CW_FRICTION, materialRow.c0);
 		b3StoreL<T>(c + CW_ROLLINGRESISTANCE, rollingResistance);
-		b3StoreL<T>(c + CW_RESTITUTION, b3GatherYL<T>(cl0, cl1, cl2, cl3, CT_FRICTION));
+		b3StoreL<T>(c + CW_RESTITUTION, materialRow.c1);
+
+		// b3AddSymW( iA, iB )
+		let invIABxx = b3AddL(iAxx, iBxx);
+		let invIABxy = b3AddL(iAxy, iBxy);
+		let invIABxz = b3AddL(iAxz, iBxz);
+		let invIAByy = b3AddL(iAyy, iByy);
+		let invIAByz = b3AddL(iAyz, iByz);
+		let invIABzz = b3AddL(iAzz, iBzz);
 
 		let rm = c + CW_ROLLINGMASS;
 		if (anyRolling) {
-			// b3AddSymW( iA, iB )
-			let invIABxx = b3AddL(iAxx, iBxx);
-			let invIABxy = b3AddL(iAxy, iBxy);
-			let invIABxz = b3AddL(iAxz, iBxz);
-			let invIAByy = b3AddL(iAyy, iByy);
-			let invIAByz = b3AddL(iAyz, iByz);
-			let invIABzz = b3AddL(iAzz, iBzz);
 
 			// b3InvertSymW( invIAB )
 			let cxx = b3SubL(b3MulL(invIAByy, invIABzz), b3MulL(invIAByz, invIAByz));
@@ -541,8 +548,8 @@ unsafe function b3PrepareConstraintL<T>(
 			let frictionImpulseY = impulseRow.c1;
 			let frictionImpulseZ = impulseRow.c2;
 			let rollingImpulseX = impulseRow.c3;
-			let rollingImpulseY = b3SetL<T>(load<f32>(m0 + M_ROLLINGIMPULSE + 4), load<f32>(m1 + M_ROLLINGIMPULSE + 4), load<f32>(m2 + M_ROLLINGIMPULSE + 4), load<f32>(m3 + M_ROLLINGIMPULSE + 4));
-			let rollingImpulseZ = b3SetL<T>(load<f32>(m0 + M_ROLLINGIMPULSE + 8), load<f32>(m1 + M_ROLLINGIMPULSE + 8), load<f32>(m2 + M_ROLLINGIMPULSE + 8), load<f32>(m3 + M_ROLLINGIMPULSE + 8));
+			let rollingImpulseY = b3SetLoadL<T>(m0 + M_ROLLINGIMPULSE + 4, m1 + M_ROLLINGIMPULSE + 4, m2 + M_ROLLINGIMPULSE + 4, m3 + M_ROLLINGIMPULSE + 4);
+			let rollingImpulseZ = b3SetLoadL<T>(m0 + M_ROLLINGIMPULSE + 8, m1 + M_ROLLINGIMPULSE + 8, m2 + M_ROLLINGIMPULSE + 8, m3 + M_ROLLINGIMPULSE + 8);
 
 			// b3PerpW( normal )
 			let perpMask = b3OrL(b3LessThanL(normalX, b3NegL(b3SplatL<T>(0.5))), b3GreaterThanL(normalX, b3SplatL<T>(0.5)));
@@ -713,13 +720,6 @@ unsafe function b3PrepareConstraintL<T>(
 			}
 
 			{
-				// Reloaded rather than kept live across the point loops, which keeps the interpreter's frame small
-				let tangent1X = b3LoadL<T>(cm + MW_TANGENT1 + V_X);
-				let tangent1Y = b3LoadL<T>(cm + MW_TANGENT1 + V_Y);
-				let tangent1Z = b3LoadL<T>(cm + MW_TANGENT1 + V_Z);
-				let tangent2X = b3LoadL<T>(cm + MW_TANGENT2 + V_X);
-				let tangent2Y = b3LoadL<T>(cm + MW_TANGENT2 + V_Y);
-				let tangent2Z = b3LoadL<T>(cm + MW_TANGENT2 + V_Z);
 				let rtA1X = b3CrossL(centerAY, centerAZ, tangent1Y, tangent1Z);
 				let rtA1Y = b3CrossL(centerAZ, centerAX, tangent1Z, tangent1X);
 				let rtA1Z = b3CrossL(centerAX, centerAY, tangent1X, tangent1Y);
@@ -768,13 +768,6 @@ unsafe function b3PrepareConstraintL<T>(
 			}
 
 			{
-				// b3AddSymW( iA, iB ), recomputed to keep fewer lanes live
-				let invIABxx = b3AddL(iAxx, iBxx);
-				let invIABxy = b3AddL(iAxy, iBxy);
-				let invIABxz = b3AddL(iAxz, iBxz);
-				let invIAByy = b3AddL(iAyy, iByy);
-				let invIAByz = b3AddL(iAyz, iByz);
-				let invIABzz = b3AddL(iAzz, iBzz);
 				let kTwist = b3DotL(
 					normalX,
 					normalY,
