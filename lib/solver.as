@@ -971,7 +971,7 @@ const s_continuousScratch = b3MakeContinuousScratch();
 
 // Whether parallel parts can sweep world's fast bodies: they cannot call its filter or pre-solve callbacks, or push sensor
 // hits. Points each worker's continuous context at world.
-export function b3PrepareParallelContinuous(world: b3World): bool {
+export unsafe function b3PrepareParallelContinuous(world: b3World): bool {
 	if (world.customFilterFcn != null || world.preSolveFcn != null || world.sensors.length > 0) {
 		return false;
 	}

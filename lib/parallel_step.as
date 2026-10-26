@@ -248,7 +248,7 @@ function b3ParallelForBlockSize(itemCount: i32, minRange: i32, workerCount: i32)
 	return (itemCount + maxBlockCount - 1) / maxBlockCount;
 }
 
-function b3ParallelCollide(context: b3StepContext, contactCount: i32): bool {
+unsafe function b3ParallelCollide(context: b3StepContext, contactCount: i32): bool {
 	let world = context.world;
 	let custom = world.preSolveFcn != null || world.frictionCallback != b3DefaultFrictionCallback ||
 		world.restitutionCallback != b3DefaultRestitutionCallback;

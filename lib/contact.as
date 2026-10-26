@@ -771,8 +771,28 @@ function b3SetCompoundChildShape(
 	}
 }
 
+// Whether the identity, flags and materials compound children copy from their shape are as they copied them
+unsafe function b3CompoundParentUnchanged(shape: b3Shape): bool {
+	let materials = shape.materials;
+	let copy = shape.compoundParentMaterialCopy;
+	if (shape.compoundParentGeneration != shape.generation || shape.compoundParentFlags != shape.flags ||
+		shape.compoundParentMaterials != materials || copy.length != materials.length) {
+		return false;
+	}
+
+	let a = changetype<usize>(copy);
+	let b = changetype<usize>(materials);
+	let end = <usize>materials.length * sizeof<b3SurfaceMaterial>();
+	for (let offset: usize = 0; offset < end; offset += 4) {
+		if (load<u32>(a + offset) != load<u32>(b + offset)) {
+			return false;
+		}
+	}
+	return true;
+}
+
 // Builds each compound shape's children as shapes, which parallel parts read in place of the scratch child shape
-export function b3PrepareCompoundContacts(world: b3World): void {
+export unsafe function b3PrepareCompoundContacts(world: b3World): void {
 	if (world.compoundShapeCount == 0) {
 		return;
 	}
@@ -785,6 +805,10 @@ export function b3PrepareCompoundContacts(world: b3World): void {
 		}
 
 		let compound = shape.compound!;
+		if (shape.compoundChildData == compound && b3CompoundParentUnchanged(shape)) {
+			continue;
+		}
+
 		let childCount = compound.capsuleCount + compound.hullCount + compound.meshCount + compound.sphereCount;
 		if (shape.compoundChildData != compound) {
 			let children = new StaticArray<b3ChildShape>(childCount);
@@ -803,13 +827,22 @@ export function b3PrepareCompoundContacts(world: b3World): void {
 			shape.compoundChildData = compound;
 		}
 
-		// The parent's identity, flags and materials may have changed since
+		// The parent's identity, flags or materials changed since, or the children are new
 		let children = shape.compoundChildren!;
 		let childShapes = shape.compoundChildShapes!;
 		let childMaterials = shape.compoundChildMaterials!;
 		for (let j = 0; j < childCount; ++j) {
 			b3SetCompoundChildShape(childShapes[j], shape, children[j], childMaterials[j]);
 		}
+
+		shape.compoundParentGeneration = shape.generation;
+		shape.compoundParentFlags = shape.flags;
+		shape.compoundParentMaterials = shape.materials;
+		let copy = new StaticArray<b3SurfaceMaterial>(shape.materials.length);
+		for (let j = 0; j < copy.length; ++j) {
+			copy[j] = shape.materials[j];
+		}
+		shape.compoundParentMaterialCopy = copy;
 	}
 }
 const s_contactChild = new b3ChildShape();

@@ -269,6 +269,11 @@ export class b3Shape {
 	compoundChildren: StaticArray<b3ChildShape>? = null;
 	compoundChildShapes: StaticArray<b3Shape>? = null;
 	compoundChildMaterials: StaticArray<StaticArray<b3SurfaceMaterial>>? = null;
+	// What the children copied from this shape, so they are refreshed only when it changes
+	compoundParentGeneration: u16 = 0;
+	compoundParentFlags: u8 = 0;
+	compoundParentMaterials: StaticArray<b3SurfaceMaterial> = b3_emptyMaterials;
+	compoundParentMaterialCopy: StaticArray<b3SurfaceMaterial> = b3_emptyMaterials;
 }
 
 // C copies a b3Shape by value into a temporary; this is that memcpy. Arrays and geometry alias.
