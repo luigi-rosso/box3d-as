@@ -8,7 +8,7 @@
 // built by the verify/scenes mirror (SCENE_NAMES below, copied in as ./scenes/scenes.as by run.sh):
 // 3 chains, 4 plank_pile, 5 mesh_drop, 6 village, 7 queries, 8 capsule_mesh, 9 heightfield, 10 mover,
 // 11 card_house, 12 bullets. --define=STEPS=n; --define=STEPLOG logs every step; --define=DELAY=s spins
-// s seconds before the first step. One world step per frame; the scene is built in init and the result
+// s seconds before the first step; IDLEFRAMES=n idles n frames before it. One world step per frame; the scene is built in init and the result
 // logged after the last step.
 
 import { Layout, Context } from "rive/host";
@@ -315,6 +315,7 @@ export class Main extends Layout {
 	scene: i32 = 0;
 	steps: i32 = 0;
 	stepIndex: i32 = 0;
+	idleFrames: i32 = 0;
 	worldId: b3WorldId = b3WorldId();
 	stepMs: Float64Array = new Float64Array(0);
 	stageSum: Float64Array = new Float64Array(STAGE_COUNT);
@@ -368,6 +369,12 @@ export class Main extends Layout {
 
 	override advance(seconds: f64): bool {
 		if (this.stepIndex >= this.steps) {
+			return true;
+		}
+
+		// On the web a worker's thread starts only once the page yields, so give it frames before the first step
+		if (option("IDLEFRAMES", 0) > this.idleFrames) {
+			this.idleFrames += 1;
 			return true;
 		}
 

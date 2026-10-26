@@ -4,6 +4,8 @@
 // pthreads builds can run too. Writes a jsonl that bench.mjs --table= reads.
 //   PLAYWRIGHT=<dir holding node_modules/playwright-core> ROUNDS=3 node bench/web/browser.mjs
 // Same IMPLS, SCENES and WORKERS variables as bench.mjs; native runs are left out.
+// RIVS="name ..." runs those out/lanes bakes instead on librive's page harness, HARNESS naming the directory of
+// web_scripting_page.mjs; each logs the bake's BENCH RESULT line.
 
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -19,7 +21,10 @@ const { chromium } = await import( pathToFileURL( join( process.env.PLAYWRIGHT, 
 const types = { '.html': 'text/html', '.mjs': 'text/javascript', '.js': 'text/javascript', '.wasm': 'application/wasm' };
 const server = createServer( async ( req, res ) =>
 {
-	const path = normalize( join( root, decodeURIComponent( new URL( req.url, 'http://x' ).pathname ) ) );
+	const pathname = decodeURIComponent( new URL( req.url, 'http://x' ).pathname );
+	const path = pathname.startsWith( '/harness/' ) && process.env.HARNESS
+		? normalize( join( process.env.HARNESS, pathname.slice( 9 ) ) )
+		: normalize( join( root, pathname ) );
 	try
 	{
 		const body = await readFile( path );
@@ -38,6 +43,11 @@ await new Promise( ( resolve ) => server.listen( 0, '127.0.0.1', resolve ) );
 const url = `http://127.0.0.1:${server.address().port}/bench/web/page.html`;
 
 const browser = await chromium.launch( { channel: 'chrome', headless: true } );
+if ( process.env.RIVS )
+{
+	await runRivs( process.env.RIVS.split( /\s+/ ).filter( Boolean ) );
+	process.exit( 0 );
+}
 const rounds = Number( process.env.ROUNDS ?? 3 );
 const impls = ( process.env.IMPLS ?? 'c_simd c_scalar as_simd as_scalar' ).split( /\s+/ ).filter( Boolean );
 const scenes = ( process.env.SCENES ??
@@ -84,3 +94,34 @@ for ( let r = 0; r < rounds; ++r )
 }
 await browser.close();
 server.close();
+
+async function runRivs( names )
+{
+	const rounds = Number( process.env.ROUNDS ?? 3 );
+	const lanesUrl = url.replace( 'page.html', 'lanes.html' );
+	for ( let r = 0; r < rounds; ++r )
+	{
+		for ( let j = 0; j < names.length; ++j )
+		{
+			const name = names[( j + r ) % names.length];
+			const load = Number( execFileSync( 'uptime' ).toString().match( /load averages?: ([\d.]+)/ )[1] );
+			const page = await browser.newPage();
+			let out;
+			try
+			{
+				await page.goto( lanesUrl );
+				await page.waitForFunction( () => window.ready === true );
+				out = await page.evaluate( ( n ) => window.runRiv( n, 120 ), name );
+			}
+			catch ( err )
+			{
+				out = { error: String( err ) };
+			}
+			await page.close();
+			console.log( `RIV round=${r} name=${name} load=${load} ${out.result ?? 'NO RESULT ' + ( out.error ?? '' ) + ' ' +
+				( out.lines ?? [] ).slice( -5 ).join( ' / ' )}` );
+		}
+	}
+	await browser.close();
+	server.close();
+}

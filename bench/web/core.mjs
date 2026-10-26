@@ -140,3 +140,21 @@ export function summarize( raw, warmup )
 		mean1: rest.reduce( ( a, b ) => a + b, 0 ) / rest.length, stages,
 	};
 }
+
+// A bench/threads BENCH RESULT line, as a run record keyed like the node runs; name is the bake's
+// <scene>__<config>_<lanes>, and the hash is checked against reference, the recording's per step hashes
+export function parseBench( line, name, reference )
+{
+	const fields = Object.fromEntries( line.split( ' ' ).filter( ( w ) => w.includes( '=' ) ).map( ( w ) => w.split( '=' ) ) );
+	const [ scene, rest ] = name.split( '__' );
+	const config = rest.slice( 0, rest.lastIndexOf( '_' ) );
+	const lanes = Number( rest.slice( rest.lastIndexOf( '_' ) + 1 ) );
+	const steps = Number( fields.steps );
+	const finalHash = Number( fields.hash );
+	const compared = reference.length >= steps ? 1 : 0;
+	return {
+		impl: `as_${config}`, scene, steps, workers: Math.max( lanes, 1 ), median: Number( fields.median ),
+		min: Number( fields.min ), mean: Number( fields.mean ), finalHash, compared,
+		mismatch: compared && reference[steps - 1] === finalHash ? -1 : steps - 1,
+	};
+}

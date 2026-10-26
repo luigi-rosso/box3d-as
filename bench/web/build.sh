@@ -25,8 +25,8 @@ c_build() {
 	cmake --build "$dir" >> "$dir.log" 2>&1 || { tail -30 "$dir.log"; exit 1; }
 	cp "$dir/box3d_web.js" "$out/$name.mjs"
 	cp "$dir/box3d_web.wasm" "$out/box3d_web_$name.wasm"
-	# The glue names its wasm after the target, so each variant points at its own copy
-	sed -i '' "s/box3d_web\.wasm/box3d_web_$name.wasm/g" "$out/$name.mjs"
+	# The glue names its wasm and its pthread worker script after the target, so each variant points at its own
+	sed -i '' -e "s/box3d_web\.wasm/box3d_web_$name.wasm/g" -e "s/box3d_web\.js/$name.mjs/g" "$out/$name.mjs"
 }
 
 c_build c_simd -DBOX3D_DISABLE_SIMD=OFF
