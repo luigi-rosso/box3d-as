@@ -1651,6 +1651,8 @@ export function b3TreeView_BoxCast(
 // Median split == 0, Surface area heuristic == 1. C compiles only the median split.
 
 // Median split heuristic. C's pointers into the leaf arrays become the arrays plus a base index.
+// Unchecked: every index is in [base, base + count), which b3BuildTree keeps inside the rebuild's leaf arrays
+@unchecked
 function b3PartitionMid(indices: StaticArray<i32>, centers: StaticArray<b3Vec3>, base: i32, count: i32): i32 {
 	// Handle trivial case
 	if (count <= 2) {
@@ -1738,6 +1740,8 @@ function b3PartitionMid(indices: StaticArray<i32>, centers: StaticArray<b3Vec3>,
 }
 
 // Swap indices and centers
+// Only b3PartitionMid calls it, with indices in its range
+@unchecked
 @inline function b3SwapLeaves(indices: StaticArray<i32>, centers: StaticArray<b3Vec3>, a: i32, b: i32): void {
 	let tempIndex = indices[a];
 	indices[a] = indices[b];
