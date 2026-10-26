@@ -389,3 +389,22 @@ moves lanes one by one: 296 lane moves in the solve kernel against C's 50. LLVM 
 the same code. Writing every shuffle as one of the zip patterns (`0, 4, 1, 5` and `2, 6, 3, 7`), as SSE2's unpacks
 compile, fixed it in source (notes/perf_4.md, change 1). A shuffle simplification in rasc or binaryen would make the
 pattern a non issue.
+
+## A StaticArray literal cannot hold structs
+
+Found writing `examples/` on rive master b0b4628806:
+
+```as
+let points: StaticArray<b3Vec3> = [b3Vec3(0.0, 0.0, 0.0), b3Vec3(1.0, 0.0, 0.0)];
+// E3001: StaticArray literals cannot hold structs; use Array or index assignments
+```
+
+The message names the workaround: `new StaticArray<b3Vec3>(n)` and one assignment per element. The C API takes point
+and vertex arrays everywhere (hulls, meshes, proxies), so this is the first thing a user of the port writes.
+
+## Atomics are only on the parallel-calls toolchain
+
+Not a bug, a dependency: rive master's rasc has no `atomic.*` builtins (std declares them, codegen does not know them:
+`unknown function 'or' in namespace`); they arrive with #15105. The parallel backend's finalize marks tree ancestors
+with `atomic.or`, so `b3DynamicTree_MarkProxyMoved` takes the mode type argument and only its `b3InParallel`
+instantiation uses the atomic, which keeps main building on master.
