@@ -333,6 +333,9 @@ const b3_zeroSims = new StaticArray<b3BodySim>(1);
 
 // Any of the four floats in memory greater than zero, as b3AnyTrueW( b3GreaterThanW( a, zero ) )
 @inline unsafe function b3AnyPositiveAt(p: usize): bool {
+	if (ASC_FEATURE_SIMD) {
+		return v128.any_true(f32x4.gt(v128.load(p), f32x4.splat(0.0)));
+	}
 	return load<f32>(p) > 0.0 || load<f32>(p + 4) > 0.0 || load<f32>(p + 8) > 0.0 || load<f32>(p + 12) > 0.0;
 }
 
@@ -1331,6 +1334,7 @@ unsafe function b3PushContactsL<T>(
 				let dqBY = dqB.c1;
 				let dqBZ = dqB.c2;
 				let dqBS = dqB.c3;
+
 				let dpX = b3SubL(dpBX, dpAX);
 				let dpY = b3SubL(dpBY, dpAY);
 				let dpZ = b3SubL(dpBZ, dpAZ);
@@ -1534,6 +1538,7 @@ unsafe function b3SolveContactsL<T>(
 				let dqBY = dqB.c1;
 				let dqBZ = dqB.c2;
 				let dqBS = dqB.c3;
+
 				let dpX = b3SubL(dpBX, dpAX);
 				let dpY = b3SubL(dpBY, dpAY);
 				let dpZ = b3SubL(dpBZ, dpAZ);
@@ -1899,6 +1904,7 @@ unsafe function b3ApplyRestitutionL<T>(
 				let dqBY = dqB.c1;
 				let dqBZ = dqB.c2;
 				let dqBS = dqB.c3;
+
 				let dpX = b3SubL(dpBX, dpAX);
 				let dpY = b3SubL(dpBY, dpAY);
 				let dpZ = b3SubL(dpBZ, dpAZ);

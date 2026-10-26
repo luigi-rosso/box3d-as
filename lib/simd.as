@@ -1091,6 +1091,9 @@ export struct b3ColumnsL<T> {
 
 // b3AllZeroW over four floats in memory, for decisions a lane kernel shares across lanes
 @inline export unsafe function b3AllZeroAt(p: usize): bool {
+	if (ASC_FEATURE_SIMD) {
+		return i32x4.all_true(f32x4.eq(v128.load(p), f32x4.splat(0.0)));
+	}
 	return load<f32>(p) == 0.0 && load<f32>(p + 4) == 0.0 && load<f32>(p + 8) == 0.0 && load<f32>(p + 12) == 0.0;
 }
 
