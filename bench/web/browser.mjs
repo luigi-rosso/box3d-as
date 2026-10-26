@@ -3,7 +3,7 @@
 // The node bench's runs in headless Chrome, one fresh page per run, served cross origin isolated so the
 // pthreads builds can run too. Writes a jsonl that bench.mjs --table= reads.
 //   PLAYWRIGHT=<dir holding node_modules/playwright-core> ROUNDS=3 node bench/web/browser.mjs
-// Same IMPLS, SCENES and WORKERS variables as bench.mjs; native runs are left out.
+// Same IMPLS, SCENES and WORKERS variables as bench.mjs; native runs are left out. WARMUP=n times from step n.
 // RIVS="name ..." runs those out/lanes bakes instead on librive's page harness, HARNESS naming the directory of
 // web_scripting_page.mjs; each logs the bake's BENCH RESULT line.
 
@@ -80,8 +80,8 @@ for ( let r = 0; r < rounds; ++r )
 				{
 					await page.goto( url );
 					await page.waitForFunction( () => window.ready === true );
-					result = await page.evaluate( ( [ i, s, n, k ] ) => window.runOne( i, s, n, k, Math.floor( n / 10 ) ),
-						[ impl, scene, Number( steps ), Number( w ) ] );
+					result = await page.evaluate( ( [ i, s, n, k, warmup ] ) => window.runOne( i, s, n, k, warmup ?? Math.floor( n / 10 ) ),
+						[ impl, scene, Number( steps ), Number( w ), process.env.WARMUP ? Number( process.env.WARMUP ) : null ] );
 				}
 				catch ( err )
 				{

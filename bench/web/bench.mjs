@@ -144,5 +144,9 @@ function table( path )
 
 function fmt( x )
 {
+	if ( x === undefined )
+	{
+		return '-';
+	}
 	return x >= 1 ? x.toFixed( 2 ) : x >= 0.1 ? x.toFixed( 3 ) : x.toFixed( 4 );
 }

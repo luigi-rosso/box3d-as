@@ -111,10 +111,11 @@ for ( let round = 0; round < rounds; ++round )
 	}
 }
 
-// Per scene, the min over rounds of each run's median ms per step, by worker or lane count, with the speed up
+// Per scene, the min over rounds of each run's median ms per step (METRIC=mean for the mean), by worker or lane count, with the speed up
 // over the same implementation at 1; logs from several sessions (node, Chrome) join as separate rows
 function table( paths )
 {
+	const metric = process.env.METRIC ?? 'median';
 	const runs = [];
 	for ( const path of paths )
 	{
@@ -127,7 +128,7 @@ function table( paths )
 	{
 		const key = `${r.scene}|${r.host}|${r.impl}|${r.workers}`;
 		const b = best.get( key ) ?? { median: Infinity, n: 0, ok: 0 };
-		b.median = Math.min( b.median, r.median );
+		b.median = Math.min( b.median, r[metric] );
 		b.n += 1;
 		b.ok += r.mismatch === -1 && r.compared > 0 ? 1 : 0;
 		best.set( key, b );
