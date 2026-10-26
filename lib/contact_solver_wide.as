@@ -9,7 +9,7 @@ import { B3_ASSERT, B3_NULL_INDEX, FLT_EPSILON, FLT_MIN } from "./core";
 import { b3Matrix3, b3MaxInt, b3MinInt } from "./math_functions";
 import { b3Manifold, b3ManifoldPoint } from "./collision";
 import { B3_MIN_FRICTION_WEIGHT, B3_SPECULATIVE_DISTANCE } from "./constants";
-import { b3SetBit } from "./bitset";
+import { b3BitSet, b3SetBit } from "./bitset";
 import {
 	b3SplatL,
 	b3LoadL,
@@ -175,6 +175,30 @@ const b3_zeroSims = new StaticArray<b3BodySim>(1);
 	return index == B3_NULL_INDEX ? zero : data + <usize>index * sizeof<b3BodySim>();
 }
 
+// The sim of a lane's body from the constraint's base 1 index, as C's simLanes
+@inline unsafe function b3SimLane(data: usize, zero: usize, indices: usize, lane: i32): usize {
+	return b3SimPointer(data, zero, load<i32>(indices + <usize>lane * 4) - 1);
+}
+
+// A lane's contact as C's contactLanes, the zeroed contact for an empty lane
+@inline unsafe function b3ContactLane(c: usize, lane: i32, zero: usize): usize {
+	let contact = load<usize>(c + CW_CONTACTS + <usize>lane * 4);
+	return contact != 0 ? contact : zero;
+}
+
+// A lane's manifold as C's manifoldLanes: zero past the lane's manifold count or for an empty lane
+@inline unsafe function b3LaneManifold(contact: usize, manifoldIndex: i32, zero: usize): usize {
+	if (contact != 0 && manifoldIndex < load<i32>(contact + CT_MANIFOLDCOUNT)) {
+		return load<usize>(contact + CT_MANIFOLDS) + <usize>manifoldIndex * sizeof<b3Manifold>();
+	}
+	return zero;
+}
+
+// Lane k of four values; constant for a v128 kernel, so it folds
+@inline function b3PickLane(k: i32, a: usize, b: usize, c: usize, d: usize): usize {
+	return k == 0 ? a : k == 1 ? b : k == 2 ? c : d;
+}
+
 // The SSE2 gather: each 64 byte state is four rows, transposed into lanes. An f32 kernel reads its lane's state p1.
 @inline unsafe function b3GatherXL<T>(p1: usize, p2: usize, p3: usize, p4: usize, offset: usize): T {
 	if (isFloat<T>()) {
@@ -305,14 +329,13 @@ const b3_zeroSims = new StaticArray<b3BodySim>(1);
 
 // Contact constraint data is stored in a heterogious stream. Constraints followed by an array of constraint manifolds.
 // [c1 m11 m12 c2 m21 c3 m31 m32 m33 ... ]
-// The constraint is constraints[constraintIndex]; contactIds holds B3_NULL_INDEX where C passes a NULL contact.
+// The constraint is constraints[constraintIndex], whose contacts the caller has set as C's contacts argument.
 // An f32 kernel reads only its lane: l0 to l3 all name that lane, so the lane sets take its value.
 unsafe function b3PrepareConstraintL<T>(
 	constraints: StaticArray<b3ContactConstraintWide>,
 	constraintIndex: i32,
 	manifolds: StaticArray<b3ContactManifoldWide>,
 	manifoldBase: i32,
-	contactIds: FixedArray<i32, 4>,
 	manifoldCount: i32,
 	context: b3StepContext,
 	warmStartScaleValue: f32
@@ -328,37 +351,23 @@ unsafe function b3PrepareConstraintL<T>(
 	let warmStartScale = b3SplatL<T>(warmStartScaleValue);
 	let invTau: f32 = <f32>1.0 / B3_SPECULATIVE_DISTANCE();
 
-	// C's pointer lanes: each lane's contact object and its manifold data, which stay put during the step
-	let contactData = b3ArrayData(world.contacts);
+	// C's pointer lanes are read back from the constraint, where the lanes' contacts and body indices land first
 	let zeroContact = changetype<usize>(b3_zeroContact);
 	let zeroManifold = changetype<usize>(b3_zeroManifolds);
-	let contactLanes: FixedArray<usize, 4>;
-	let laneManifolds: FixedArray<usize, 4>;
-	let simLanesA: FixedArray<i32, 4>;
-	let simLanesB: FixedArray<i32, 4>;
-	let manifoldCounts: FixedArray<i32, 4>;
 	let hitEventLanes = 0;
 	let maxManifoldCount = 0;
 	let anyRolling = false;
 
 	for (let lane = 0; lane < 4; ++lane) {
-		let contactId = contactIds[lane];
-		store<i32>(c0 + CW_CONTACTS + <usize>lane * 4, contactId);
-
-		if (contactId != B3_NULL_INDEX) {
-			let contact = load<usize>(contactData + <usize>contactId * sizeof<usize>());
+		let contact = load<usize>(c0 + CW_CONTACTS + <usize>lane * 4);
+		if (contact != 0) {
 			let indexA = b3DecodeAwakeIndex(load<i32>(contact + CT_ENCODEDBODYSIMA));
 			let indexB = b3DecodeAwakeIndex(load<i32>(contact + CT_ENCODEDBODYSIMB));
 			let contactManifoldCount = load<i32>(contact + CT_MANIFOLDCOUNT);
 
 			store<i32>(c0 + CW_INDEXA + <usize>lane * 4, indexA + 1);
 			store<i32>(c0 + CW_INDEXB + <usize>lane * 4, indexB + 1);
-			manifoldCounts[lane] = contactManifoldCount;
 
-			contactLanes[lane] = contact;
-			laneManifolds[lane] = load<usize>(contact + CT_MANIFOLDS);
-			simLanesA[lane] = indexA;
-			simLanesB[lane] = indexB;
 			hitEventLanes |= (load<u32>(contact + CT_FLAGS) & b3_simEnableHitEvent) != 0 ? 1 << lane : 0;
 			maxManifoldCount = b3MaxInt(maxManifoldCount, contactManifoldCount);
 
@@ -367,12 +376,6 @@ unsafe function b3PrepareConstraintL<T>(
 		} else {
 			store<i32>(c0 + CW_INDEXA + <usize>lane * 4, 0);
 			store<i32>(c0 + CW_INDEXB + <usize>lane * 4, 0);
-			manifoldCounts[lane] = 0;
-
-			contactLanes[lane] = zeroContact;
-			laneManifolds[lane] = zeroManifold;
-			simLanesA[lane] = B3_NULL_INDEX;
-			simLanesB[lane] = B3_NULL_INDEX;
 		}
 	}
 
@@ -385,14 +388,14 @@ unsafe function b3PrepareConstraintL<T>(
 		let l2 = isFloat<T>() ? lane : 2;
 		let l3 = isFloat<T>() ? lane : 3;
 
-		let sA0 = b3SimPointer(simData, zeroSim, simLanesA[l0]);
-		let sA1 = b3SimPointer(simData, zeroSim, simLanesA[l1]);
-		let sA2 = b3SimPointer(simData, zeroSim, simLanesA[l2]);
-		let sA3 = b3SimPointer(simData, zeroSim, simLanesA[l3]);
-		let sB0 = b3SimPointer(simData, zeroSim, simLanesB[l0]);
-		let sB1 = b3SimPointer(simData, zeroSim, simLanesB[l1]);
-		let sB2 = b3SimPointer(simData, zeroSim, simLanesB[l2]);
-		let sB3 = b3SimPointer(simData, zeroSim, simLanesB[l3]);
+		let sA0 = b3SimLane(simData, zeroSim, c0 + CW_INDEXA, l0);
+		let sA1 = b3SimLane(simData, zeroSim, c0 + CW_INDEXA, l1);
+		let sA2 = b3SimLane(simData, zeroSim, c0 + CW_INDEXA, l2);
+		let sA3 = b3SimLane(simData, zeroSim, c0 + CW_INDEXA, l3);
+		let sB0 = b3SimLane(simData, zeroSim, c0 + CW_INDEXB, l0);
+		let sB1 = b3SimLane(simData, zeroSim, c0 + CW_INDEXB, l1);
+		let sB2 = b3SimLane(simData, zeroSim, c0 + CW_INDEXB, l2);
+		let sB3 = b3SimLane(simData, zeroSim, c0 + CW_INDEXB, l3);
 
 		// B3_GATHER_LANES over the sims
 		let mA = b3SetL<T>(
@@ -447,10 +450,10 @@ unsafe function b3PrepareConstraintL<T>(
 		b3StoreL<T>(c + CW_INVIB + S_CYZ, iByz);
 		b3StoreL<T>(c + CW_INVIB + S_CZZ, iBzz);
 
-		let cl0 = contactLanes[l0];
-		let cl1 = contactLanes[l1];
-		let cl2 = contactLanes[l2];
-		let cl3 = contactLanes[l3];
+		let cl0 = b3ContactLane(c0, l0, zeroContact);
+		let cl1 = b3ContactLane(c0, l1, zeroContact);
+		let cl2 = b3ContactLane(c0, l2, zeroContact);
+		let cl3 = b3ContactLane(c0, l3, zeroContact);
 		// friction, restitution and rolling resistance are one row of each contact
 		let rollingResistance = b3GatherZL<T>(cl0, cl1, cl2, cl3, CT_FRICTION);
 		b3StoreL<T>(c + CW_FRICTION, b3GatherXL<T>(cl0, cl1, cl2, cl3, CT_FRICTION));
@@ -500,34 +503,31 @@ unsafe function b3PrepareConstraintL<T>(
 			let cm0 = manifoldData + <usize>(manifoldBase + manifoldIndex) * sizeof<b3ContactManifoldWide>();
 			let cm = cm0 + <usize>lane * 4;
 
-			let manifoldLanes: FixedArray<usize, 4>;
-			let activeLanes: FixedArray<i32, 4>;
-			let pointCounts: FixedArray<i32, 4>;
-			let pointCount = 0;
-			for (let k = 0; k < 4; ++k) {
-				if (manifoldIndex < manifoldCounts[k]) {
-					manifoldLanes[k] = laneManifolds[k] + <usize>manifoldIndex * sizeof<b3Manifold>();
-					activeLanes[k] = 1;
-					pointCounts[k] = load<i32>(manifoldLanes[k] + M_POINTCOUNT);
-				} else {
-					manifoldLanes[k] = zeroManifold;
-					activeLanes[k] = 0;
-					pointCounts[k] = 0;
-				}
-
-				pointCount = b3MaxInt(pointCount, pointCounts[k]);
-			}
+			// An inactive lane reads the zeroed manifold, whose point count is 0
+			let mk0 = b3LaneManifold(load<usize>(c0 + CW_CONTACTS), manifoldIndex, zeroManifold);
+			let mk1 = b3LaneManifold(load<usize>(c0 + CW_CONTACTS + 4), manifoldIndex, zeroManifold);
+			let mk2 = b3LaneManifold(load<usize>(c0 + CW_CONTACTS + 8), manifoldIndex, zeroManifold);
+			let mk3 = b3LaneManifold(load<usize>(c0 + CW_CONTACTS + 12), manifoldIndex, zeroManifold);
+			let pointCount = b3MaxInt(
+				b3MaxInt(b3MaxInt(load<i32>(mk0 + M_POINTCOUNT), load<i32>(mk1 + M_POINTCOUNT)), load<i32>(mk2 + M_POINTCOUNT)),
+				load<i32>(mk3 + M_POINTCOUNT)
+			);
 
 			store<i32>(cm0 + MW_POINTCOUNT, pointCount);
 
-			let activeLanesW = b3SetL<T>(<f32>activeLanes[l0], <f32>activeLanes[l1], <f32>activeLanes[l2], <f32>activeLanes[l3]);
+			let m0 = b3PickLane(l0, mk0, mk1, mk2, mk3);
+			let m1 = b3PickLane(l1, mk0, mk1, mk2, mk3);
+			let m2 = b3PickLane(l2, mk0, mk1, mk2, mk3);
+			let m3 = b3PickLane(l3, mk0, mk1, mk2, mk3);
+
+			let activeLanesW = b3SetL<T>(
+				m0 != zeroManifold ? <f32>1.0 : <f32>0.0,
+				m1 != zeroManifold ? <f32>1.0 : <f32>0.0,
+				m2 != zeroManifold ? <f32>1.0 : <f32>0.0,
+				m3 != zeroManifold ? <f32>1.0 : <f32>0.0
+			);
 			let rollingMask = b3AndL(rollingResistanceMask, b3GreaterThanL(activeLanesW, b3SplatL<T>(0.0)));
 			b3StoreL<T>(cm + MW_ROLLINGMASK, b3MaskValueL(rollingMask));
-
-			let m0 = manifoldLanes[l0];
-			let m1 = manifoldLanes[l1];
-			let m2 = manifoldLanes[l2];
-			let m3 = manifoldLanes[l3];
 
 			// C transposes the normal, twist, friction and rolling impulse floats of each lane as two rows of four,
 			// so these fields stay contiguous in that order
@@ -588,7 +588,12 @@ unsafe function b3PrepareConstraintL<T>(
 				b3MulL(warmStartScale, b3DotL(frictionImpulseX, frictionImpulseY, frictionImpulseZ, tangent2X, tangent2Y, tangent2Z))
 			);
 
-			let pointCountW = b3SetL<T>(<f32>pointCounts[l0], <f32>pointCounts[l1], <f32>pointCounts[l2], <f32>pointCounts[l3]);
+			let pointCountW = b3SetL<T>(
+				<f32>load<i32>(m0 + M_POINTCOUNT),
+				<f32>load<i32>(m1 + M_POINTCOUNT),
+				<f32>load<i32>(m2 + M_POINTCOUNT),
+				<f32>load<i32>(m3 + M_POINTCOUNT)
+			);
 
 			let centerAX = b3SplatL<T>(0.0);
 			let centerAY = b3SplatL<T>(0.0);
@@ -790,7 +795,7 @@ unsafe function b3PrepareConstraintL<T>(
 			let c = c0 + <usize>lane * 4;
 
 			// An empty lane only writes its own constraint lanes, which nothing reads
-			if (isFloat<T>() && load<i32>(c + CW_CONTACTS) == B3_NULL_INDEX) {
+			if (isFloat<T>() && load<usize>(c + CW_CONTACTS) == 0) {
 				continue;
 			}
 
@@ -851,11 +856,11 @@ unsafe function b3PrepareConstraintL<T>(
 
 					if (hitEventLanes != 0) {
 						for (let k = laneBegin; k < laneEnd; ++k) {
-							if ((hitEventLanes & (1 << k)) == 0 || manifoldIndex >= manifoldCounts[k]) {
+							if ((hitEventLanes & (1 << k)) == 0) {
 								continue;
 							}
 
-							let manifold = laneManifolds[k] + <usize>manifoldIndex * sizeof<b3Manifold>();
+							let manifold = b3LaneManifold(load<usize>(c0 + CW_CONTACTS + <usize>k * 4), manifoldIndex, zeroManifold);
 							if (pointIndex < load<i32>(manifold + M_POINTCOUNT)) {
 								let point = manifold + M_POINTS + <usize>pointIndex * sizeof<b3ManifoldPoint>();
 								store<f32>(point + MP_NORMALVELOCITY, b3LaneL(vn, k));
@@ -877,6 +882,7 @@ export function b3PrepareContacts_ConvexW4(block: b3SolverBlock, context: b3Step
 	let manifolds = context.wideManifolds;
 	let warmStartScale: f32 = world.enableWarmStarting ? 1.0 : 0.0;
 	let anyRestitution = false;
+	let contactData = b3ArrayData(world.contacts);
 
 	let wideIndex = block.startIndex;
 	let endWideIndex = block.startIndex + <i32>block.count;
@@ -898,22 +904,21 @@ export function b3PrepareContacts_ConvexW4(block: b3SolverBlock, context: b3Step
 		for (; wideIndex < colorWideEndIndex; ++wideIndex) {
 			let localWideIndex = wideIndex - colorWideStart;
 
-			let contacts: FixedArray<i32, 4>;
 			for (let lane = 0; lane < 4; ++lane) {
 				let contactIndex = 4 * localWideIndex + lane;
+				let contactId = B3_NULL_INDEX;
 				if (contactIndex < colorContactCount) {
-					contacts[lane] = contactIds[contactIndex];
-					B3_ASSERT(world.contacts[contacts[lane]].manifoldCount == 1);
-				} else {
-					contacts[lane] = B3_NULL_INDEX;
+					contactId = contactIds[contactIndex];
+					B3_ASSERT(world.contacts[contactId].manifoldCount == 1);
 				}
+				b3SetConstraintContact(constraints, wideIndex, lane, contactData, contactId);
 			}
 
 			let haveRestitution = false;
 			if (ASC_FEATURE_SIMD) {
-				haveRestitution = b3PrepareConstraintL<v128>(constraints, wideIndex, manifolds, wideIndex, contacts, 1, context, warmStartScale);
+				haveRestitution = b3PrepareConstraintL<v128>(constraints, wideIndex, manifolds, wideIndex, 1, context, warmStartScale);
 			} else {
-				haveRestitution = b3PrepareConstraintL<f32>(constraints, wideIndex, manifolds, wideIndex, contacts, 1, context, warmStartScale);
+				haveRestitution = b3PrepareConstraintL<f32>(constraints, wideIndex, manifolds, wideIndex, 1, context, warmStartScale);
 			}
 			anyRestitution = anyRestitution || haveRestitution;
 		}
@@ -935,6 +940,7 @@ export function b3PrepareContacts_MeshWideW4(block: b3SolverBlock, context: b3St
 	let manifoldStarts = context.wideMeshManifoldStarts;
 	let warmStartScale: f32 = world.enableWarmStarting ? 1.0 : 0.0;
 	let anyRestitution = false;
+	let contactData = b3ArrayData(world.contacts);
 
 	let wideIndex = block.startIndex;
 	let endWideIndex = block.startIndex + <i32>block.count;
@@ -957,17 +963,16 @@ export function b3PrepareContacts_MeshWideW4(block: b3SolverBlock, context: b3St
 		for (; wideIndex < colorWideEndIndex; ++wideIndex) {
 			let localWideIndex = wideIndex - colorWideStart;
 
-			let contacts: FixedArray<i32, 4>;
 			for (let lane = 0; lane < 4; ++lane) {
 				let contactIndex = 4 * localWideIndex + lane;
+				let contactId = B3_NULL_INDEX;
 				if (contactIndex < colorContactCount) {
 					let spec = specs[order[orderBase + contactIndex]];
 					B3_ASSERT(world.contacts[spec.contactId].contactId == spec.contactId);
 					B3_ASSERT(world.contacts[spec.contactId].manifoldCount == <i32>spec.manifoldCount);
-					contacts[lane] = spec.contactId;
-				} else {
-					contacts[lane] = B3_NULL_INDEX;
+					contactId = spec.contactId;
 				}
+				b3SetConstraintContact(constraints, wideIndex, lane, contactData, contactId);
 			}
 
 			let manifoldCount = manifoldStarts[wideIndex + 1] - manifoldStarts[wideIndex];
@@ -979,7 +984,6 @@ export function b3PrepareContacts_MeshWideW4(block: b3SolverBlock, context: b3St
 					wideIndex,
 					manifolds,
 					manifoldBase,
-					contacts,
 					manifoldCount,
 					context,
 					warmStartScale
@@ -990,7 +994,6 @@ export function b3PrepareContacts_MeshWideW4(block: b3SolverBlock, context: b3St
 					wideIndex,
 					manifolds,
 					manifoldBase,
-					contacts,
 					manifoldCount,
 					context,
 					warmStartScale
@@ -1005,6 +1008,19 @@ export function b3PrepareContacts_MeshWideW4(block: b3SolverBlock, context: b3St
 	if (anyRestitution) {
 		context.anyRestitution.value = 1;
 	}
+}
+
+// C's c->contacts[lane] = contacts[lane]; B3_NULL_INDEX stores C's NULL
+@inline unsafe function b3SetConstraintContact(
+	constraints: StaticArray<b3ContactConstraintWide>,
+	constraintIndex: i32,
+	lane: i32,
+	contactData: usize,
+	contactId: i32
+): void {
+	let contact = contactId != B3_NULL_INDEX ? load<usize>(contactData + <usize>contactId * sizeof<usize>()) : 0;
+	let c = changetype<usize>(constraints) + <usize>constraintIndex * sizeof<b3ContactConstraintWide>();
+	store<usize>(c + CW_CONTACTS + <usize>lane * 4, contact);
 }
 
 // C's base pointer is the constraint array from constraintBase. The first manifold of the block is at the constraint
@@ -1034,7 +1050,7 @@ unsafe function b3WarmStartContactsL<T>(
 			let c = c0 + <usize>lane * 4;
 
 			// An empty lane only writes its own constraint lanes, which nothing reads
-			if (isFloat<T>() && load<i32>(c + CW_CONTACTS) == B3_NULL_INDEX) {
+			if (isFloat<T>() && load<usize>(c + CW_CONTACTS) == 0) {
 				continue;
 			}
 
@@ -1261,7 +1277,7 @@ unsafe function b3PushContactsL<T>(
 			let c = c0 + <usize>lane * 4;
 
 			// An empty lane only writes its own constraint lanes, which nothing reads
-			if (isFloat<T>() && load<i32>(c + CW_CONTACTS) == B3_NULL_INDEX) {
+			if (isFloat<T>() && load<usize>(c + CW_CONTACTS) == 0) {
 				continue;
 			}
 
@@ -1470,7 +1486,7 @@ unsafe function b3SolveContactsL<T>(
 			let c = c0 + <usize>lane * 4;
 
 			// An empty lane only writes its own constraint lanes, which nothing reads
-			if (isFloat<T>() && load<i32>(c + CW_CONTACTS) == B3_NULL_INDEX) {
+			if (isFloat<T>() && load<usize>(c + CW_CONTACTS) == 0) {
 				continue;
 			}
 
@@ -1834,7 +1850,7 @@ unsafe function b3ApplyRestitutionL<T>(
 			let c = c0 + <usize>lane * 4;
 
 			// An empty lane only writes its own constraint lanes, which nothing reads
-			if (isFloat<T>() && load<i32>(c + CW_CONTACTS) == B3_NULL_INDEX) {
+			if (isFloat<T>() && load<usize>(c + CW_CONTACTS) == 0) {
 				continue;
 			}
 
@@ -2012,6 +2028,70 @@ unsafe function b3ApplyRestitutionL<T>(
 
 // Store impulses by contact constraint. C reads each lane through a float pointer; so do these raw loads, in range by
 // construction (lane < 4, manifold and point counts from the contact). The same for both lane types.
+// One lane of C's store impulses loop, from the lane's contact and its manifold data. Returns whether it set a hit event.
+@inline unsafe function b3StoreLaneImpulses(
+	manifolds: usize,
+	lane: i32,
+	contact: usize,
+	laneManifolds: usize,
+	fixedManifoldCount: i32,
+	manifoldCount: i32,
+	hitEventBitSet: b3BitSet,
+	negHitThreshold: f32
+): bool {
+	if (contact == 0) {
+		return false;
+	}
+
+	let contactManifoldCount = load<i32>(contact + CT_MANIFOLDCOUNT);
+	let laneManifoldCount = fixedManifoldCount > 0 ? fixedManifoldCount : contactManifoldCount;
+	B3_ASSERT(laneManifoldCount == contactManifoldCount && laneManifoldCount <= manifoldCount);
+
+	let laneOffset = <usize>lane * 4;
+	for (let manifoldIndex = 0; manifoldIndex < laneManifoldCount; ++manifoldIndex) {
+		let cm = manifolds + <usize>manifoldIndex * sizeof<b3ContactManifoldWide>() + laneOffset;
+		let m = laneManifolds + <usize>manifoldIndex * sizeof<b3Manifold>();
+
+		let f1 = load<f32>(cm + MW_FRICTIONIMPULSE + V2_X);
+		let f2 = load<f32>(cm + MW_FRICTIONIMPULSE + V2_Y);
+		let frictionImpulse = m + offsetof<b3Manifold>("frictionImpulse");
+		store<f32>(frictionImpulse, f1 * load<f32>(cm + MW_TANGENT1 + V_X) + f2 * load<f32>(cm + MW_TANGENT2 + V_X));
+		store<f32>(frictionImpulse + 4, f1 * load<f32>(cm + MW_TANGENT1 + V_Y) + f2 * load<f32>(cm + MW_TANGENT2 + V_Y));
+		store<f32>(frictionImpulse + 8, f1 * load<f32>(cm + MW_TANGENT1 + V_Z) + f2 * load<f32>(cm + MW_TANGENT2 + V_Z));
+		store<f32>(m + offsetof<b3Manifold>("twistImpulse"), load<f32>(cm + MW_TWISTIMPULSE));
+		let rollingImpulse = m + offsetof<b3Manifold>("rollingImpulse");
+		store<f32>(rollingImpulse, load<f32>(cm + MW_ROLLINGIMPULSE + V_X));
+		store<f32>(rollingImpulse + 4, load<f32>(cm + MW_ROLLINGIMPULSE + V_Y));
+		store<f32>(rollingImpulse + 8, load<f32>(cm + MW_ROLLINGIMPULSE + V_Z));
+
+		let pointCount = load<i32>(m + offsetof<b3Manifold>("pointCount"));
+		B3_ASSERT(pointCount <= load<i32>(cm - laneOffset + MW_POINTCOUNT));
+		for (let pointIndex = 0; pointIndex < pointCount; ++pointIndex) {
+			let cp = cm + MW_POINTS + <usize>pointIndex * sizeof<b3ContactConstraintPointWide>();
+			let mp = m + offsetof<b3Manifold>("points") + <usize>pointIndex * sizeof<b3ManifoldPoint>();
+			store<f32>(mp + offsetof<b3ManifoldPoint>("normalImpulse"), load<f32>(cp + PW_NORMALIMPULSE));
+			store<f32>(mp + offsetof<b3ManifoldPoint>("totalNormalImpulse"), load<f32>(cp + PW_TOTALNORMALIMPULSE));
+		}
+	}
+
+	if ((load<u32>(contact + CT_FLAGS) & b3_simEnableHitEvent) != 0) {
+		for (let manifoldIndex = 0; manifoldIndex < laneManifoldCount; ++manifoldIndex) {
+			let m = laneManifolds + <usize>manifoldIndex * sizeof<b3Manifold>();
+			let pointCount = load<i32>(m + M_POINTCOUNT);
+			for (let pointIndex = 0; pointIndex < pointCount; ++pointIndex) {
+				let mp = m + M_POINTS + <usize>pointIndex * sizeof<b3ManifoldPoint>();
+
+				// Need to check total impulse because the point may be speculative and not colliding
+				if (load<f32>(mp + MP_NORMALVELOCITY) < negHitThreshold && load<f32>(mp + MP_TOTALNORMALIMPULSE) > 0.0) {
+					b3SetBit(hitEventBitSet, <u32>load<i32>(contact + CT_CONTACTID));
+					return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
 unsafe function b3StoreImpulsesW(
 	block: b3SolverBlock,
 	context: b3StepContext,
@@ -2029,85 +2109,29 @@ unsafe function b3StoreImpulsesW(
 	let negHitThreshold = -world.hitEventThreshold;
 	let constraintData = changetype<usize>(constraints);
 	let manifoldData = changetype<usize>(manifolds);
-	let contactData = b3ArrayData(world.contacts);
 
 	let ci = constraintBase + block.startIndex;
 	let mi = fixedManifoldCount > 0 ? ci : manifoldStarts[block.startIndex];
 	for (let i = 0; i < <i32>block.count; ++i) {
 		let c = constraintData + <usize>ci * sizeof<b3ContactConstraintWide>();
 		let manifoldCount = fixedManifoldCount > 0 ? fixedManifoldCount : load<i32>(c + CW_MANIFOLDCOUNT);
+		let cm = manifoldData + <usize>mi * sizeof<b3ContactManifoldWide>();
 
-		// Pay the cache misses up front. Contact ids come from prepare; 0 stands for C's NULL contact.
-		let contactLanes: FixedArray<usize, 4>;
-		let laneManifoldData: FixedArray<usize, 4>;
-		for (let lane = 0; lane < 4; ++lane) {
-			let contactId = load<i32>(c + CW_CONTACTS + <usize>lane * 4);
-			let contact = contactId != B3_NULL_INDEX ? load<usize>(contactData + <usize>contactId * sizeof<usize>()) : 0;
-			contactLanes[lane] = contact;
-			laneManifoldData[lane] = contact != 0 ? load<usize>(contact + CT_MANIFOLDS) : 0;
-		}
+		// Pay the cache misses up front. The lanes run unrolled, as C's do, so their contacts stay in locals.
+		let contact0 = load<usize>(c + CW_CONTACTS);
+		let contact1 = load<usize>(c + CW_CONTACTS + 4);
+		let contact2 = load<usize>(c + CW_CONTACTS + 8);
+		let contact3 = load<usize>(c + CW_CONTACTS + 12);
+		let manifolds0 = contact0 != 0 ? load<usize>(contact0 + CT_MANIFOLDS) : 0;
+		let manifolds1 = contact1 != 0 ? load<usize>(contact1 + CT_MANIFOLDS) : 0;
+		let manifolds2 = contact2 != 0 ? load<usize>(contact2 + CT_MANIFOLDS) : 0;
+		let manifolds3 = contact3 != 0 ? load<usize>(contact3 + CT_MANIFOLDS) : 0;
 
-		for (let lane = 0; lane < 4; ++lane) {
-			let contact = contactLanes[lane];
-			if (contact == 0) {
-				continue;
-			}
-
-			let laneManifolds = laneManifoldData[lane];
-			let contactManifoldCount = load<i32>(contact + CT_MANIFOLDCOUNT);
-
-			let laneManifoldCount = fixedManifoldCount > 0 ? fixedManifoldCount : contactManifoldCount;
-			B3_ASSERT(laneManifoldCount == contactManifoldCount && laneManifoldCount <= manifoldCount);
-
-			let laneOffset = <usize>lane * 4;
-			for (let manifoldIndex = 0; manifoldIndex < laneManifoldCount; ++manifoldIndex) {
-				let cm = manifoldData + <usize>(mi + manifoldIndex) * sizeof<b3ContactManifoldWide>() + laneOffset;
-				let m = laneManifolds + <usize>manifoldIndex * sizeof<b3Manifold>();
-
-				let f1 = load<f32>(cm + MW_FRICTIONIMPULSE + V2_X);
-				let f2 = load<f32>(cm + MW_FRICTIONIMPULSE + V2_Y);
-				let frictionImpulse = m + offsetof<b3Manifold>("frictionImpulse");
-				store<f32>(frictionImpulse, f1 * load<f32>(cm + MW_TANGENT1 + V_X) + f2 * load<f32>(cm + MW_TANGENT2 + V_X));
-				store<f32>(frictionImpulse + 4, f1 * load<f32>(cm + MW_TANGENT1 + V_Y) + f2 * load<f32>(cm + MW_TANGENT2 + V_Y));
-				store<f32>(frictionImpulse + 8, f1 * load<f32>(cm + MW_TANGENT1 + V_Z) + f2 * load<f32>(cm + MW_TANGENT2 + V_Z));
-				store<f32>(m + offsetof<b3Manifold>("twistImpulse"), load<f32>(cm + MW_TWISTIMPULSE));
-				let rollingImpulse = m + offsetof<b3Manifold>("rollingImpulse");
-				store<f32>(rollingImpulse, load<f32>(cm + MW_ROLLINGIMPULSE + V_X));
-				store<f32>(rollingImpulse + 4, load<f32>(cm + MW_ROLLINGIMPULSE + V_Y));
-				store<f32>(rollingImpulse + 8, load<f32>(cm + MW_ROLLINGIMPULSE + V_Z));
-
-				let pointCount = load<i32>(m + offsetof<b3Manifold>("pointCount"));
-				B3_ASSERT(pointCount <= load<i32>(cm - laneOffset + MW_POINTCOUNT));
-				for (let pointIndex = 0; pointIndex < pointCount; ++pointIndex) {
-					let cp = cm + MW_POINTS + <usize>pointIndex * sizeof<b3ContactConstraintPointWide>();
-					let mp = m + offsetof<b3Manifold>("points") + <usize>pointIndex * sizeof<b3ManifoldPoint>();
-					store<f32>(mp + offsetof<b3ManifoldPoint>("normalImpulse"), load<f32>(cp + PW_NORMALIMPULSE));
-					store<f32>(mp + offsetof<b3ManifoldPoint>("totalNormalImpulse"), load<f32>(cp + PW_TOTALNORMALIMPULSE));
-				}
-			}
-
-			if ((load<u32>(contact + CT_FLAGS) & b3_simEnableHitEvent) != 0) {
-				let flagged = false;
-				for (let manifoldIndex = 0; manifoldIndex < laneManifoldCount && flagged == false; ++manifoldIndex) {
-					let m = laneManifolds + <usize>manifoldIndex * sizeof<b3Manifold>();
-					let pointCount = load<i32>(m + M_POINTCOUNT);
-					for (let pointIndex = 0; pointIndex < pointCount; ++pointIndex) {
-						let mp = m + M_POINTS + <usize>pointIndex * sizeof<b3ManifoldPoint>();
-
-						// Need to check total impulse because the point may be speculative and not colliding
-						if (
-							load<f32>(mp + MP_NORMALVELOCITY) < negHitThreshold &&
-							load<f32>(mp + MP_TOTALNORMALIMPULSE) > 0.0
-						) {
-							b3SetBit(hitEventBitSet, <u32>load<i32>(contact + CT_CONTACTID));
-							hasHitEvents = true;
-							flagged = true;
-							break;
-						}
-					}
-				}
-			}
-		}
+		let hit0 = b3StoreLaneImpulses(cm, 0, contact0, manifolds0, fixedManifoldCount, manifoldCount, hitEventBitSet, negHitThreshold);
+		let hit1 = b3StoreLaneImpulses(cm, 1, contact1, manifolds1, fixedManifoldCount, manifoldCount, hitEventBitSet, negHitThreshold);
+		let hit2 = b3StoreLaneImpulses(cm, 2, contact2, manifolds2, fixedManifoldCount, manifoldCount, hitEventBitSet, negHitThreshold);
+		let hit3 = b3StoreLaneImpulses(cm, 3, contact3, manifolds3, fixedManifoldCount, manifoldCount, hitEventBitSet, negHitThreshold);
+		hasHitEvents = hasHitEvents || hit0 || hit1 || hit2 || hit3;
 
 		ci += 1;
 		mi += manifoldCount;

@@ -190,8 +190,8 @@ export struct b3ContactConstraintW4 {
 	indexA: FixedArray<i32, 4>;
 	indexB: FixedArray<i32, 4>;
 
-	// Contact ids, B3_NULL_INDEX for an empty lane where C stores NULL
-	contacts: FixedArray<i32, 4>;
+	// The contacts' addresses, which hold for the step, and 0 for an empty lane where C stores NULL
+	contacts: FixedArray<usize, 4>;
 
 	invMassA: b3FloatW4 = b3FloatW4();
 	invMassB: b3FloatW4 = b3FloatW4();
