@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 // AnimaScript port of src/mesh_contact.c
 
-import { B3_ASSERT, B3_ASSERT_ENABLED, B3_NULL_INDEX, FLT_MAX, b3Log } from "./core";
+import { B3_ASSERT, B3_ASSERT_ENABLED, B3_NULL_INDEX, FLT_MAX, b3Log, b3OnMain } from "./core";
 import {
 	B3_LINEAR_SLOP,
 	B3_MAX_AABB_MARGIN,
@@ -76,13 +76,14 @@ import {
 	b3_flatEdge2,
 	b3_flatEdge3,
 } from "./collision";
-import { b3SurfaceMaterial, b3_capsuleShape, b3_heightShape, b3_hullShape, b3_meshShape, b3_sphereShape } from "./types";
+import { b3SurfaceMaterial, b3_capsuleShape, b3_compoundShape, b3_heightShape, b3_hullShape, b3_meshShape, b3_sphereShape } from "./types";
 import {
 	B3_FORCE_GHOST_COLLISIONS,
 	MP_PERSISTED,
 	MP_TOTALNORMALIMPULSE,
 	MP_TRIANGLEINDEX,
 	b3Contact,
+	b3MeshContact,
 	b3ContactCache,
 	b3ManifoldPointAddress,
 	b3StorePointAnchors,
@@ -118,8 +119,8 @@ import {
 } from "./simd";
 import { b3CTZ32 } from "./ctz";
 import { Q_LOOP, Q_STACK_SIZE } from "./qsort";
-import { b3QueryMesh } from "./mesh";
-import { b3GetHeightFieldTriangle, b3QueryHeightField } from "./height_field";
+import { B3_MESH_STACK_SIZE, b3QueryMeshVisitor } from "./mesh";
+import { b3GetHeightFieldTriangle, b3QueryHeightFieldVisitor } from "./height_field";
 import { b3CollideTriangleAndCapsule, b3CollideTriangleAndHull, b3CollideTriangleAndSphere } from "./triangle_manifold";
 
 const B3_MAX_POINTS_PER_TRIANGLE: i32 = 32;
@@ -128,39 +129,17 @@ class b3TriangleQueryContext {
 	indices: StaticArray<i32> = new StaticArray<i32>(B3_MAX_MESH_CONTACT_TRIANGLES);
 	capacity: i32 = 0;
 	count: i32 = 0;
-}
 
-// C keeps the context and the index buffer on its stack. The callbacks below capture nothing, so
-// no closure is allocated per query; a refresh never nests.
-const s_triangleQuery = new b3TriangleQueryContext();
-
-function b3CollectTriangleIndicesCallback(a: b3Vec3, b: b3Vec3, c: b3Vec3, triangleIndex: i32): bool {
-	let triangleContext = s_triangleQuery;
-	if (triangleContext.count == triangleContext.capacity) {
-		return false;
+	// The callback of the triangle query, called directly
+	visit(a: b3Vec3, b: b3Vec3, c: b3Vec3, triangleIndex: i32): bool {
+		if (this.count == this.capacity) {
+			return false;
+		}
+		this.indices[this.count] = triangleIndex;
+		this.count += 1;
+		return this.count < this.capacity;
 	}
-	triangleContext.indices[triangleContext.count] = triangleIndex;
-	triangleContext.count += 1;
-	return triangleContext.count < triangleContext.capacity;
 }
-
-function b3QueryMeshTriangles(capacity: i32, mesh: b3Mesh, bounds: b3AABB): i32 {
-	s_triangleQuery.capacity = capacity;
-	s_triangleQuery.count = 0;
-	b3QueryMesh(mesh, bounds, b3CollectTriangleIndicesCallback);
-	return s_triangleQuery.count;
-}
-
-function b3QueryHeightFieldTriangles(capacity: i32, heightField: b3HeightFieldData, bounds: b3AABB): i32 {
-	s_triangleQuery.capacity = capacity;
-	s_triangleQuery.count = 0;
-	b3QueryHeightField(heightField, bounds, b3CollectTriangleIndicesCallback);
-	return s_triangleQuery.count;
-}
-
-// Scratch for C's per contact arena bumps, grown as needed and reused by every call. Like the arena
-// they are not cleared between calls; every element is written before it is read.
-let s_contactCaches = new StaticArray<b3ContactCache>(0);
 
 @inline function b3ScratchCapacity(current: i32, needed: i32): i32 {
 	return b3MaxInt(needed, 2 * current);
@@ -168,7 +147,87 @@ let s_contactCaches = new StaticArray<b3ContactCache>(0);
 
 let s_once = false;
 
-function b3RefreshCache(contact: b3Contact, shapeA: b3Shape, xfA: b3WorldTransform, bounds: b3AABB): void {
+// C's refresh in two halves. This one finds the triangles of the enlarged query bounds into the worker's scratch and
+// changes nothing else, so a parallel part can see whether the refresh fits before it commits to the contact.
+function b3QueryCacheTriangles(meshContact: b3MeshContact, shapeA: b3Shape, xfA: b3WorldTransform, bounds: b3AABB, scratch: b3MeshScratch): i32 {
+	if (B3_ASSERT_ENABLED) B3_ASSERT(shapeA.type == b3_meshShape || shapeA.type == b3_heightShape);
+
+	// Enlarge to the query bounds to absorb small movement
+	let radius = B3_MAX_AABB_MARGIN() + B3_SPECULATIVE_DISTANCE();
+	let extension = b3Vec3(radius, radius, radius);
+	let queryBounds = b3AABB(b3Sub(bounds.lowerBound, extension), b3Add(bounds.upperBound, extension));
+	scratch.refreshBounds = queryBounds;
+
+	// Query triangles
+	let query = scratch.triangleQuery;
+	query.capacity = B3_MAX_MESH_CONTACT_TRIANGLES;
+	query.count = 0;
+
+	// Bounds are in world space. Convert to the local mesh frame. The broadphase bounds are float,
+	// so the demoted mesh transform is the matching float world frame (exact in float mode).
+	let meshTransform = b3ToRelativeTransform(xfA, b3Pos_zero);
+	let localBounds = b3AABB_Transform(b3InvertTransform(meshTransform), queryBounds);
+	if (shapeA.type == b3_meshShape) {
+		b3QueryMeshVisitor<b3TriangleQueryContext>(shapeA.mesh!, localBounds, query, scratch.meshStack);
+	} else {
+		if (B3_ASSERT_ENABLED) B3_ASSERT(shapeA.type == b3_heightShape);
+		b3QueryHeightFieldVisitor<b3TriangleQueryContext>(shapeA.heightField!, localBounds, query);
+	}
+	return query.count;
+}
+
+// The second half: the new query bounds, and the new cache matched with the old one
+unsafe function b3SaveCacheTriangles<M>(meshContact: b3MeshContact, shapeA: b3Shape, triangleCount: i32, scratch: b3MeshScratch): void {
+	let triangleCache = meshContact.triangleCache;
+	let triangleIndices = scratch.triangleQuery.indices;
+	meshContact.queryBounds = scratch.refreshBounds;
+
+	// Triangle indices must be sorted to match caches.
+
+	// Create new contact cache and match with old one
+	let contactCache = scratch.contactCaches;
+
+	let index2 = 0;
+	for (let index1 = 0; index1 < triangleCount; ++index1) {
+		while (index2 < triangleCache.length && triangleCache[index2].triangleIndex < triangleIndices[index1]) {
+			index2 += 1;
+		}
+
+		if (index2 < triangleCache.length && triangleCache[index2].triangleIndex == triangleIndices[index1]) {
+			contactCache[index1] = triangleCache[index2].cache;
+		} else {
+			contactCache[index1] = b3ContactCache();
+		}
+	}
+
+	// Save new cache. A parallel part only refreshes a cache with the capacity, b3MeshContactFitsPart.
+	if (isBoolean<M>()) {
+		b3SetTriangleCacheLength(triangleCache, triangleCount);
+	} else {
+		triangleCache.length = triangleCount;
+		s_meshTriangleHighWater = b3MaxInt(s_meshTriangleHighWater, triangleCount);
+	}
+	for (let i = 0; i < triangleCount; ++i) {
+		triangleCache[i] = b3TriangleCache(triangleIndices[i], contactCache[i]);
+
+		if (B3_ASSERT_ENABLED && shapeA.type == b3_meshShape) {
+			B3_ASSERT(0 <= triangleCache[i].triangleIndex && triangleCache[i].triangleIndex < shapeA.mesh!.data.triangleCount);
+		}
+	}
+}
+
+// Array#length's capacity and its setter without the growth, which parallel parts may not run, over std's Array fields
+@inline unsafe function b3TriangleCacheCapacity(triangleCache: Array<b3TriangleCache>): i32 {
+	let byteLength = load<i32>(changetype<usize>(triangleCache) + offsetof<Array<b3TriangleCache>>("byteLength"));
+	return byteLength / <i32>sizeof<b3TriangleCache>();
+}
+
+@inline unsafe function b3SetTriangleCacheLength(triangleCache: Array<b3TriangleCache>, length: i32): void {
+	if (B3_ASSERT_ENABLED) B3_ASSERT(length <= b3TriangleCacheCapacity(triangleCache));
+	store<i32>(changetype<usize>(triangleCache) + offsetof<Array<b3TriangleCache>>("length_"), length);
+}
+
+unsafe function b3RefreshCache(contact: b3Contact, shapeA: b3Shape, xfA: b3WorldTransform, bounds: b3AABB, scratch: b3MeshScratch): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(shapeA.type == b3_meshShape || shapeA.type == b3_heightShape);
 
 	let meshContact = contact.meshContact;
@@ -185,28 +244,9 @@ function b3RefreshCache(contact: b3Contact, shapeA: b3Shape, xfA: b3WorldTransfo
 		return;
 	}
 
-	// Enlarge to the query bounds to absorb small movement
-	let radius = B3_MAX_AABB_MARGIN() + B3_SPECULATIVE_DISTANCE();
-	let extension = b3Vec3(radius, radius, radius);
-	meshContact.queryBounds.lowerBound = b3Sub(bounds.lowerBound, extension);
-	meshContact.queryBounds.upperBound = b3Add(bounds.upperBound, extension);
+	let triangleCount = b3QueryCacheTriangles(meshContact, shapeA, xfA, bounds, scratch);
 
-	// Query triangles
 	let triangleCapacity = B3_MAX_MESH_CONTACT_TRIANGLES;
-	let triangleIndices = s_triangleQuery.indices;
-
-	// Bounds are in world space. Convert to the local mesh frame. The broadphase bounds are float,
-	// so the demoted mesh transform is the matching float world frame (exact in float mode).
-	let meshTransform = b3ToRelativeTransform(xfA, b3Pos_zero);
-	let localBounds = b3AABB_Transform(b3InvertTransform(meshTransform), meshContact.queryBounds);
-	let triangleCount: i32;
-	if (shapeA.type == b3_meshShape) {
-		triangleCount = b3QueryMeshTriangles(triangleCapacity, shapeA.mesh!, localBounds);
-	} else {
-		if (B3_ASSERT_ENABLED) B3_ASSERT(shapeA.type == b3_heightShape);
-		triangleCount = b3QueryHeightFieldTriangles(triangleCapacity, shapeA.heightField!, localBounds);
-	}
-
 	if (triangleCount == triangleCapacity) {
 		if (s_once == false) {
 			b3Log("WARNING: complex mesh detected, triangle buffer capacity of " + triangleCapacity.toString() + " reached");
@@ -214,37 +254,7 @@ function b3RefreshCache(contact: b3Contact, shapeA: b3Shape, xfA: b3WorldTransfo
 		}
 	}
 
-	// Triangle indices must be sorted to match caches.
-
-	// Create new contact cache and match with old one
-	if (s_contactCaches.length < triangleCount) {
-		s_contactCaches = new StaticArray<b3ContactCache>(b3ScratchCapacity(s_contactCaches.length, triangleCount));
-	}
-	let contactCache = s_contactCaches;
-
-	let index2 = 0;
-	for (let index1 = 0; index1 < triangleCount; ++index1) {
-		while (index2 < triangleCache.length && triangleCache[index2].triangleIndex < triangleIndices[index1]) {
-			index2 += 1;
-		}
-
-		if (index2 < triangleCache.length && triangleCache[index2].triangleIndex == triangleIndices[index1]) {
-			contactCache[index1] = triangleCache[index2].cache;
-		} else {
-			contactCache[index1] = b3ContactCache();
-		}
-	}
-
-	// Save new cache
-	triangleCache.length = triangleCount;
-	s_meshTriangleHighWater = b3MaxInt(s_meshTriangleHighWater, triangleCount);
-	for (let i = 0; i < triangleCount; ++i) {
-		triangleCache[i] = b3TriangleCache(triangleIndices[i], contactCache[i]);
-
-		if (B3_ASSERT_ENABLED && shapeA.type == b3_meshShape) {
-			B3_ASSERT(0 <= triangleCache[i].triangleIndex && triangleCache[i].triangleIndex < shapeA.mesh!.data.triangleCount);
-		}
-	}
+	b3SaveCacheTriangles<b3OnMain>(meshContact, shapeA, triangleCount, scratch);
 }
 
 struct b3TentativeTriangle {
@@ -607,6 +617,14 @@ class b3MeshScratch {
 	sortStack: StaticArray<i32> = new StaticArray<i32>(Q_STACK_SIZE);
 	foundEdges: b3FoundEdges = b3FoundEdges();
 	foundVertices: b3FoundVertices = b3FoundVertices();
+	// A cache refresh: the triangle query, its stack, and the matched caches
+	triangleQuery: b3TriangleQueryContext = new b3TriangleQueryContext();
+	meshStack: StaticArray<i32> = new StaticArray<i32>(B3_MESH_STACK_SIZE);
+	contactCaches: StaticArray<b3ContactCache> = new StaticArray<b3ContactCache>(B3_MAX_MESH_CONTACT_TRIANGLES);
+	// A refresh b3MeshContactFitsPart queried for the contact the part updates next
+	refreshReady: bool = false;
+	refreshCount: i32 = 0;
+	refreshBounds: b3AABB = b3AABB();
 }
 
 function b3MakeMeshScratch(): StaticArray<b3MeshScratch> {
@@ -664,15 +682,36 @@ export function b3ReserveMeshScratchForWorkers(workerCount: i32): void {
 	}
 }
 
-// Whether a parallel part can update this mesh contact: its triangle cache needs no refresh, which would grow it, and
-// its manifolds and the worker's scratch have room for every triangle
-export function b3MeshContactFitsPart(contact: b3Contact, boundsB: b3AABB, workerIndex: i32): bool {
+// Whether a parallel part can update this mesh contact, before it changes it: its triangle cache needs no refresh, or one
+// that fits the cache's capacity and is not of a compound child, and its manifolds and the worker's scratch have room for
+// every triangle. A refresh it queries is left in the worker's scratch for b3ComputeMeshManifolds.
+export unsafe function b3MeshContactFitsPart(contact: b3Contact, shapeA: b3Shape, xfA: b3WorldTransform, boundsB: b3AABB, workerIndex: i32): bool {
 	let meshContact = contact.meshContact;
-	let triangleCount = meshContact.triangleCache.length;
 	let scratch = s_meshScratch[workerIndex];
-	return b3AABB_Contains(meshContact.queryBounds, boundsB) && contact.manifolds.length >= triangleCount &&
+	scratch.refreshReady = false;
+
+	let triangleCount = meshContact.triangleCache.length;
+	let refresh = b3AABB_Contains(meshContact.queryBounds, boundsB) == false;
+	if (refresh) {
+		if (shapeA.type == b3_compoundShape) {
+			return false;
+		}
+
+		// A full query logs a warning, which only the main lane can
+		triangleCount = b3QueryCacheTriangles(meshContact, shapeA, xfA, boundsB, scratch);
+		if (triangleCount == B3_MAX_MESH_CONTACT_TRIANGLES || triangleCount > b3TriangleCacheCapacity(meshContact.triangleCache)) {
+			return false;
+		}
+	}
+
+	let fits = contact.manifolds.length >= triangleCount &&
 		scratch.acceptedManifolds.length >= b3MaxInt(triangleCount, contact.manifoldCount) &&
 		scratch.manifoldBuffer.length >= triangleCount && scratch.pointBuffer.length >= B3_MAX_POINTS_PER_TRIANGLE * triangleCount;
+	if (fits && refresh) {
+		scratch.refreshReady = true;
+		scratch.refreshCount = triangleCount;
+	}
+	return fits;
 }
 
 // Checked reads for b3ComputeMeshManifolds, which is otherwise unchecked: every scratch buffer,
@@ -922,9 +961,14 @@ export unsafe function b3ComputeMeshManifolds<M>(
 	let context = world.taskContexts[workerIndex];
 	let scratch = s_meshScratch[workerIndex];
 
-	// A parallel part takes only contacts whose cache needs no refresh, b3MeshContactFitsPart
-	if (!isBoolean<M>()) {
-		b3RefreshCache(contact, shapeA, xfA, shapeB.aabb);
+	// A parallel part saves the refresh b3MeshContactFitsPart queried, if any
+	if (isBoolean<M>()) {
+		if (scratch.refreshReady) {
+			scratch.refreshReady = false;
+			b3SaveCacheTriangles<M>(contact.meshContact, shapeA, scratch.refreshCount, scratch);
+		}
+	} else {
+		b3RefreshCache(contact, shapeA, xfA, shapeB.aabb, scratch);
 	}
 
 	// Collide with triangles and build manifolds

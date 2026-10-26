@@ -955,7 +955,7 @@ export function b3CollideTask<M>(startIndex: i32, endIndex: i32, workerIndex: i3
 		if (isBoolean<M>()) {
 			let fits: bool;
 			if ((contact.flags & b3_simMeshContact) != 0) {
-				fits = b3MeshContactFitsPart(contact, shapeB.aabb, workerIndex);
+				fits = b3MeshContactFitsPart(contact, shapeA, transformA, shapeB.aabb, workerIndex);
 			} else {
 				fits = contact.manifolds.length > 0;
 			}
