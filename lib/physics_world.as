@@ -175,6 +175,7 @@ import {
 	b3_simStoppedTouching,
 	b3_simTouchingFlag,
 } from "./contact";
+import { b3MeshContactFitsPart } from "./mesh_contact";
 import { b3Island, b3LinkContact, b3UnlinkContact } from "./island";
 import { b3Joint } from "./joint";
 import { b3OverlapSensors, b3Sensor, b3SensorHit, b3SensorTaskContext } from "./sensor";
@@ -540,6 +541,21 @@ export function b3DefaultRestitutionCallback(restitutionA: f32, materialA: u64, 
 	return b3MaxFloat(restitutionA, restitutionB);
 }
 
+// The world's friction and restitution callbacks; parallel parts run only with the defaults
+export function b3MixFriction<M>(world: b3World, frictionA: f32, materialA: u64, frictionB: f32, materialB: u64): f32 {
+	if (isBoolean<M>()) {
+		return b3DefaultFrictionCallback(frictionA, materialA, frictionB, materialB);
+	}
+	return world.frictionCallback!(frictionA, materialA, frictionB, materialB);
+}
+
+export function b3MixRestitution<M>(world: b3World, restitutionA: f32, materialA: u64, restitutionB: f32, materialB: u64): f32 {
+	if (isBoolean<M>()) {
+		return b3DefaultRestitutionCallback(restitutionA, materialA, restitutionB, materialB);
+	}
+	return world.restitutionCallback!(restitutionA, materialA, restitutionB, materialB);
+}
+
 function b3CreateWorkerContexts(world: b3World): void {
 	world.taskContexts.length = 0;
 	world.sensorTaskContexts.length = 0;
@@ -819,15 +835,6 @@ export function b3CollideTask<M>(startIndex: i32, endIndex: i32, workerIndex: i3
 		let shapeA = shapes[shapeIdA];
 		let shapeB = shapes[shapeIdB];
 
-		// Mesh and compound contacts can allocate and share scratch, so the main lane updates them after the parts
-		if (isBoolean<M>()) {
-			if ((contact.flags & b3_simMeshContact) != 0 || shapeA.type == b3_compoundShape || contact.manifolds.length == 0) {
-				taskContext.deferredContacts[taskContext.deferredCount] = i;
-				taskContext.deferredCount += 1;
-				continue;
-			}
-		}
-
 		// Update contact respecting shape/body order (A,B)
 		let encodedA = contact.encodedBodySimA;
 		let encodedB = contact.encodedBodySimB;
@@ -934,6 +941,23 @@ export function b3CollideTask<M>(startIndex: i32, endIndex: i32, workerIndex: i3
 					// such as material parameters.
 					continue;
 				}
+			}
+		}
+
+		// A part leaves to the main lane the contacts whose update would allocate or share scratch, before it changes them
+		if (isBoolean<M>()) {
+			let fits: bool;
+			if (shapeA.type == b3_compoundShape) {
+				fits = false;
+			} else if ((contact.flags & b3_simMeshContact) != 0) {
+				fits = b3MeshContactFitsPart(contact, shapeB.aabb, workerIndex);
+			} else {
+				fits = contact.manifolds.length > 0;
+			}
+			if (fits == false) {
+				taskContext.deferredContacts[taskContext.deferredCount] = i;
+				taskContext.deferredCount += 1;
+				continue;
 			}
 		}
 

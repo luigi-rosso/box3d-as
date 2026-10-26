@@ -60,10 +60,10 @@ import { b3StoreRow } from "./simd";
 import { b3ComputeMeshManifolds } from "./mesh_contact";
 import {
 	b3AllocateManifolds,
-	b3DefaultFrictionCallback,
-	b3DefaultRestitutionCallback,
 	b3FreeManifolds,
 	b3GetWorld,
+	b3MixFriction,
+	b3MixRestitution,
 	b3World,
 	b3_awakeSet,
 	b3_disabledSet,
@@ -911,35 +911,15 @@ unsafe function b3UpdateConvexContact<M>(
 	let materialA = b3GetShapeMaterials(shapeA)[0];
 	let materialB = b3GetShapeMaterials(shapeB)[0];
 
-	// Keep these updated in case the values on the shapes are modified. Parallel parts run only with the default
-	// callbacks.
-	if (isBoolean<M>()) {
-		contact.friction = b3DefaultFrictionCallback(
-			materialA.friction,
-			materialA.userMaterialId,
-			materialB.friction,
-			materialB.userMaterialId,
-		);
-		contact.restitution = b3DefaultRestitutionCallback(
-			materialA.restitution,
-			materialA.userMaterialId,
-			materialB.restitution,
-			materialB.userMaterialId,
-		);
-	} else {
-		contact.friction = world.frictionCallback!(
-			materialA.friction,
-			materialA.userMaterialId,
-			materialB.friction,
-			materialB.userMaterialId,
-		);
-		contact.restitution = world.restitutionCallback!(
-			materialA.restitution,
-			materialA.userMaterialId,
-			materialB.restitution,
-			materialB.userMaterialId,
-		);
-	}
+	// Keep these updated in case the values on the shapes are modified
+	contact.friction = b3MixFriction<M>(world, materialA.friction, materialA.userMaterialId, materialB.friction, materialB.userMaterialId);
+	contact.restitution = b3MixRestitution<M>(
+		world,
+		materialA.restitution,
+		materialA.userMaterialId,
+		materialB.restitution,
+		materialB.userMaterialId,
+	);
 
 	if (materialA.rollingResistance > 0.0 || materialB.rollingResistance > 0.0) {
 		let typeA = shapeA.type;
@@ -1018,109 +998,109 @@ export unsafe function b3UpdateContact<M>(
 	xfB: b3WorldTransform,
 	isFast: bool,
 ): bool {
-	let touching: bool;
+	let touching = false;
 
 	if (B3_ASSERT_ENABLED) B3_ASSERT(shapeB.type != b3_compoundShape);
 
-	if (isBoolean<M>()) {
-		// Parallel parts take only convex pairs; b3CollideTask leaves the rest to the main lane
-		touching = b3UpdateConvexContact<M>(world, workerIndex, contact, shapeA, xfA, shapeB, xfB, false);
-	} else if (shapeA.type == b3_compoundShape) {
-		let childIndex = contact.childIndex;
-		let child = s_contactChild;
-		b3GetCompoundChildInto(shapeA.compound!, childIndex, child, s_contactChildMaterial);
+	if (shapeA.type == b3_compoundShape) {
+		// b3CollideTask leaves compound contacts to the main lane, as their child shape is shared scratch
+		if (!isBoolean<M>()) {
+			let childIndex = contact.childIndex;
+			let child = s_contactChild;
+			b3GetCompoundChildInto(shapeA.compound!, childIndex, child, s_contactChildMaterial);
 
-		// Temporary child shape to match existing function signatures. C copies the whole shape; the paths below read
-		// only its identity, flags, type, materials and the child geometry, so those are what is copied.
-		let childShapeA = s_contactChildShape;
-		childShapeA.id = shapeA.id;
-		childShapeA.generation = shapeA.generation;
-		childShapeA.flags = shapeA.flags;
-		childShapeA.materialCount = shapeA.materialCount;
-		childShapeA.materials = shapeA.materials;
+			// Temporary child shape to match existing function signatures. C copies the whole shape; the paths below read
+			// only its identity, flags, type, materials and the child geometry, so those are what is copied.
+			let childShapeA = s_contactChildShape;
+			childShapeA.id = shapeA.id;
+			childShapeA.generation = shapeA.generation;
+			childShapeA.flags = shapeA.flags;
+			childShapeA.materialCount = shapeA.materialCount;
+			childShapeA.materials = shapeA.materials;
 
-		childShapeA.type = child.type;
+			childShapeA.type = child.type;
 
-		// Handle child material for non-meshes.
-		if (child.type != b3_meshShape) {
-			let materialIndex = <i32>child.materialIndices![0];
-			if (B3_ASSERT_ENABLED) B3_ASSERT(0 <= materialIndex && materialIndex < shapeA.materialCount);
-			let parentMaterials = b3GetShapeMaterials(shapeA);
-			let childMaterials = s_contactChildMaterials;
-			childMaterials[0] = parentMaterials[materialIndex];
-			childShapeA.materials = childMaterials;
-			childShapeA.materialCount = 1;
-		}
+			// Handle child material for non-meshes.
+			if (child.type != b3_meshShape) {
+				let materialIndex = <i32>child.materialIndices![0];
+				if (B3_ASSERT_ENABLED) B3_ASSERT(0 <= materialIndex && materialIndex < shapeA.materialCount);
+				let parentMaterials = b3GetShapeMaterials(shapeA);
+				let childMaterials = s_contactChildMaterials;
+				childMaterials[0] = parentMaterials[materialIndex];
+				childShapeA.materials = childMaterials;
+				childShapeA.materialCount = 1;
+			}
 
-		if (child.type == b3_capsuleShape) {
-			childShapeA.capsule = child.capsule;
-			if (shapeB.type == b3_hullShape) {
-				// Flip
-				let flip = true;
-				touching = b3UpdateConvexContact<M>(world, workerIndex, contact, shapeB, xfB, childShapeA, xfA, flip);
-			} else {
+			if (child.type == b3_capsuleShape) {
+				childShapeA.capsule = child.capsule;
+				if (shapeB.type == b3_hullShape) {
+					// Flip
+					let flip = true;
+					touching = b3UpdateConvexContact<M>(world, workerIndex, contact, shapeB, xfB, childShapeA, xfA, flip);
+				} else {
+					let flip = false;
+					touching = b3UpdateConvexContact<M>(world, workerIndex, contact, childShapeA, xfA, shapeB, xfB, flip);
+				}
+			} else if (child.type == b3_hullShape) {
+				childShapeA.hull = child.hull;
+				let xfChild = b3MulWorldTransforms(xfA, child.transform);
 				let flip = false;
-				touching = b3UpdateConvexContact<M>(world, workerIndex, contact, childShapeA, xfA, shapeB, xfB, flip);
-			}
-		} else if (child.type == b3_hullShape) {
-			childShapeA.hull = child.hull;
-			let xfChild = b3MulWorldTransforms(xfA, child.transform);
-			let flip = false;
-			touching = b3UpdateConvexContact<M>(world, workerIndex, contact, childShapeA, xfChild, shapeB, xfB, flip);
-		} else if (child.type == b3_meshShape) {
-			childShapeA.mesh = child.mesh;
-			let xfChild = b3MulWorldTransforms(xfA, child.transform);
+				touching = b3UpdateConvexContact<M>(world, workerIndex, contact, childShapeA, xfChild, shapeB, xfB, flip);
+			} else if (child.type == b3_meshShape) {
+				childShapeA.mesh = child.mesh;
+				let xfChild = b3MulWorldTransforms(xfA, child.transform);
 
-			touching = b3ComputeMeshManifolds(
-				world,
-				workerIndex,
-				contact,
-				childShapeA,
-				child.materialIndices,
-				xfChild,
-				shapeB,
-				xfB,
-				isFast,
-			);
+				touching = b3ComputeMeshManifolds<M>(
+					world,
+					workerIndex,
+					contact,
+					childShapeA,
+					child.materialIndices,
+					xfChild,
+					shapeB,
+					xfB,
+					isFast,
+				);
 
-			if (touching && ((shapeA.flags & b3_enableHitEvents) != 0 || (shapeB.flags & b3_enableHitEvents) != 0)) {
-				contact.flags |= b3_simEnableHitEvent;
+				if (touching && ((shapeA.flags & b3_enableHitEvents) != 0 || (shapeB.flags & b3_enableHitEvents) != 0)) {
+					contact.flags |= b3_simEnableHitEvent;
+				} else {
+					contact.flags &= ~b3_simEnableHitEvent;
+				}
+
+				if (B3_ASSERT_ENABLED) B3_ASSERT((touching == true && contact.manifoldCount > 0) || (touching == false && contact.manifoldCount == 0));
 			} else {
-				contact.flags &= ~b3_simEnableHitEvent;
+				if (B3_ASSERT_ENABLED) B3_ASSERT(child.type == b3_sphereShape);
+
+				childShapeA.sphere = child.sphere;
+				if (shapeB.type == b3_capsuleShape || shapeB.type == b3_hullShape) {
+					// Flip
+					let flip = true;
+					touching = b3UpdateConvexContact<M>(world, workerIndex, contact, shapeB, xfB, childShapeA, xfA, flip);
+				} else {
+					let flip = false;
+					touching = b3UpdateConvexContact<M>(world, workerIndex, contact, childShapeA, xfA, shapeB, xfB, flip);
+				}
 			}
 
-			if (B3_ASSERT_ENABLED) B3_ASSERT((touching == true && contact.manifoldCount > 0) || (touching == false && contact.manifoldCount == 0));
-		} else {
-			if (B3_ASSERT_ENABLED) B3_ASSERT(child.type == b3_sphereShape);
-
-			childShapeA.sphere = child.sphere;
-			if (shapeB.type == b3_capsuleShape || shapeB.type == b3_hullShape) {
-				// Flip
-				let flip = true;
-				touching = b3UpdateConvexContact<M>(world, workerIndex, contact, shapeB, xfB, childShapeA, xfA, flip);
-			} else {
-				let flip = false;
-				touching = b3UpdateConvexContact<M>(world, workerIndex, contact, childShapeA, xfA, shapeB, xfB, flip);
-			}
-		}
-
-		// The anchor is relative to the child origin but oriented in world space.
-		// Offset the anchor to be relative to the compound origin.
-		let manifoldCount = contact.manifoldCount;
-		let offset = b3RotateVector(xfA.q, child.transform.p);
-		for (let i = 0; i < manifoldCount; ++i) {
-			let pointCount = contact.manifolds[i].pointCount;
-			for (let j = 0; j < pointCount; ++j) {
-				let mp = b3ManifoldPointAddress(contact.manifolds, i, j);
-				let anchorA = b3Add(load<b3Vec3>(mp + MP_ANCHORA), offset);
-				b3StoreRow(mp + MP_ANCHORA, anchorA.x, anchorA.y, anchorA.z, load<f32>(mp + MP_ANCHORB));
+			// The anchor is relative to the child origin but oriented in world space.
+			// Offset the anchor to be relative to the compound origin.
+			let manifoldCount = contact.manifoldCount;
+			let offset = b3RotateVector(xfA.q, child.transform.p);
+			for (let i = 0; i < manifoldCount; ++i) {
+				let pointCount = contact.manifolds[i].pointCount;
+				for (let j = 0; j < pointCount; ++j) {
+					let mp = b3ManifoldPointAddress(contact.manifolds, i, j);
+					let anchorA = b3Add(load<b3Vec3>(mp + MP_ANCHORA), offset);
+					b3StoreRow(mp + MP_ANCHORA, anchorA.x, anchorA.y, anchorA.z, load<f32>(mp + MP_ANCHORB));
+				}
 			}
 		}
 	} else if (shapeA.type == b3_meshShape || shapeA.type == b3_heightShape) {
 		// Does this contact touch a mesh or height-field?
 
 		// Compute mesh manifolds
-		touching = b3ComputeMeshManifolds(world, workerIndex, contact, shapeA, null, xfA, shapeB, xfB, isFast);
+		touching = b3ComputeMeshManifolds<M>(world, workerIndex, contact, shapeA, null, xfA, shapeB, xfB, isFast);
 
 		if (touching && ((shapeA.flags & b3_enableHitEvents) != 0 || (shapeB.flags & b3_enableHitEvents) != 0)) {
 			contact.flags |= b3_simEnableHitEvent;

@@ -8,6 +8,7 @@ import {
 	B3_MAX_AABB_MARGIN,
 	B3_MAX_MANIFOLD_POINTS,
 	B3_MAX_MESH_CONTACT_TRIANGLES,
+	B3_MAX_WORKERS,
 	B3_MESH_REST_OFFSET,
 	B3_SPECULATIVE_DISTANCE,
 } from "./constants";
@@ -89,7 +90,7 @@ import {
 	b3_enableSpeculativePoints,
 } from "./contact";
 import { b3MakeFeatureId } from "./manifold";
-import { b3AllocateManifolds, b3FreeManifolds, b3World } from "./physics_world";
+import { b3AllocateManifolds, b3MixFriction, b3MixRestitution, b3World } from "./physics_world";
 import { b3Shape, b3GetMeshTriangle, b3GetShapeMaterials } from "./shape";
 import {
 	b3AddW4,
@@ -116,7 +117,7 @@ import {
 	b3SubL,
 } from "./simd";
 import { b3CTZ32 } from "./ctz";
-import { Q_LOOP } from "./qsort";
+import { Q_LOOP, Q_STACK_SIZE } from "./qsort";
 import { b3QueryMesh } from "./mesh";
 import { b3GetHeightFieldTriangle, b3QueryHeightField } from "./height_field";
 import { b3CollideTriangleAndCapsule, b3CollideTriangleAndHull, b3CollideTriangleAndSphere } from "./triangle_manifold";
@@ -160,23 +161,6 @@ function b3QueryHeightFieldTriangles(capacity: i32, heightField: b3HeightFieldDa
 // Scratch for C's per contact arena bumps, grown as needed and reused by every call. Like the arena
 // they are not cleared between calls; every element is written before it is read.
 let s_contactCaches = new StaticArray<b3ContactCache>(0);
-let s_cullPoints = new StaticArray<b3Point2D>(0);
-let s_acceptedManifolds = new StaticArray<i32>(0);
-let s_tentativeManifolds = new StaticArray<i32>(0);
-let s_tentativeTriangles = new StaticArray<b3TentativeTriangle>(0);
-let s_pointBuffer = new StaticArray<b3LocalManifoldPoint>(0);
-const s_manifoldBuffer = new Array<b3LocalManifold>();
-let s_survivorIndices = new StaticArray<i32>(0);
-let s_survivorVertices = new StaticArray<b3Vec3>(0);
-const s_laneX = new StaticArray<f32>(12);
-const s_laneY = new StaticArray<f32>(12);
-const s_laneZ = new StaticArray<f32>(12);
-const s_triangleVertices = new StaticArray<b3Vec3>(3);
-let s_clusters = new StaticArray<b3Cluster>(0);
-let s_clusterMemberships = new StaticArray<i32>(0);
-let s_clusterPoints = new StaticArray<b3LocalManifoldPoint>(0);
-let s_oldManifolds = new StaticArray<b3Manifold>(0);
-let s_consumed = new StaticArray<bool>(0);
 
 @inline function b3ScratchCapacity(current: i32, needed: i32): i32 {
 	return b3MaxInt(needed, 2 * current);
@@ -253,6 +237,7 @@ function b3RefreshCache(contact: b3Contact, shapeA: b3Shape, xfA: b3WorldTransfo
 
 	// Save new cache
 	triangleCache.length = triangleCount;
+	s_meshTriangleHighWater = b3MaxInt(s_meshTriangleHighWater, triangleCount);
 	for (let i = 0; i < triangleCount; ++i) {
 		triangleCache[i] = b3TriangleCache(triangleIndices[i], contactCache[i]);
 
@@ -321,9 +306,6 @@ struct b3FoundVertices {
 	count: i32 = 0;
 }
 
-// The found edges and vertices of b3ComputeMeshManifolds, which does not nest
-let s_foundEdges = b3FoundEdges();
-let s_foundVertices = b3FoundVertices();
 
 @inline function b3AddVertex(vertices: ref b3FoundVertices, vertex: i32): bool {
 	let key = vertex;
@@ -533,16 +515,18 @@ function b3CullPoints(points: StaticArray<b3Point2D>, count: i32): i32 {
 }
 
 // C's points pointer is points from pointOffset.
-function b3ReduceCluster(points: StaticArray<b3LocalManifoldPoint>, pointOffset: i32, count1: i32, normal: b3Vec3): i32 {
+function b3ReduceCluster(
+	points: StaticArray<b3LocalManifoldPoint>,
+	pointOffset: i32,
+	count1: i32,
+	normal: b3Vec3,
+	pts: StaticArray<b3Point2D>,
+): i32 {
 	let targetCount = 1;
 	if (count1 <= targetCount) {
 		return count1;
 	}
 
-	if (s_cullPoints.length < count1) {
-		s_cullPoints = new StaticArray<b3Point2D>(b3ScratchCapacity(s_cullPoints.length, count1));
-	}
-	let pts = s_cullPoints;
 	let u = b3Perp(normal);
 	let v = b3Cross(normal, u);
 	let origin = points[pointOffset].point;
@@ -588,7 +572,6 @@ class b3TentativeSorter {
 	}
 }
 
-const s_tentativeSorter = new b3TentativeSorter();
 
 // C's points pointer is the cluster point buffer from pointOffset.
 struct b3Cluster {
@@ -597,6 +580,99 @@ struct b3Cluster {
 	pointOffset: i32 = 0;
 	pointCapacity: i32 = 0;
 	pointCount: i32 = 0;
+}
+
+// The scratch of b3ComputeMeshManifolds, which does not nest, one set per worker since parallel parts collide at once.
+// Buffers sized by the triangle count grow on the main lane only.
+class b3MeshScratch {
+	acceptedManifolds: StaticArray<i32> = new StaticArray<i32>(0);
+	tentativeManifolds: StaticArray<i32> = new StaticArray<i32>(0);
+	tentativeTriangles: StaticArray<b3TentativeTriangle> = new StaticArray<b3TentativeTriangle>(0);
+	survivorIndices: StaticArray<i32> = new StaticArray<i32>(0);
+	survivorVertices: StaticArray<b3Vec3> = new StaticArray<b3Vec3>(0);
+	clusters: StaticArray<b3Cluster> = new StaticArray<b3Cluster>(0);
+	clusterMemberships: StaticArray<i32> = new StaticArray<i32>(0);
+	oldManifolds: StaticArray<b3Manifold> = new StaticArray<b3Manifold>(0);
+	consumed: StaticArray<bool> = new StaticArray<bool>(0);
+	pointBuffer: StaticArray<b3LocalManifoldPoint> = new StaticArray<b3LocalManifoldPoint>(0);
+	clusterPoints: StaticArray<b3LocalManifoldPoint> = new StaticArray<b3LocalManifoldPoint>(0);
+	cullPoints: StaticArray<b3Point2D> = new StaticArray<b3Point2D>(0);
+	// C bumps triangleCount manifolds; each slot points at pointBuffer
+	manifoldBuffer: Array<b3LocalManifold> = new Array<b3LocalManifold>();
+	laneX: StaticArray<f32> = new StaticArray<f32>(12);
+	laneY: StaticArray<f32> = new StaticArray<f32>(12);
+	laneZ: StaticArray<f32> = new StaticArray<f32>(12);
+	triangleVertices: StaticArray<b3Vec3> = new StaticArray<b3Vec3>(3);
+	tentativeSorter: b3TentativeSorter = new b3TentativeSorter();
+	sortStack: StaticArray<i32> = new StaticArray<i32>(Q_STACK_SIZE);
+	foundEdges: b3FoundEdges = b3FoundEdges();
+	foundVertices: b3FoundVertices = b3FoundVertices();
+}
+
+function b3MakeMeshScratch(): StaticArray<b3MeshScratch> {
+	let scratch = new StaticArray<b3MeshScratch>(B3_MAX_WORKERS);
+	for (let i = 0; i < B3_MAX_WORKERS; ++i) {
+		scratch[i] = new b3MeshScratch();
+	}
+	return scratch;
+}
+
+const s_meshScratch = b3MakeMeshScratch();
+
+// The most triangles any mesh contact's cache has held, which sizes every worker's scratch before a parallel collide
+let s_meshTriangleHighWater = 0;
+
+// Grows the scratch for a contact of triangleCount cached triangles, or as many old manifolds
+function b3ReserveMeshScratch(scratch: b3MeshScratch, triangleCount: i32): void {
+	if (scratch.acceptedManifolds.length < triangleCount) {
+		let capacity = b3ScratchCapacity(scratch.acceptedManifolds.length, triangleCount);
+		scratch.acceptedManifolds = new StaticArray<i32>(capacity);
+		scratch.tentativeManifolds = new StaticArray<i32>(capacity);
+		scratch.tentativeTriangles = new StaticArray<b3TentativeTriangle>(capacity);
+		scratch.survivorIndices = new StaticArray<i32>(capacity);
+		scratch.survivorVertices = new StaticArray<b3Vec3>(3 * capacity);
+		scratch.clusters = new StaticArray<b3Cluster>(capacity);
+		scratch.clusterMemberships = new StaticArray<i32>(capacity);
+		scratch.oldManifolds = new StaticArray<b3Manifold>(capacity);
+		scratch.consumed = new StaticArray<bool>(capacity);
+		scratch.tentativeSorter.triangles = scratch.tentativeTriangles;
+	}
+
+	let pointCapacity = B3_MAX_POINTS_PER_TRIANGLE * triangleCount;
+	if (scratch.pointBuffer.length < pointCapacity) {
+		let capacity = b3ScratchCapacity(scratch.pointBuffer.length, pointCapacity);
+		scratch.pointBuffer = new StaticArray<b3LocalManifoldPoint>(capacity);
+		scratch.clusterPoints = new StaticArray<b3LocalManifoldPoint>(capacity);
+		scratch.cullPoints = new StaticArray<b3Point2D>(capacity);
+		let manifoldBuffer = scratch.manifoldBuffer;
+		for (let i = 0; i < manifoldBuffer.length; ++i) {
+			manifoldBuffer[i].points = scratch.pointBuffer;
+		}
+	}
+
+	while (scratch.manifoldBuffer.length < triangleCount) {
+		let manifold = new b3LocalManifold();
+		manifold.points = scratch.pointBuffer;
+		scratch.manifoldBuffer.push(manifold);
+	}
+}
+
+// Sizes the scratch of workers 0 to workerCount - 1 for any contact a parallel part may take
+export function b3ReserveMeshScratchForWorkers(workerCount: i32): void {
+	for (let i = 0; i < workerCount; ++i) {
+		b3ReserveMeshScratch(s_meshScratch[i], s_meshTriangleHighWater);
+	}
+}
+
+// Whether a parallel part can update this mesh contact: its triangle cache needs no refresh, which would grow it, and
+// its manifolds and the worker's scratch have room for every triangle
+export function b3MeshContactFitsPart(contact: b3Contact, boundsB: b3AABB, workerIndex: i32): bool {
+	let meshContact = contact.meshContact;
+	let triangleCount = meshContact.triangleCache.length;
+	let scratch = s_meshScratch[workerIndex];
+	return b3AABB_Contains(meshContact.queryBounds, boundsB) && contact.manifolds.length >= triangleCount &&
+		scratch.acceptedManifolds.length >= b3MaxInt(triangleCount, contact.manifoldCount) &&
+		scratch.manifoldBuffer.length >= triangleCount && scratch.pointBuffer.length >= B3_MAX_POINTS_PER_TRIANGLE * triangleCount;
 }
 
 // Checked reads for b3ComputeMeshManifolds, which is otherwise unchecked: every scratch buffer,
@@ -650,6 +726,7 @@ function b3PrefilterTriangles(
 	hullMarginValue: f32,
 	survivorIndices: StaticArray<i32>,
 	survivorVertices: StaticArray<b3Vec3>,
+	scratch: b3MeshScratch,
 ): i32 {
 	let survivorCount = 0;
 	let hullMargin = b3Vec3(hullMarginValue, hullMarginValue, hullMarginValue);
@@ -676,9 +753,9 @@ function b3PrefilterTriangles(
 	let hullUpperZ = b3SplatW4(hullBounds.upperBound.z);
 
 	// C's x[3][4], y[3][4], z[3][4], row k at index 4 * k
-	let x = s_laneX;
-	let y = s_laneY;
-	let z = s_laneZ;
+	let x = scratch.laneX;
+	let y = scratch.laneY;
+	let z = scratch.laneZ;
 
 	for (let baseIndex = 0; baseIndex < triangleCount; baseIndex += 4) {
 		let laneCount = b3MinInt(4, triangleCount - baseIndex);
@@ -829,7 +906,7 @@ function b3PrefilterTriangles(
 }
 
 @unchecked
-export unsafe function b3ComputeMeshManifolds(
+export unsafe function b3ComputeMeshManifolds<M>(
 	world: b3World,
 	workerIndex: i32,
 	contact: b3Contact,
@@ -843,32 +920,37 @@ export unsafe function b3ComputeMeshManifolds(
 	if (B3_ASSERT_ENABLED) B3_ASSERT(shapeA.type == b3_meshShape || shapeA.type == b3_heightShape);
 
 	let context = world.taskContexts[workerIndex];
+	let scratch = s_meshScratch[workerIndex];
 
-	b3RefreshCache(contact, shapeA, xfA, shapeB.aabb);
+	// A parallel part takes only contacts whose cache needs no refresh, b3MeshContactFitsPart
+	if (!isBoolean<M>()) {
+		b3RefreshCache(contact, shapeA, xfA, shapeB.aabb);
+	}
 
 	// Collide with triangles and build manifolds
 	let meshContact = contact.meshContact;
 	let triangleCount = meshContact.triangleCache.length;
 
-	// C's pointer arrays become indices into the manifold buffer
-	if (s_acceptedManifolds.length < triangleCount) {
-		let capacity = b3ScratchCapacity(s_acceptedManifolds.length, triangleCount);
-		s_acceptedManifolds = new StaticArray<i32>(capacity);
-		s_tentativeManifolds = new StaticArray<i32>(capacity);
-		s_tentativeTriangles = new StaticArray<b3TentativeTriangle>(capacity);
-		s_survivorIndices = new StaticArray<i32>(capacity);
-		s_survivorVertices = new StaticArray<b3Vec3>(3 * capacity);
+	// C's pointer arrays become indices into the manifold buffer. The contact's manifold storage holds one per cached
+	// triangle, at least as many as there can be clusters, so a parallel part never grows it.
+	if (!isBoolean<M>()) {
+		b3ReserveMeshScratch(scratch, b3MaxInt(triangleCount, contact.manifoldCount));
+		if (contact.manifolds.length < triangleCount) {
+			let manifolds = b3AllocateManifolds(world, triangleCount);
+			b3CopyManifolds(manifolds, contact.manifolds, contact.manifoldCount);
+			contact.manifolds = manifolds;
+		}
 	}
-	let acceptedManifolds = s_acceptedManifolds;
+	let acceptedManifolds = scratch.acceptedManifolds;
 	let acceptedManifoldCount = 0;
-	let tentativeManifolds = s_tentativeManifolds;
+	let tentativeManifolds = scratch.tentativeManifolds;
 	let tentativeManifoldCount = 0;
-	let tentativeTriangles = s_tentativeTriangles;
+	let tentativeTriangles = scratch.tentativeTriangles;
 	let tentativeTriangleCount = 0;
 
 	// C's uninitialized stack arrays; a local struct would zero all 128 keys on every call
-	s_foundEdges.count = 0;
-	s_foundVertices.count = 0;
+	scratch.foundEdges.count = 0;
+	scratch.foundVertices.count = 0;
 
 	// This transform converts from mesh frame into the shapeB frame
 	let transformAtoB = b3InvMulWorldTransforms(xfB, xfA);
@@ -885,15 +967,10 @@ export unsafe function b3ComputeMeshManifolds(
 
 	// Make room for clip points
 	let pointBufferCapacity = B3_MAX_POINTS_PER_TRIANGLE * triangleCount;
-
-	if (s_pointBuffer.length < pointBufferCapacity) {
-		s_pointBuffer = new StaticArray<b3LocalManifoldPoint>(b3ScratchCapacity(s_pointBuffer.length, pointBufferCapacity));
-	}
-	let pointBuffer = s_pointBuffer;
 	let totalPointCount = 0;
 
-	// C bumps triangleCount manifolds; a slot is created when first used and reused while it holds no points
-	let manifoldBuffer = s_manifoldBuffer;
+	// C bumps triangleCount manifolds; a slot is reused while it holds no points
+	let manifoldBuffer = scratch.manifoldBuffer;
 	let manifoldCount = 0;
 
 	let triangleCaches = meshContact.triangleCache;
@@ -902,8 +979,8 @@ export unsafe function b3ComputeMeshManifolds(
 	let hullSpeculativeDistance: f32 = enableSpeculative ? B3_SPECULATIVE_DISTANCE() : 0.0;
 	let hullMargin = b3Vec3(hullSpeculativeDistance, hullSpeculativeDistance, hullSpeculativeDistance);
 
-	let survivorIndices = s_survivorIndices;
-	let survivorVertices = s_survivorVertices;
+	let survivorIndices = scratch.survivorIndices;
+	let survivorVertices = scratch.survivorVertices;
 
 	let meshTriangles: StaticArray<b3MeshTriangle>? = null;
 	let meshVertices: StaticArray<b3Vec3>? = null;
@@ -933,6 +1010,7 @@ export unsafe function b3ComputeMeshManifolds(
 			hullMargin.x,
 			survivorIndices,
 			survivorVertices,
+			scratch,
 		);
 	} else {
 		survivorCount = b3PrefilterTriangles(
@@ -949,10 +1027,11 @@ export unsafe function b3ComputeMeshManifolds(
 			hullMargin.x,
 			survivorIndices,
 			survivorVertices,
+			scratch,
 		);
 	}
 
-	let vertices = s_triangleVertices;
+	let vertices = scratch.triangleVertices;
 	for (let survivorIndex = 0; survivorIndex < survivorCount && totalPointCount + 3 < pointBufferCapacity; ++survivorIndex) {
 		let index = survivorIndices[survivorIndex];
 		let triangleIndex = triangleCaches[index].triangleIndex;
@@ -971,11 +1050,7 @@ export unsafe function b3ComputeMeshManifolds(
 		// C writes through a pointer into the growable cache array; copy out and store back
 		let cache = triangleCaches[index].cache;
 		let pointCapacity = pointBufferCapacity - totalPointCount;
-		if (manifoldCount == manifoldBuffer.length) {
-			manifoldBuffer.push(new b3LocalManifold());
-		}
 		let manifold = manifoldBuffer[manifoldCount];
-		manifold.points = pointBuffer;
 		manifold.pointOffset = totalPointCount;
 		manifold.pointCount = 0;
 		manifold.triangleFlags = triangle.flags;
@@ -983,7 +1058,7 @@ export unsafe function b3ComputeMeshManifolds(
 
 		switch (shapeB.type) {
 			case b3_capsuleShape:
-				b3CollideTriangleAndCapsule(manifold, pointCapacity, vertices, shapeB.capsule, cache.simplexCache);
+				b3CollideTriangleAndCapsule(manifold, pointCapacity, vertices, shapeB.capsule, cache.simplexCache, workerIndex);
 				break;
 
 			case b3_hullShape:
@@ -1003,6 +1078,7 @@ export unsafe function b3ComputeMeshManifolds(
 					hullB!,
 					cache.satCache,
 					enableSpeculative,
+					workerIndex,
 				);
 				context.satCallCount += 1;
 				context.satCacheHitCount += cache.satCache.hit;
@@ -1034,24 +1110,24 @@ export unsafe function b3ComputeMeshManifolds(
 			manifold.i3 = triangle.i3;
 
 			if (manifold.feature == b3_featureTriangleFace || B3_FORCE_GHOST_COLLISIONS != 0) {
-				b3AddEdge(s_foundEdges, triangle.i1, triangle.i2);
-				b3AddEdge(s_foundEdges, triangle.i2, triangle.i3);
-				b3AddEdge(s_foundEdges, triangle.i3, triangle.i1);
-				b3AddVertex(s_foundVertices, triangle.i1);
-				b3AddVertex(s_foundVertices, triangle.i2);
-				b3AddVertex(s_foundVertices, triangle.i3);
+				b3AddEdge(scratch.foundEdges, triangle.i1, triangle.i2);
+				b3AddEdge(scratch.foundEdges, triangle.i2, triangle.i3);
+				b3AddEdge(scratch.foundEdges, triangle.i3, triangle.i1);
+				b3AddVertex(scratch.foundVertices, triangle.i1);
+				b3AddVertex(scratch.foundVertices, triangle.i2);
+				b3AddVertex(scratch.foundVertices, triangle.i3);
 
 				acceptedManifolds[acceptedManifoldCount] = manifoldCount - 1;
 				acceptedManifoldCount += 1;
 			} else if (manifold.feature == b3_featureHullFace) {
 				let cosNormalAngle = b3Dot(manifold.triangleNormal, manifold.normal);
 				if (cosNormalAngle > 0.5) {
-					b3AddEdge(s_foundEdges, triangle.i1, triangle.i2);
-					b3AddEdge(s_foundEdges, triangle.i2, triangle.i3);
-					b3AddEdge(s_foundEdges, triangle.i3, triangle.i1);
-					b3AddVertex(s_foundVertices, triangle.i1);
-					b3AddVertex(s_foundVertices, triangle.i2);
-					b3AddVertex(s_foundVertices, triangle.i3);
+					b3AddEdge(scratch.foundEdges, triangle.i1, triangle.i2);
+					b3AddEdge(scratch.foundEdges, triangle.i2, triangle.i3);
+					b3AddEdge(scratch.foundEdges, triangle.i3, triangle.i1);
+					b3AddVertex(scratch.foundVertices, triangle.i1);
+					b3AddVertex(scratch.foundVertices, triangle.i2);
+					b3AddVertex(scratch.foundVertices, triangle.i3);
 
 					acceptedManifolds[acceptedManifoldCount] = manifoldCount - 1;
 					acceptedManifoldCount += 1;
@@ -1063,12 +1139,12 @@ export unsafe function b3ComputeMeshManifolds(
 
 					if (minSeparation < -2.0 * linearSlop) {
 						// Deep overlap
-						b3AddEdge(s_foundEdges, triangle.i1, triangle.i2);
-						b3AddEdge(s_foundEdges, triangle.i2, triangle.i3);
-						b3AddEdge(s_foundEdges, triangle.i3, triangle.i1);
-						b3AddVertex(s_foundVertices, triangle.i1);
-						b3AddVertex(s_foundVertices, triangle.i2);
-						b3AddVertex(s_foundVertices, triangle.i3);
+						b3AddEdge(scratch.foundEdges, triangle.i1, triangle.i2);
+						b3AddEdge(scratch.foundEdges, triangle.i2, triangle.i3);
+						b3AddEdge(scratch.foundEdges, triangle.i3, triangle.i1);
+						b3AddVertex(scratch.foundVertices, triangle.i1);
+						b3AddVertex(scratch.foundVertices, triangle.i2);
+						b3AddVertex(scratch.foundVertices, triangle.i3);
 						acceptedManifolds[acceptedManifoldCount] = manifoldCount - 1;
 						acceptedManifoldCount += 1;
 					} else {
@@ -1097,8 +1173,7 @@ export unsafe function b3ComputeMeshManifolds(
 		// Sort triangles so the closest triangles are processed first
 		{
 			if (tentativeTriangleCount > 1) {
-				s_tentativeSorter.triangles = tentativeTriangles;
-				Q_LOOP<b3TentativeSorter>(tentativeTriangleCount, s_tentativeSorter);
+				Q_LOOP<b3TentativeSorter>(tentativeTriangleCount, scratch.tentativeSorter, scratch.sortStack);
 			}
 		}
 
@@ -1107,12 +1182,12 @@ export unsafe function b3ComputeMeshManifolds(
 			let tentativeIndex = tentativeManifolds[tentativeTriangles[i].index];
 			let m = manifoldBuffer[tentativeIndex];
 
-			let addedEdge1 = b3AddEdge(s_foundEdges, m.i1, m.i2);
-			let addedEdge2 = b3AddEdge(s_foundEdges, m.i2, m.i3);
-			let addedEdge3 = b3AddEdge(s_foundEdges, m.i3, m.i1);
-			let addedVertex1 = b3AddVertex(s_foundVertices, m.i1);
-			let addedVertex2 = b3AddVertex(s_foundVertices, m.i2);
-			let addedVertex3 = b3AddVertex(s_foundVertices, m.i3);
+			let addedEdge1 = b3AddEdge(scratch.foundEdges, m.i1, m.i2);
+			let addedEdge2 = b3AddEdge(scratch.foundEdges, m.i2, m.i3);
+			let addedEdge3 = b3AddEdge(scratch.foundEdges, m.i3, m.i1);
+			let addedVertex1 = b3AddVertex(scratch.foundVertices, m.i1);
+			let addedVertex2 = b3AddVertex(scratch.foundVertices, m.i2);
+			let addedVertex3 = b3AddVertex(scratch.foundVertices, m.i3);
 
 			let feature: b3TriangleFeature = m.feature;
 			let shouldCollide = false;
@@ -1169,19 +1244,19 @@ export unsafe function b3ComputeMeshManifolds(
 			}
 
 			if ((triangleFlags & b3_flatEdge1) == b3_flatEdge1) {
-				if (b3FindEdge(s_foundEdges, m.i1, m.i2)) {
+				if (b3FindEdge(scratch.foundEdges, m.i1, m.i2)) {
 					continue;
 				}
 			}
 
 			if ((triangleFlags & b3_flatEdge2) == b3_flatEdge2) {
-				if (b3FindEdge(s_foundEdges, m.i2, m.i3)) {
+				if (b3FindEdge(scratch.foundEdges, m.i2, m.i3)) {
 					continue;
 				}
 			}
 
 			if ((triangleFlags & b3_flatEdge3) == b3_flatEdge3) {
-				if (b3FindEdge(s_foundEdges, m.i3, m.i1)) {
+				if (b3FindEdge(scratch.foundEdges, m.i3, m.i1)) {
 					continue;
 				}
 			}
@@ -1193,22 +1268,14 @@ export unsafe function b3ComputeMeshManifolds(
 
 	if (B3_ASSERT_ENABLED) B3_ASSERT(acceptedManifoldCount <= triangleCount);
 
+	// The contact keeps its manifold storage
 	if (acceptedManifoldCount == 0) {
-		if (contact.manifoldCount > 0) {
-			b3FreeManifolds(world, contact.manifolds, contact.manifoldCount);
-			contact.manifolds = b3AllocateManifolds(world, 0);
-			contact.manifoldCount = 0;
-		}
+		contact.manifoldCount = 0;
 		return false;
 	}
 
-	if (s_clusters.length < acceptedManifoldCount) {
-		let capacity = b3ScratchCapacity(s_clusters.length, acceptedManifoldCount);
-		s_clusters = new StaticArray<b3Cluster>(capacity);
-		s_clusterMemberships = new StaticArray<i32>(capacity);
-	}
-	let clusters = s_clusters;
-	let clusterMemberships = s_clusterMemberships;
+	let clusters = scratch.clusters;
+	let clusterMemberships = scratch.clusterMemberships;
 
 	// Cluster tolerance is tighter than the warm starting manifold matching tolerance. These
 	// serve different purposes.
@@ -1259,10 +1326,7 @@ export unsafe function b3ComputeMeshManifolds(
 	}
 
 	// Setup clusters
-	if (s_clusterPoints.length < clusterPointCount) {
-		s_clusterPoints = new StaticArray<b3LocalManifoldPoint>(b3ScratchCapacity(s_clusterPoints.length, clusterPointCount));
-	}
-	let clusterPoints = s_clusterPoints;
+	let clusterPoints = scratch.clusterPoints;
 	let pointOffset = 0;
 
 	for (let i = 0; i < clusterCount; ++i) {
@@ -1300,31 +1364,20 @@ export unsafe function b3ComputeMeshManifolds(
 	for (let i = 0; i < clusterCount; ++i) {
 		ref cm = clusters[i];
 		if (B3_ASSERT_ENABLED) B3_ASSERT(cm.pointCount == cm.pointCapacity);
-		let reducedCount = b3ReduceCluster(clusterPoints, cm.pointOffset, cm.pointCount, cm.triangleNormal);
+		let reducedCount = b3ReduceCluster(clusterPoints, cm.pointOffset, cm.pointCount, cm.triangleNormal, scratch.cullPoints);
 		cm.pointCount = reducedCount;
 	}
 
 	// Make a temporary copy of previous manifolds
 	let oldManifoldCount = contact.manifoldCount;
-	if (s_oldManifolds.length < oldManifoldCount) {
-		let capacity = b3ScratchCapacity(s_oldManifolds.length, oldManifoldCount);
-		s_oldManifolds = new StaticArray<b3Manifold>(capacity);
-		s_consumed = new StaticArray<bool>(capacity);
-	}
-	let oldManifolds = s_oldManifolds;
+	let oldManifolds = scratch.oldManifolds;
 	b3CopyManifolds(oldManifolds, contact.manifolds, oldManifoldCount);
 
-	// Resize manifolds if needed
-	if (oldManifoldCount != clusterCount) {
-		b3FreeManifolds(world, contact.manifolds, contact.manifoldCount);
-		contact.manifolds = b3AllocateManifolds(world, clusterCount);
-		contact.manifoldCount = <i32>(<u16>clusterCount);
-	} else {
-		// Mem zero manifolds
-		b3ZeroManifolds(contact.manifolds, contact.manifoldCount);
-	}
+	// Resize manifolds; the storage has room, and C's fresh manifolds are zeroed ones
+	contact.manifoldCount = <i32>(<u16>clusterCount);
+	b3ZeroManifolds(contact.manifolds, clusterCount);
 
-	let consumed = s_consumed;
+	let consumed = scratch.consumed;
 	for (let i = 0; i < oldManifoldCount; ++i) {
 		consumed[i] = false;
 	}
@@ -1408,8 +1461,6 @@ export unsafe function b3ComputeMeshManifolds(
 	let materialsA = b3GetShapeMaterials(shapeA);
 	let materialB = b3GetShapeMaterials(shapeB)[0];
 	let tangentVelocityA = b3Vec3_zero;
-	let frictionCallback = world.frictionCallback!;
-	let restitutionCallback = world.restitutionCallback!;
 
 	// Update friction and restitution if the mesh has per triangle material
 	if (shapeA.materialCount > 0) {
@@ -1441,8 +1492,9 @@ export unsafe function b3ComputeMeshManifolds(
 
 				materialIndex = b3ClampInt(materialIndex, 0, shapeA.materialCount - 1);
 				let material = b3SurfaceMaterialAt(materialsA, materialIndex);
-				friction += frictionCallback(material.friction, material.userMaterialId, materialB.friction, materialB.userMaterialId);
-				restitution += restitutionCallback(
+				friction += b3MixFriction<M>(world, material.friction, material.userMaterialId, materialB.friction, materialB.userMaterialId);
+				restitution += b3MixRestitution<M>(
+					world,
 					material.restitution,
 					material.userMaterialId,
 					materialB.restitution,
@@ -1466,8 +1518,15 @@ export unsafe function b3ComputeMeshManifolds(
 		if (B3_ASSERT_ENABLED) B3_ASSERT(b3IsValidFloat(contact.restitution) && contact.restitution >= 0.0);
 	} else {
 		// Keep these updated in case the values on the shapes are modified
-		contact.friction = frictionCallback(b3SurfaceMaterialAt(materialsA, 0).friction, b3SurfaceMaterialAt(materialsA, 0).userMaterialId, materialB.friction, materialB.userMaterialId);
-		contact.restitution = restitutionCallback(
+		contact.friction = b3MixFriction<M>(
+			world,
+			b3SurfaceMaterialAt(materialsA, 0).friction,
+			b3SurfaceMaterialAt(materialsA, 0).userMaterialId,
+			materialB.friction,
+			materialB.userMaterialId,
+		);
+		contact.restitution = b3MixRestitution<M>(
+			world,
 			b3SurfaceMaterialAt(materialsA, 0).restitution,
 			b3SurfaceMaterialAt(materialsA, 0).userMaterialId,
 			materialB.restitution,

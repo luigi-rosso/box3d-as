@@ -3,7 +3,7 @@
 // AnimaScript port of src/triangle_manifold.c
 
 import { B3_ASSERT, B3_ASSERT_ENABLED, B3_NULL_INDEX, FLT_EPSILON, FLT_MAX, FLT_MIN, b3AtomicInt } from "./core";
-import { B3_LINEAR_SLOP, B3_SPECULATIVE_DISTANCE } from "./constants";
+import { B3_LINEAR_SLOP, B3_MAX_HULL_VERTICES, B3_MAX_WORKERS, B3_SPECULATIVE_DISTANCE } from "./constants";
 import {
 	b3AbsFloat,
 	b3Add,
@@ -85,8 +85,17 @@ struct b3TriangleData {
 	flags: i32 = 0;
 }
 
+// Built rather than array literals, which the rive-cli bake initializes on first read and so refuses in parallel code
+function b3MakeFeatureTable(features: Array<b3TriangleFeature>): StaticArray<b3TriangleFeature> {
+	let table = new StaticArray<b3TriangleFeature>(features.length);
+	for (let i = 0; i < features.length; ++i) {
+		table[i] = features[i];
+	}
+	return table;
+}
+
 // Indexed by the 3-bit vertex mask
-const s_triangleFeatures: StaticArray<b3TriangleFeature> = [
+const s_triangleFeatures = b3MakeFeatureTable([
 	b3_featureNone, // 000  (unreachable)
 	b3_featureVertex1, // 001
 	b3_featureVertex2, // 010
@@ -95,17 +104,36 @@ const s_triangleFeatures: StaticArray<b3TriangleFeature> = [
 	b3_featureEdge3, // 101  v1,v3
 	b3_featureEdge2, // 110  v2,v3
 	b3_featureTriangleFace, // 111
-];
+]);
 
-const s_edgeFeatures: StaticArray<b3TriangleFeature> = [b3_featureEdge1, b3_featureEdge2, b3_featureEdge3];
+const s_edgeFeatures = b3MakeFeatureTable([b3_featureEdge1, b3_featureEdge2, b3_featureEdge3]);
 
-// Scratch for the C stack buffers. b3CollideHullFace shares the larger pair, its 64 entries in C can overflow
-const s_segment = new StaticArray<b3ClipVertex>(2);
-const s_clipBuffer1 = new StaticArray<b3ClipVertex>(2 * B3_MAX_CLIP_POINTS);
-const s_clipBuffer2 = new StaticArray<b3ClipVertex>(2 * B3_MAX_CLIP_POINTS);
-const s_distanceInput = new b3DistanceInput();
-const s_capsulePoints = new StaticArray<b3Vec3>(2);
-const s_trianglePoints = new StaticArray<b3Vec3>(3);
+// Scratch for the C stack buffers, one set per worker since parallel parts collide at once. b3CollideHullFace shares
+// the larger pair, its 64 entries in C can overflow.
+class b3TriangleScratch {
+	segment: StaticArray<b3ClipVertex> = new StaticArray<b3ClipVertex>(2);
+	clipBuffer1: StaticArray<b3ClipVertex> = new StaticArray<b3ClipVertex>(2 * B3_MAX_CLIP_POINTS);
+	clipBuffer2: StaticArray<b3ClipVertex> = new StaticArray<b3ClipVertex>(2 * B3_MAX_CLIP_POINTS);
+	distanceInput: b3DistanceInput = new b3DistanceInput();
+	// The proxies own their points, since parallel code may not point a proxy at a hull's
+	trianglePoints: StaticArray<b3Vec3> = new StaticArray<b3Vec3>(3);
+	pointsB: StaticArray<b3Vec3> = new StaticArray<b3Vec3>(B3_MAX_HULL_VERTICES);
+
+	constructor() {
+		this.distanceInput.proxyA.points = this.trianglePoints;
+		this.distanceInput.proxyB.points = this.pointsB;
+	}
+}
+
+function b3MakeTriangleScratch(): StaticArray<b3TriangleScratch> {
+	let scratch = new StaticArray<b3TriangleScratch>(B3_MAX_WORKERS);
+	for (let i = 0; i < B3_MAX_WORKERS; ++i) {
+		scratch[i] = new b3TriangleScratch();
+	}
+	return scratch;
+}
+
+const s_triangleScratch = b3MakeTriangleScratch();
 
 function b3GetTriangleFeature(cache: b3SimplexCache): b3TriangleFeature {
 	let count = <i32>cache.count;
@@ -319,10 +347,12 @@ function b3BuildTriangleAndCapsuleFaceContact(
 	triangle: StaticArray<b3Vec3>,
 	plane: b3Plane,
 	capsule: b3Capsule,
+	workerIndex: i32,
 ): void {
+	let scratch = s_triangleScratch[workerIndex];
 	if (B3_ASSERT_ENABLED) B3_ASSERT(manifold.pointCount == 0);
 
-	let segment = s_segment;
+	let segment = scratch.segment;
 	segment[0].position = capsule.center1;
 	segment[0].separation = 0.0;
 	segment[0].pair = b3MakeFeaturePair(b3_featureShapeA, 0, b3_featureShapeA, 0);
@@ -427,7 +457,9 @@ export function b3CollideTriangleAndCapsule(
 	triangleA: StaticArray<b3Vec3>,
 	capsuleB: b3Capsule,
 	cache: ref b3SimplexCache,
+	workerIndex: i32 = 0,
 ): void {
+	let scratch = s_triangleScratch[workerIndex];
 	manifold.pointCount = 0;
 
 	if (capacity < 2) {
@@ -446,19 +478,20 @@ export function b3CollideTriangleAndCapsule(
 		return;
 	}
 
-	let distanceInput = s_distanceInput;
-	distanceInput.proxyA.points = triangleA;
+	let distanceInput = scratch.distanceInput;
+	scratch.trianglePoints[0] = v1;
+	scratch.trianglePoints[1] = v2;
+	scratch.trianglePoints[2] = v3;
 	distanceInput.proxyA.count = 3;
 	distanceInput.proxyA.radius = 0.0;
-	s_capsulePoints[0] = capsuleB.center1;
-	s_capsulePoints[1] = capsuleB.center2;
-	distanceInput.proxyB.points = s_capsulePoints;
+	scratch.pointsB[0] = capsuleB.center1;
+	scratch.pointsB[1] = capsuleB.center2;
 	distanceInput.proxyB.count = 2;
 	distanceInput.proxyB.radius = 0.0;
 	distanceInput.transform = b3Transform_identity;
 	distanceInput.useRadii = false;
 
-	let distanceOutput = b3ShapeDistance(distanceInput, cache, null, 0);
+	let distanceOutput = b3ShapeDistance(distanceInput, cache, null, 0, workerIndex);
 	let speculativeDistance = B3_SPECULATIVE_DISTANCE();
 	let radius = capsuleB.radius;
 	if (distanceOutput.distance > radius + speculativeDistance) {
@@ -475,7 +508,7 @@ export function b3CollideTriangleAndCapsule(
 		let cosAngle = b3AbsFloat(b3Dot(plane.normal, delta));
 		if (cosAngle > kTolerance) {
 			// Clip capsule segment against side planes of reference face
-			let segment = s_segment;
+			let segment = scratch.segment;
 			segment[0].position = capsuleB.center1;
 			segment[0].separation = 0.0;
 			segment[0].pair = b3MakeFeaturePair(b3_featureShapeA, 0, b3_featureShapeA, 0);
@@ -545,7 +578,7 @@ export function b3CollideTriangleAndCapsule(
 
 	// Create face contact
 	let faceSeparation = faceQuery.separation - radius;
-	b3BuildTriangleAndCapsuleFaceContact(manifold, triangleA, plane, capsuleB);
+	b3BuildTriangleAndCapsuleFaceContact(manifold, triangleA, plane, capsuleB, workerIndex);
 	if (manifold.pointCount == 2) {
 		// This becomes the clipped separation.
 		let base = manifold.pointOffset;
@@ -728,7 +761,9 @@ function b3CollideHullFace(
 	query: b3SeparatingAxis,
 	cache: ref b3SATCache,
 	enableSpeculative: bool,
+	workerIndex: i32,
 ): f32 {
+	let scratch = s_triangleScratch[workerIndex];
 	manifold.pointCount = 0;
 
 	let hullFaces = b3GetHullFaces(hull);
@@ -740,8 +775,8 @@ function b3CollideHullFace(
 	let refPlane = hullPlanes[query.indexB];
 
 	// Build clip polygon from triangle face (the incident face)
-	let buffer1 = s_clipBuffer1;
-	let buffer2 = s_clipBuffer2;
+	let buffer1 = scratch.clipBuffer1;
+	let buffer2 = scratch.clipBuffer2;
 
 	let v1 = triangle.v1;
 	let v2 = triangle.v2;
@@ -843,7 +878,9 @@ function b3CollideTriangleFace(
 	query: b3SeparatingAxis,
 	cache: ref b3SATCache,
 	enableSpeculative: bool,
+	workerIndex: i32,
 ): f32 {
+	let scratch = s_triangleScratch[workerIndex];
 	let hullFaces = b3GetHullFaces(hull);
 	let hullEdges = b3GetHullEdges(hull);
 	let hullPoints = b3GetHullPoints(hull);
@@ -854,8 +891,8 @@ function b3CollideTriangleFace(
 	let incFace = b3FindIncidentFace(hull, refPlane.normal, query.indexB);
 
 	// Build clip polygon from incident face
-	let buffer1 = s_clipBuffer1;
-	let buffer2 = s_clipBuffer2;
+	let buffer1 = scratch.clipBuffer1;
+	let buffer2 = scratch.clipBuffer2;
 	let pointCount = 0;
 	let faceEdge = <i32>hullFaces[incFace].edge;
 	let hullEdgeIndex = faceEdge;
@@ -1026,7 +1063,9 @@ export function b3CollideTriangleAndHull(
 	hullB: b3HullData,
 	cache: ref b3SATCache,
 	enableSpeculative: bool,
+	workerIndex: i32 = 0,
 ): void {
+	let scratch = s_triangleScratch[workerIndex];
 	manifold.pointCount = 0;
 	manifold.feature = b3_featureNone;
 
@@ -1110,6 +1149,7 @@ export function b3CollideTriangleAndHull(
 				faceQuery,
 				localCache,
 				enableSpeculative,
+				workerIndex,
 			);
 
 			if (manifold.pointCount > 0 && b3AbsFloat(cache.separation - clippedSeparation) < linearSlop) {
@@ -1172,6 +1212,7 @@ export function b3CollideTriangleAndHull(
 					faceQuery,
 					localCache,
 					enableSpeculative,
+					workerIndex,
 				);
 
 				// Cache reuse is only successful if it creates contact points and the clipped separation didn't change much.
@@ -1260,14 +1301,14 @@ export function b3CollideTriangleAndHull(
 		// This case is for testing
 		case b3_manualFaceAxisA: {
 			let query = b3QueryTriangleFace(triangle, hullB);
-			b3CollideTriangleFace(manifold, capacity, triangle, hullB, query, cache, enableSpeculative);
+			b3CollideTriangleFace(manifold, capacity, triangle, hullB, query, cache, enableSpeculative, workerIndex);
 			return;
 		}
 
 		// This case is for testing
 		case b3_manualFaceAxisB: {
 			let query = b3QueryHullFace(triangle, hullB);
-			b3CollideHullFace(manifold, capacity, triangle, hullB, query, cache, enableSpeculative);
+			b3CollideHullFace(manifold, capacity, triangle, hullB, query, cache, enableSpeculative, workerIndex);
 			return;
 		}
 
@@ -1327,9 +1368,9 @@ export function b3CollideTriangleAndHull(
 	// Need a tolerance to avoid ghost collisions.
 	let pushingDown = b3Dot(faceQueryB.normal, trianglePlane.normal) < -0.25;
 	if (faceQueryB.separation >= faceQueryA.separation && pushingDown == false) {
-		clipSeparation = b3CollideHullFace(manifold, capacity, triangle, hullB, faceQueryB, cache, enableSpeculative);
+		clipSeparation = b3CollideHullFace(manifold, capacity, triangle, hullB, faceQueryB, cache, enableSpeculative, workerIndex);
 	} else {
-		clipSeparation = b3CollideTriangleFace(manifold, capacity, triangle, hullB, faceQueryA, cache, enableSpeculative);
+		clipSeparation = b3CollideTriangleFace(manifold, capacity, triangle, hullB, faceQueryA, cache, enableSpeculative, workerIndex);
 	}
 
 	// Does an edge axis exist?
@@ -1353,22 +1394,24 @@ export function b3CollideTriangleAndHull(
 	// Using the speculative distance means that sometimes there are no valid contact points from SAT.
 	// In this fall back to GJK. This is important to prevent tunneling in rare cases.
 	if (manifold.pointCount == 0) {
-		let triangleB = s_trianglePoints;
+		let triangleB = scratch.trianglePoints;
 		triangleB[0] = v1;
 		triangleB[1] = v2;
 		triangleB[2] = v3;
-		let input = s_distanceInput;
-		input.proxyA.points = triangleB;
+		let input = scratch.distanceInput;
 		input.proxyA.count = 3;
 		input.proxyA.radius = 0.0;
-		input.proxyB.points = hullPoints;
+		let pointsB = scratch.pointsB;
+		for (let i = 0; i < hullB.vertexCount; ++i) {
+			pointsB[i] = hullPoints[i];
+		}
 		input.proxyB.count = hullB.vertexCount;
 		input.proxyB.radius = 0.0;
 		input.transform = b3Transform_identity;
 		input.useRadii = false;
 
 		let simplexCache = b3SimplexCache();
-		let output = b3ShapeDistance(input, simplexCache, null, 0);
+		let output = b3ShapeDistance(input, simplexCache, null, 0, workerIndex);
 
 		if (output.distance > 0.0) {
 			if (B3_ASSERT_ENABLED) B3_ASSERT(0 < simplexCache.count && simplexCache.count <= 3);

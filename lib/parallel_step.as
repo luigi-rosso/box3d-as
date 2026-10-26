@@ -22,6 +22,7 @@ import {
 	b3WarmStartJoints_Overflow,
 	b3SolveJoints_Overflow,
 } from "./joint";
+import { b3ReserveMeshScratchForWorkers } from "./mesh_contact";
 import { b3ExecuteBlock, b3SetLaneSolve, b3SolverStage, b3StepContext } from "./solver";
 import {
 	b3CollideTask,
@@ -216,6 +217,7 @@ function b3ParallelCollide(context: b3StepContext, contactCount: i32): bool {
 		}
 		taskContext.deferredCount = 0;
 	}
+	b3ReserveMeshScratchForWorkers(world.workerCount);
 
 	Parallel.run(b3ParallelCollideTask, context, contactCount, b3CollideBlockSize(contactCount, world.workerCount));
 

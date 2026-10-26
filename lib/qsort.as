@@ -68,10 +68,11 @@
 export const Q_THRESH: i32 = 16;
 
 // The C stack holds 32 (q_l, q_r) frames when Q_N is a 32 bit int.
-const q_st = new StaticArray<i32>(2 * 32);
+export const Q_STACK_SIZE: i32 = 2 * 32;
+const q_stack = new StaticArray<i32>(Q_STACK_SIZE);
 
-/* The main loop. */
-export function Q_LOOP<S>(Q_N: i32, s: S): void {
+/* The main loop. Parallel parts pass a stack of their own. */
+export function Q_LOOP<S>(Q_N: i32, s: S, q_st: StaticArray<i32> = q_stack): void {
   let q_l = 0;
   let q_r = Q_N - 1;
   let q_sp = 0; /* the number of frames pushed to the stack */
