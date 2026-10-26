@@ -747,8 +747,9 @@ unsafe function b3ZeroManifolds(manifolds: StaticArray<b3Manifold>, count: i32):
 }
 
 // The four lane prefilter of b3ComputeMeshManifolds: transforms the cached triangles into the frame of shape B, culls
-// those outside the hull bounds and writes the survivors. Its own function keeps the v128 lanes out of the caller's frame.
+// those outside the hull bounds and writes the survivors. Out of line, so its v128 lanes stay out of the caller's frame.
 @unchecked
+@noinline
 function b3PrefilterTriangles(
 	shapeA: b3Shape,
 	triangleCaches: Array<b3TriangleCache>,
@@ -1050,43 +1051,22 @@ export unsafe function b3ComputeMeshManifoldsAt<M>(
 		meshFlipped = meshScale.x * meshScale.y * meshScale.z < 0.0;
 	}
 
-	// Mesh and height field each call the prefilter, which keeps it a function of its own in the release bake
-	let survivorCount = 0;
-	if (meshVertices != null) {
-		survivorCount = b3PrefilterTriangles(
-			shapeA,
-			triangleCaches,
-			triangleCount,
-			meshTriangles,
-			meshVertices,
-			meshScale,
-			meshFlipped,
-			relativeMatrix,
-			transformAtoB.p,
-			hullB,
-			hullMargin.x,
-			survivorIndices,
-			survivorVertices,
-			scratch,
-		);
-	} else {
-		survivorCount = b3PrefilterTriangles(
-			shapeA,
-			triangleCaches,
-			triangleCount,
-			null,
-			null,
-			meshScale,
-			meshFlipped,
-			relativeMatrix,
-			transformAtoB.p,
-			hullB,
-			hullMargin.x,
-			survivorIndices,
-			survivorVertices,
-			scratch,
-		);
-	}
+	let survivorCount = b3PrefilterTriangles(
+		shapeA,
+		triangleCaches,
+		triangleCount,
+		meshTriangles,
+		meshVertices,
+		meshScale,
+		meshFlipped,
+		relativeMatrix,
+		transformAtoB.p,
+		hullB,
+		hullMargin.x,
+		survivorIndices,
+		survivorVertices,
+		scratch,
+	);
 
 	let vertices = scratch.triangleVertices;
 	for (let survivorIndex = 0; survivorIndex < survivorCount && totalPointCount + 3 < pointBufferCapacity; ++survivorIndex) {

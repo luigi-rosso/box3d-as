@@ -67,8 +67,3 @@ as_run() {
 } | tee "$LOG"
 
 python3 "$HERE/table.py" "$LOG"
-
-# The interpreter runs the SIMD artifact only while every v128 local stays below frame cell 256
-if [ "${WASM_SIMD:-on}" != off ]; then
-	python3 "$HERE/tools/v128cells.py" "$(ls -t "$CACHE"/*/*.wasm | head -1)" 240 || true
-fi

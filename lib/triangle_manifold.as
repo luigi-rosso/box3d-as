@@ -85,17 +85,8 @@ struct b3TriangleData {
 	flags: i32 = 0;
 }
 
-// Built rather than array literals, which the rive-cli bake initializes on first read and so refuses in parallel code
-function b3MakeFeatureTable(features: Array<b3TriangleFeature>): StaticArray<b3TriangleFeature> {
-	let table = new StaticArray<b3TriangleFeature>(features.length);
-	for (let i = 0; i < features.length; ++i) {
-		table[i] = features[i];
-	}
-	return table;
-}
-
 // Indexed by the 3-bit vertex mask
-const s_triangleFeatures = b3MakeFeatureTable([
+const s_triangleFeatures: StaticArray<b3TriangleFeature> = [
 	b3_featureNone, // 000  (unreachable)
 	b3_featureVertex1, // 001
 	b3_featureVertex2, // 010
@@ -104,9 +95,9 @@ const s_triangleFeatures = b3MakeFeatureTable([
 	b3_featureEdge3, // 101  v1,v3
 	b3_featureEdge2, // 110  v2,v3
 	b3_featureTriangleFace, // 111
-]);
+];
 
-const s_edgeFeatures = b3MakeFeatureTable([b3_featureEdge1, b3_featureEdge2, b3_featureEdge3]);
+const s_edgeFeatures: StaticArray<b3TriangleFeature> = [b3_featureEdge1, b3_featureEdge2, b3_featureEdge3];
 
 // Scratch for the C stack buffers, one set per worker since parallel parts collide at once. b3CollideHullFace shares
 // the larger pair, its 64 entries in C can overflow.

@@ -117,6 +117,27 @@ function b3BarycentricCoordsEdge(a: b3Vec3, b: b3Vec3): FixedArray<f32, 3> {
 	return out;
 }
 
+@inline function b3BarycentricCoordsTri(a: b3Vec3, b: b3Vec3, c: b3Vec3): FixedArray<f32, 4> {
+	let out: FixedArray<f32, 4>;
+	let ab = b3Sub(b, a);
+	let ac = b3Sub(c, a);
+
+	let bXC = b3Cross(b, c);
+	let cXA = b3Cross(c, a);
+	let aXB = b3Cross(a, b);
+
+	let abXAc = b3Cross(ab, ac);
+
+	// Last element is divisor
+	let divisor = b3Dot(abXAc, abXAc);
+
+	out[0] = b3Dot(bXC, abXAc);
+	out[1] = b3Dot(cXA, abXAc);
+	out[2] = b3Dot(aXB, abXAc);
+	out[3] = divisor;
+	return out;
+}
+
 function b3BarycentricCoordsTet(a: b3Vec3, b: b3Vec3, c: b3Vec3, d: b3Vec3): FixedArray<f32, 5> {
 	let out: FixedArray<f32, 5>;
 	let ab = b3Sub(b, a);
@@ -276,18 +297,7 @@ function b3SolveSimplex3(simplex: ref b3Simplex): bool {
 	}
 
 	// Edge regions
-	// wABC = b3BarycentricCoordsTri( v1.w, v2.w, v3.w ) written out: with no calls left in
-	// b3ShapeDistance, WAMR keeps the memory base and bound in registers there (notes/perf_3.md)
-	let wABC: FixedArray<f32, 4>;
-	{
-		let ab = b3Sub(v2.w, v1.w);
-		let ac = b3Sub(v3.w, v1.w);
-		let abXAc = b3Cross(ab, ac);
-		wABC[0] = b3Dot(b3Cross(v2.w, v3.w), abXAc);
-		wABC[1] = b3Dot(b3Cross(v3.w, v1.w), abXAc);
-		wABC[2] = b3Dot(b3Cross(v1.w, v2.w), abXAc);
-		wABC[3] = b3Dot(abXAc, abXAc);
-	}
+	let wABC = b3BarycentricCoordsTri(v1.w, v2.w, v3.w);
 
 	// VR( AB )
 	if (wABC[2] <= 0.0 && wAB[0] > 0.0 && wAB[1] > 0.0) {
@@ -421,50 +431,10 @@ function b3SolveSimplex4(simplex: ref b3Simplex): bool {
 	}
 
 	// Edge region
-	// wACB = b3BarycentricCoordsTri( vertexA.w, vertexC.w, vertexB.w ) written out
-	let wACB: FixedArray<f32, 4>;
-	{
-		let ab = b3Sub(vertexC.w, vertexA.w);
-		let ac = b3Sub(vertexB.w, vertexA.w);
-		let abXAc = b3Cross(ab, ac);
-		wACB[0] = b3Dot(b3Cross(vertexC.w, vertexB.w), abXAc);
-		wACB[1] = b3Dot(b3Cross(vertexB.w, vertexA.w), abXAc);
-		wACB[2] = b3Dot(b3Cross(vertexA.w, vertexC.w), abXAc);
-		wACB[3] = b3Dot(abXAc, abXAc);
-	}
-	// wABD = b3BarycentricCoordsTri( vertexA.w, vertexB.w, vertexD.w ) written out
-	let wABD: FixedArray<f32, 4>;
-	{
-		let ab = b3Sub(vertexB.w, vertexA.w);
-		let ac = b3Sub(vertexD.w, vertexA.w);
-		let abXAc = b3Cross(ab, ac);
-		wABD[0] = b3Dot(b3Cross(vertexB.w, vertexD.w), abXAc);
-		wABD[1] = b3Dot(b3Cross(vertexD.w, vertexA.w), abXAc);
-		wABD[2] = b3Dot(b3Cross(vertexA.w, vertexB.w), abXAc);
-		wABD[3] = b3Dot(abXAc, abXAc);
-	}
-	// wADC = b3BarycentricCoordsTri( vertexA.w, vertexD.w, vertexC.w ) written out
-	let wADC: FixedArray<f32, 4>;
-	{
-		let ab = b3Sub(vertexD.w, vertexA.w);
-		let ac = b3Sub(vertexC.w, vertexA.w);
-		let abXAc = b3Cross(ab, ac);
-		wADC[0] = b3Dot(b3Cross(vertexD.w, vertexC.w), abXAc);
-		wADC[1] = b3Dot(b3Cross(vertexC.w, vertexA.w), abXAc);
-		wADC[2] = b3Dot(b3Cross(vertexA.w, vertexD.w), abXAc);
-		wADC[3] = b3Dot(abXAc, abXAc);
-	}
-	// wBCD = b3BarycentricCoordsTri( vertexB.w, vertexC.w, vertexD.w ) written out
-	let wBCD: FixedArray<f32, 4>;
-	{
-		let ab = b3Sub(vertexC.w, vertexB.w);
-		let ac = b3Sub(vertexD.w, vertexB.w);
-		let abXAc = b3Cross(ab, ac);
-		wBCD[0] = b3Dot(b3Cross(vertexC.w, vertexD.w), abXAc);
-		wBCD[1] = b3Dot(b3Cross(vertexD.w, vertexB.w), abXAc);
-		wBCD[2] = b3Dot(b3Cross(vertexB.w, vertexC.w), abXAc);
-		wBCD[3] = b3Dot(abXAc, abXAc);
-	}
+	let wACB = b3BarycentricCoordsTri(vertexA.w, vertexC.w, vertexB.w);
+	let wABD = b3BarycentricCoordsTri(vertexA.w, vertexB.w, vertexD.w);
+	let wADC = b3BarycentricCoordsTri(vertexA.w, vertexD.w, vertexC.w);
+	let wBCD = b3BarycentricCoordsTri(vertexB.w, vertexC.w, vertexD.w);
 
 	// VR( AB )
 	if (wABD[2] <= 0.0 && wACB[1] <= 0.0 && wAB[0] > 0.0 && wAB[1] > 0.0) {
