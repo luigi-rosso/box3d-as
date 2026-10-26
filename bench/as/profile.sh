@@ -37,7 +37,9 @@ until grep -q "BENCH start" "$OUT/run.log" 2>/dev/null; do
 done
 PID=$(pgrep -n -f "bench=$((STEPS + 10)) --define=SCENE=$SCENE")
 vmmap -wide "$PID" > "$OUT/vmmap.txt"
-REGION=$(grep -E '^VM_ALLOCATE .*\] rwx/rwx' "$OUT/vmmap.txt" | head -1 | awk '{split($2, r, "-"); print r[1]}')
+# The largest rwx mapping is the main module's code; lane modules map their own, smaller ones
+REGION=$(grep -E '^VM_ALLOCATE .*\] rwx/rwx' "$OUT/vmmap.txt" | awk '{print $2}' |
+	python3 -c "import sys; r = [l.split('-') for l in sys.stdin.read().split()]; print(max(r, key=lambda a: int(a[1], 16) - int(a[0], 16))[0])")
 rm -rf "$OUT/profile.trace"
 xctrace record --template 'Time Profiler' --attach "$PID" --time-limit "${SECONDS_}s" --output "$OUT/profile.trace" > /dev/null
 wait
@@ -45,9 +47,9 @@ grep "BENCH RESULT" "$OUT/run.log"
 
 AOT=$(ls -t "$CACHE"/*/*.aot | head -1)
 WASM=${AOT%.aot}.wasm
-"$WAMRC" --bounds-checks=1 --opt-level=3 --cpu=generic --cpu-features=+reserve-x18 --tune-cpu=apple-m1 \
+"$WAMRC" --bounds-checks=1 --opt-level=3 --cpu=generic --cpu-features=+reserve-x18,+lse --tune-cpu=apple-m1 \
 	--format=object -o "$OUT/module.o" "$WASM" > /dev/null
-"$WAMRC" --bounds-checks=1 --opt-level=3 --cpu=generic --cpu-features=+reserve-x18 --tune-cpu=apple-m1 \
+"$WAMRC" --bounds-checks=1 --opt-level=3 --cpu=generic --cpu-features=+reserve-x18,+lse --tune-cpu=apple-m1 \
 	-o "$OUT/check.aot" "$WASM" > /dev/null
 cmp -s "$OUT/check.aot" "$AOT" || echo "warning: wamrc flags differ from the ladder's, symbols may be off"
 xctrace export --input "$OUT/profile.trace" \
