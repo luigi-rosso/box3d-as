@@ -1,0 +1,40 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Box3D lanes bench</title>
+<script type="module">
+// lanes.mjs on a page: librive's web scripting page harness loads a bench/threads bake and runs frames until
+// the script logs its BENCH RESULT, yielding to the event loop between frames as a page does
+window.runRiv = async ( name, seconds ) =>
+{
+	const lines = [];
+	let result = null;
+	const print = ( text ) =>
+	{
+		lines.push( text );
+		if ( text.includes( 'BENCH RESULT' ) )
+		{
+			result = text;
+		}
+	};
+	const createHarness = ( await import( '/harness/web_scripting_page.mjs' ) ).default;
+	const Module = await createHarness( { print, printErr: print } );
+	const bytes = new Uint8Array( await ( await fetch( `out/lanes/${name}.riv` ) ).arrayBuffer() );
+	const ptr = Module._malloc( bytes.length );
+	Module.HEAPU8.set( bytes, ptr );
+	if ( !Module._harness_import( ptr, bytes.length ) )
+	{
+		return { error: 'import failed', lines };
+	}
+	Module._free( ptr );
+	await Module.riveScripting.prepare();
+	Module._harness_run( 1 );
+	const deadline = performance.now() + seconds * 1000;
+	while ( result === null && performance.now() < deadline )
+	{
+		await new Promise( ( settle ) => setTimeout( settle, 0 ) );
+		Module._harness_frames( 1 );
+	}
+	return { result, lines: result === null ? lines : [], crossOriginIsolated: self.crossOriginIsolated };
+};
+window.ready = true;
+</script>
