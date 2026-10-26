@@ -20,6 +20,8 @@ import {
 	b3GetMillisecondsAndReset,
 	b3GetTicks,
 	b3Log,
+	b3InParallel,
+	b3OnMain,
 	b3Ticks,
 } from "./core";
 import {
@@ -87,6 +89,7 @@ import {
 	b3JointId,
 	b3ShapeId,
 	b3_dynamicBody,
+	b3_compoundShape,
 	b3_heightShape,
 	b3_hullShape,
 	b3_capsuleShape,
@@ -95,7 +98,13 @@ import {
 	b3_sphereShape,
 	b3_staticBody,
 } from "./types";
-import { b3DynamicTree_EnlargeProxy, b3DynamicTree_Query, b3DynamicTree_Refit } from "./dynamic_tree";
+import {
+	B3_TREE_STACK_SIZE,
+	b3DynamicTree_EnlargeProxy,
+	b3DynamicTree_Query,
+	b3DynamicTree_QueryVisitor,
+	b3DynamicTree_Refit,
+} from "./dynamic_tree";
 import { b3DynamicTree_GetAABB } from "./collision";
 import {
 	b3ArrayData,
@@ -134,7 +143,7 @@ import {
 	b3WarmStartJoint,
 	b3WarmStartJoints_Overflow,
 } from "./joint";
-import { b3TaskContext, b3World, b3_awakeSet } from "./physics_world";
+import { b3TaskContext, b3World, b3_awakeSet, b3_staticSet } from "./physics_world";
 import { B3_OVERFLOW_INDEX, b3ConstraintGraph } from "./constraint_graph";
 import {
 	b3ContactConstraint,
@@ -166,7 +175,15 @@ import {
 	b3_enablePreSolveEvents,
 	b3_enableSensorEvents,
 } from "./shape";
-import { b3Shape, b3ComputeFatShapeAABB, b3ComputeShapeAABB, b3ComputeShapeMinExtent, b3GetShapeUserMaterialId, b3ShapeTimeOfImpact, b3ShouldShapesCollide } from "./shape";
+import {
+	b3Shape,
+	b3ComputeFatShapeAABB,
+	b3ComputeShapeAABB,
+	b3ComputeShapeMinExtent,
+	b3GetShapeUserMaterialId,
+	b3ShapeTimeOfImpactAt,
+	b3ShouldShapesCollide,
+} from "./shape";
 import { B3_PROXY_ID, b3BroadPhase_MarkProxyMoved } from "./broad_phase";
 import { b3ParallelFor } from "./parallel_for";
 import { b3SplitIslandTask } from "./island";
@@ -366,6 +383,9 @@ export class b3StepContext {
 	bulletBodyCount: b3AtomicInt = b3AtomicInt();
 
 	anyRestitution: b3AtomicInt = b3AtomicInt();
+
+	// Whether parallel parts finalizing bodies sweep fast ones too, b3PrepareParallelContinuous
+	parallelContinuous: bool = false;
 
 	// Contact ids for simplified parallel-for access. Used in narrow-phase.
 	// These contacts may or may not be touching. They are associated with awake bodies.
@@ -784,7 +804,8 @@ class b3ContinuousContext {
 	// The fast body sim's flags and body id, all the query reads of it; neither changes during the sweep.
 	fastBodySimFlags: u32 = 0;
 	fastBodyId: i32 = 0;
-	fastShape: b3Shape = b3_noShape;
+	// An index rather than C's pointer, as parallel parts may not store references
+	fastShapeId: i32 = 0;
 	centroid1: b3Vec3 = b3Vec3();
 	centroid2: b3Vec3 = b3Vec3();
 	sweep: b3Sweep = b3Sweep();
@@ -811,10 +832,11 @@ function b3MakeShapeId(index1: i32, world0: u16, generation: u16): b3ShapeId {
 }
 
 // This is called from b3DynamicTree_Query for continuous collision
-function b3ContinuousQueryCallback(proxyId: i32, userData: u64, continuousContext: b3ContinuousContext): bool {
+function b3ContinuousQueryCallback<M>(proxyId: i32, userData: u64, continuousContext: b3ContinuousContext, workerIndex: i32): bool {
 	let shapeId = <i32>userData;
 
-	let fastShape = continuousContext.fastShape;
+	let world = continuousContext.world!;
+	let fastShape = world.shapes[continuousContext.fastShapeId];
 	let fastBodySimFlags = continuousContext.fastBodySimFlags;
 	let fastBodyId = continuousContext.fastBodyId;
 
@@ -825,7 +847,6 @@ function b3ContinuousQueryCallback(proxyId: i32, userData: u64, continuousContex
 		return true;
 	}
 
-	let world = continuousContext.world!;
 	let shape = world.shapes[shapeId];
 
 	// Skip same body
@@ -861,15 +882,17 @@ function b3ContinuousQueryCallback(proxyId: i32, userData: u64, continuousContex
 		return true;
 	}
 
-	// Custom user filtering
-	if ((shape.flags & b3_enableCustomFiltering) != 0 || (fastShape.flags & b3_enableCustomFiltering) != 0) {
-		let customFilterFcn = world.customFilterFcn;
-		if (customFilterFcn != null) {
-			let idA = b3MakeShapeId(shape.id + 1, world.worldId, shape.generation);
-			let idB = b3MakeShapeId(fastShape.id + 1, world.worldId, fastShape.generation);
-			canCollide = customFilterFcn(idA, idB);
-			if (canCollide == false) {
-				return true;
+	// Custom user filtering; parallel parts run only without a custom filter
+	if (!isBoolean<M>()) {
+		if ((shape.flags & b3_enableCustomFiltering) != 0 || (fastShape.flags & b3_enableCustomFiltering) != 0) {
+			let customFilterFcn = world.customFilterFcn;
+			if (customFilterFcn != null) {
+				let idA = b3MakeShapeId(shape.id + 1, world.worldId, shape.generation);
+				let idB = b3MakeShapeId(fastShape.id + 1, world.worldId, fastShape.generation);
+				canCollide = customFilterFcn(idA, idB);
+				if (canCollide == false) {
+					return true;
+				}
 			}
 		}
 	}
@@ -878,7 +901,7 @@ function b3ContinuousQueryCallback(proxyId: i32, userData: u64, continuousContex
 	let sweepA = b3MakeRelativeSweepAt(bodySim, continuousContext.base);
 
 	// Time of impact versus shape. Supports all shape types
-	let output = b3ShapeTimeOfImpact(shape, fastShape, sweepA, continuousContext.sweep, continuousContext.fraction);
+	let output = b3ShapeTimeOfImpactAt<M>(shape, fastShape, sweepA, continuousContext.sweep, continuousContext.fraction, workerIndex);
 	if (isSensor) {
 		// Only accept a sensor hit that is sooner than the current solid hit.
 		if (output.fraction <= continuousContext.fraction && continuousContext.sensorCount < B2_MAX_CONTINUOUS_SENSOR_HITS) {
@@ -894,11 +917,14 @@ function b3ContinuousQueryCallback(proxyId: i32, userData: u64, continuousContex
 	} else if (0.0 < output.fraction && output.fraction < continuousContext.fraction) {
 		let didHit = true;
 
-		if (didHit && ((shape.flags & b3_enablePreSolveEvents) != 0 || (fastShape.flags & b3_enablePreSolveEvents) != 0)) {
-			let shapeIdA = b3MakeShapeId(shape.id + 1, world.worldId, shape.generation);
-			let shapeIdB = b3MakeShapeId(fastShape.id + 1, world.worldId, fastShape.generation);
-			let point = b3OffsetPos(continuousContext.base, output.point);
-			didHit = world.preSolveFcn!(shapeIdA, shapeIdB, point, output.normal);
+		// Parallel parts run only without a pre-solve callback
+		if (!isBoolean<M>()) {
+			if (didHit && ((shape.flags & b3_enablePreSolveEvents) != 0 || (fastShape.flags & b3_enablePreSolveEvents) != 0)) {
+				let shapeIdA = b3MakeShapeId(shape.id + 1, world.worldId, shape.generation);
+				let shapeIdB = b3MakeShapeId(fastShape.id + 1, world.worldId, fastShape.generation);
+				let point = b3OffsetPos(continuousContext.base, output.point);
+				didHit = world.preSolveFcn!(shapeIdA, shapeIdB, point, output.normal);
+			}
 		}
 
 		if (didHit) {
@@ -917,7 +943,57 @@ const s_continuousContext = new b3ContinuousContext();
 
 // The tree callback of b3SolveContinuous, which does not nest
 function b3ContinuousTreeCallback(proxyId: i32, userData: u64): bool {
-	return b3ContinuousQueryCallback(proxyId, userData, s_continuousContext);
+	return b3ContinuousQueryCallback<b3OnMain>(proxyId, userData, s_continuousContext, 0);
+}
+
+// The continuous context, tree query stack and visitor of each worker, for parallel parts
+class b3ContinuousScratch {
+	context: b3ContinuousContext = new b3ContinuousContext();
+	stack: StaticArray<i32> = new StaticArray<i32>(B3_TREE_STACK_SIZE);
+	workerIndex: i32;
+
+	constructor(workerIndex: i32) {
+		this.workerIndex = workerIndex;
+	}
+
+	visit(proxyId: i32, userData: u64): bool {
+		return b3ContinuousQueryCallback<b3InParallel>(proxyId, userData, this.context, this.workerIndex);
+	}
+}
+
+function b3MakeContinuousScratch(): StaticArray<b3ContinuousScratch> {
+	let scratch = new StaticArray<b3ContinuousScratch>(B3_MAX_WORKERS);
+	for (let i = 0; i < B3_MAX_WORKERS; ++i) {
+		scratch[i] = new b3ContinuousScratch(i);
+	}
+	return scratch;
+}
+
+const s_continuousScratch = b3MakeContinuousScratch();
+
+// Whether parallel parts can sweep world's fast bodies: they cannot call its filter or pre-solve callbacks, push
+// sensor hits, or sweep against a static compound. Points each worker's continuous context at world.
+export function b3PrepareParallelContinuous(world: b3World): bool {
+	if (world.customFilterFcn != null || world.preSolveFcn != null || world.sensors.length > 0) {
+		return false;
+	}
+
+	let staticSims = world.solverSets[b3_staticSet].bodySims;
+	for (let i = 0; i < staticSims.length; ++i) {
+		let shapeId = world.bodies[staticSims[i].bodyId].headShapeId;
+		while (shapeId != B3_NULL_INDEX) {
+			let shape = world.shapes[shapeId];
+			if (shape.type == b3_compoundShape) {
+				return false;
+			}
+			shapeId = shape.nextShapeId;
+		}
+	}
+
+	for (let i = 0; i < world.workerCount; ++i) {
+		s_continuousScratch[i].context.world = world;
+	}
+	return true;
 }
 
 function b3IsShapeFast(shape: b3Shape, centroid1: b3Vec3, centroid2: b3Vec3, rotationChord: f32, safetyFactor: f32): bool {
@@ -947,7 +1023,7 @@ function b3IsShapeFast(shape: b3Shape, centroid1: b3Vec3, centroid2: b3Vec3, rot
 }
 
 // Continuous collision of dynamic versus static
-unsafe function b3SolveContinuous(world: b3World, bodySimIndex: i32, taskContext: b3TaskContext, dt: f32): void {
+unsafe function b3SolveContinuous<M>(world: b3World, bodySimIndex: i32, taskContext: b3TaskContext, dt: f32, workerIndex: i32): void {
 	let awakeSet = world.solverSets[b3_awakeSet];
 	let fastBodySim = b3ArrayData(awakeSet.bodySims) + <usize>bodySimIndex * sizeof<b3BodySim>();
 	B3_ASSERT((load<u32>(fastBodySim + FSIM_FLAGS) & b3_isFast) != 0);
@@ -971,9 +1047,14 @@ unsafe function b3SolveContinuous(world: b3World, bodySimIndex: i32, taskContext
 	let fastBodyId = load<i32>(fastBodySim + FSIM_BODYID);
 	let fastBodySimFlags = load<u32>(fastBodySim + FSIM_FLAGS);
 
-	// C's zeroed stack context; the fields not reset here are written before they are read
-	let context = s_continuousContext;
-	context.world = world;
+	// C's zeroed stack context; the fields not reset here are written before they are read. A parallel part's already
+	// points at world.
+	let scratch = s_continuousScratch[workerIndex];
+	let context = scratch.context;
+	if (!isBoolean<M>()) {
+		context = s_continuousContext;
+		context.world = world;
+	}
 	context.sweep = sweep;
 	context.base = base;
 	context.fastBodySimFlags = fastBodySimFlags;
@@ -995,7 +1076,7 @@ unsafe function b3SolveContinuous(world: b3World, bodySimIndex: i32, taskContext
 		let fastShape = world.shapes[shapeId];
 		shapeId = fastShape.nextShapeId;
 
-		context.fastShape = fastShape;
+		context.fastShapeId = fastShape.id;
 		context.centroid1 = b3TransformPoint(xf1, fastShape.localCentroid);
 		context.centroid2 = b3TransformPoint(xf2, fastShape.localCentroid);
 
@@ -1024,11 +1105,20 @@ unsafe function b3SolveContinuous(world: b3World, bodySimIndex: i32, taskContext
 		}
 
 		let sweptBox = b3AABB_Union(box1, box2);
-		b3DynamicTree_Query(staticTree, sweptBox, B3_DEFAULT_MASK_BITS, false, callback);
+		if (isBoolean<M>()) {
+			b3DynamicTree_QueryVisitor<b3ContinuousScratch>(staticTree, sweptBox, B3_DEFAULT_MASK_BITS, false, scratch, scratch.stack);
 
-		if (isBullet) {
-			b3DynamicTree_Query(kinematicTree, sweptBox, B3_DEFAULT_MASK_BITS, false, callback);
-			b3DynamicTree_Query(dynamicTree, sweptBox, B3_DEFAULT_MASK_BITS, false, callback);
+			if (isBullet) {
+				b3DynamicTree_QueryVisitor<b3ContinuousScratch>(kinematicTree, sweptBox, B3_DEFAULT_MASK_BITS, false, scratch, scratch.stack);
+				b3DynamicTree_QueryVisitor<b3ContinuousScratch>(dynamicTree, sweptBox, B3_DEFAULT_MASK_BITS, false, scratch, scratch.stack);
+			}
+		} else {
+			b3DynamicTree_Query(staticTree, sweptBox, B3_DEFAULT_MASK_BITS, false, callback);
+
+			if (isBullet) {
+				b3DynamicTree_Query(kinematicTree, sweptBox, B3_DEFAULT_MASK_BITS, false, callback);
+				b3DynamicTree_Query(dynamicTree, sweptBox, B3_DEFAULT_MASK_BITS, false, callback);
+			}
 		}
 	}
 
@@ -1116,11 +1206,13 @@ unsafe function b3SolveContinuous(world: b3World, bodySimIndex: i32, taskContext
 		}
 	}
 
-	// Push sensor hits on the the task context for serial processing.
-	for (let i = 0; i < context.sensorCount; ++i) {
-		// Skip any sensor hits that occurred after a solid hit
-		if (context.sensorFractions[i] < context.fraction) {
-			taskContext.sensorHits.push(context.sensorHits[i]);
+	// Push sensor hits on the the task context for serial processing. Parallel parts run only without sensors.
+	if (!isBoolean<M>()) {
+		for (let i = 0; i < context.sensorCount; ++i) {
+			// Skip any sensor hits that occurred after a solid hit
+			if (context.sensorFractions[i] < context.fraction) {
+				taskContext.sensorHits.push(context.sensorHits[i]);
+			}
 		}
 	}
 
@@ -1166,7 +1258,44 @@ function b3MakeBodyMoveId(index1: i32, world0: u16, generation: u16): b3BodyId {
 	store<f32>(dst + 32, axz * r.cx.z + ayz * r.cy.z + azz * r.cz.z);
 }
 
-unsafe function b3FinalizeBodiesTask(startIndex: i32, endIndex: i32, workerIndex: i32, stepContext: b3StepContext): void {
+function b3LogUnstableBody(world: b3World, bodyId: i32): void {
+	let name = b3FindNameWithDefault(world.names, world.bodies[bodyId].nameId, "NULL");
+	b3Log("unstable: " + name);
+}
+
+@inline unsafe function b3UpdateWorldInertia(sim: usize): void {
+	let rotationMatrix = b3MakeMatrixFromQuat(load<b3Quat>(sim + FSIM_Q));
+	b3StoreWorldInertia(sim + FSIM_INVINERTIAWORLD, rotationMatrix, load<b3Matrix3>(sim + FSIM_INVINERTIALOCAL));
+}
+
+// What b3FinalizeBodiesTask does for the fast bodies and unstable bodies a parallel part left to the main lane
+export unsafe function b3FinishParallelFinalize(world: b3World, stepContext: b3StepContext): void {
+	let sims = b3ArrayData(stepContext.sims);
+	let states = b3ArrayData(stepContext.states);
+	let unstableCount = 0;
+	for (let i = 0; i < world.workerCount; ++i) {
+		let taskContext = world.taskContexts[i];
+		let deferred = taskContext.deferredBodies;
+		for (let k = 0; k < taskContext.deferredBodyCount; ++k) {
+			let simIndex = deferred[k];
+			b3SolveContinuous<b3OnMain>(world, simIndex, taskContext, stepContext.dt, i);
+			b3UpdateWorldInertia(sims + <usize>simIndex * sizeof<b3BodySim>());
+		}
+		unstableCount += taskContext.unstableCount;
+	}
+
+	// C logs each as it finds it; these are the same bodies in sim order
+	if (unstableCount > 0) {
+		for (let simIndex = 0; simIndex < stepContext.sims.length; ++simIndex) {
+			let state = states + <usize>simIndex * sizeof<b3BodyState>();
+			if (b3IsValidVec3(load<b3Vec3>(state + FS_V)) == false || b3IsValidVec3(load<b3Vec3>(state + FS_W)) == false) {
+				b3LogUnstableBody(world, load<i32>(sims + <usize>simIndex * sizeof<b3BodySim>() + FSIM_BODYID));
+			}
+		}
+	}
+}
+
+export unsafe function b3FinalizeBodiesTask<M>(startIndex: i32, endIndex: i32, workerIndex: i32, stepContext: b3StepContext): void {
 	let world = stepContext.world;
 	let bodies = b3ArrayData(world.bodies);
 	let sims = b3ArrayData(stepContext.sims);
@@ -1187,6 +1316,7 @@ unsafe function b3FinalizeBodiesTask(startIndex: i32, endIndex: i32, workerIndex
 	let awakeIslandBitSet = taskContext.awakeIslandBitSet;
 
 	let speculativeScalar = B3_SPECULATIVE_DISTANCE();
+	let parallelContinuous = stepContext.parallelContinuous;
 
 	for (let simIndex = startIndex; simIndex < endIndex; ++simIndex) {
 		let state = states + <usize>simIndex * sizeof<b3BodyState>();
@@ -1202,8 +1332,11 @@ unsafe function b3FinalizeBodiesTask(startIndex: i32, endIndex: i32, workerIndex
 		let bodyId = load<i32>(sim + FSIM_BODYID);
 
 		if (b3IsValidVec3(v) == false || b3IsValidVec3(w) == false) {
-			let name = b3FindNameWithDefault(world.names, world.bodies[bodyId].nameId, "NULL");
-			b3Log("unstable: " + name);
+			if (isBoolean<M>()) {
+				taskContext.unstableCount += 1;
+			} else {
+				b3LogUnstableBody(world, bodyId);
+			}
 		}
 
 		B3_ASSERT(b3IsValidVec3(v));
@@ -1286,10 +1419,24 @@ unsafe function b3FinalizeBodiesTask(startIndex: i32, endIndex: i32, workerIndex
 				// Store in fast array for the continuous collision stage
 				// This is deterministic because the order of TOI sweeps doesn't matter
 				if ((simFlags & b3_isBullet) != 0) {
-					let bulletIndex = b3AtomicFetchAddInt(stepContext.bulletBodyCount, 1);
+					let bulletIndex: i32;
+					if (isBoolean<M>()) {
+						let count = changetype<usize>(stepContext) + offsetof<b3StepContext>("bulletBodyCount");
+						bulletIndex = atomic.add<i32>(count + offsetof<b3AtomicInt>("value"), 1);
+					} else {
+						bulletIndex = b3AtomicFetchAddInt(stepContext.bulletBodyCount, 1);
+					}
 					stepContext.bulletBodies[bulletIndex] = simIndex;
+				} else if (isBoolean<M>()) {
+					if (parallelContinuous) {
+						b3SolveContinuous<M>(world, simIndex, taskContext, timeStep, workerIndex);
+					} else {
+						// The main lane sweeps it after the parts, then updates its inertia, b3FinishParallelFinalize
+						taskContext.deferredBodies[taskContext.deferredBodyCount] = simIndex;
+						taskContext.deferredBodyCount += 1;
+					}
 				} else {
-					b3SolveContinuous(world, simIndex, taskContext, timeStep);
+					b3SolveContinuous<M>(world, simIndex, taskContext, timeStep, workerIndex);
 				}
 			} else {
 				// Body is safe to advance
@@ -1306,8 +1453,7 @@ unsafe function b3FinalizeBodiesTask(startIndex: i32, endIndex: i32, workerIndex
 		}
 
 		// Update world space inverse inertia tensor. The sweep may have moved the body.
-		let rotationMatrix = b3MakeMatrixFromQuat(load<b3Quat>(sim + FSIM_Q));
-		b3StoreWorldInertia(sim + FSIM_INVINERTIAWORLD, rotationMatrix, load<b3Matrix3>(sim + FSIM_INVINERTIALOCAL));
+		b3UpdateWorldInertia(sim);
 
 		// Any single body in an island can keep it awake
 		let sleepTime = load<f32>(body + FB_SLEEPTIME);
@@ -1470,6 +1616,15 @@ function b3InitColorStages(
 
 // Runs the solver stages of a step somewhere else, such as on script lanes, or answers false to leave them here
 export type b3LaneSolveFcn = (context: b3StepContext) => bool;
+
+// Finalizes a step's awake bodies somewhere else, such as on parallel calls, or answers false to leave them here
+export type b3LaneFinalizeFcn = (context: b3StepContext, bodyCount: i32) => bool;
+
+let b3_laneFinalize: b3LaneFinalizeFcn? = null;
+
+export function b3SetLaneFinalize(fcn: b3LaneFinalizeFcn?): void {
+	b3_laneFinalize = fcn;
+}
 
 let b3_laneSolve: b3LaneSolveFcn? = null;
 
@@ -1870,7 +2025,7 @@ function b3BulletBodyTask(startIndex: i32, endIndex: i32, workerIndex: i32, step
 
 	for (let i = startIndex; i < endIndex; ++i) {
 		let simIndex = stepContext.bulletBodies[i];
-		b3SolveContinuous(stepContext.world, simIndex, taskContext, stepContext.dt);
+		b3SolveContinuous<b3OnMain>(stepContext.world, simIndex, taskContext, stepContext.dt, workerIndex);
 	}
 }
 
@@ -2579,14 +2734,17 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 		}
 
 		// Finalize bodies. Must happen after the constraint solver and after island splitting.
-		b3ParallelFor(
-			world,
-			(startIndex: i32, endIndex: i32, workerIndex: i32): void =>
-				b3FinalizeBodiesTask(startIndex, endIndex, workerIndex, stepContext),
-			awakeBodyCount,
-			8,
-			"ccd"
-		);
+		let laneFinalize = b3_laneFinalize;
+		if (laneFinalize == null || laneFinalize(stepContext, awakeBodyCount) == false) {
+			b3ParallelFor(
+				world,
+				(startIndex: i32, endIndex: i32, workerIndex: i32): void =>
+					b3FinalizeBodiesTask<b3OnMain>(startIndex, endIndex, workerIndex, stepContext),
+				awakeBodyCount,
+				8,
+				"ccd"
+			);
+		}
 
 		overflow.manifoldConstraints = b3_emptyManifoldConstraints;
 		overflow.contactConstraints = b3_emptyContactConstraints;

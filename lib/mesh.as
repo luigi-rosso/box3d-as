@@ -52,6 +52,7 @@ import {
 	b3MeshDef,
 	b3MeshNode,
 	b3MeshQueryFcn,
+	b3VisitMeshTriangle,
 	b3MeshTriangle,
 	b3PlaneResult,
 	b3RayCastInput,
@@ -92,7 +93,7 @@ const B3_BIN_COUNT: i32 = 8;
 const B3_DESIRED_TRIANGLES_PER_LEAF: i32 = 4;
 const B3_LEAF_NODE: u32 = 3;
 const B3_MAXIMUM_TRIANGLES_PER_LEAF: i32 = 8;
-const B3_MESH_STACK_SIZE: i32 = 256;
+export const B3_MESH_STACK_SIZE: i32 = 256;
 
 // Node pointers are indices into the node array.
 // Traversal stack shared by the queries that never call out to user code.
@@ -1935,6 +1936,13 @@ export function b3CollideMoverAndMesh(
 }
 
 export function b3QueryMesh(mesh: b3Mesh, bounds: b3AABB, fcn: b3MeshQueryFcn): void {
+	// The callback may query again, so this stack is not shared
+	b3QueryMeshVisitor<b3MeshQueryFcn>(mesh, bounds, fcn, new StaticArray<i32>(B3_MESH_STACK_SIZE));
+}
+
+/// b3QueryMesh with a visitor whose visit(a, b, c, triangleIndex) method is the callback, over the caller's stack of
+/// B3_MESH_STACK_SIZE, which parallel parts can run.
+export function b3QueryMeshVisitor<V>(mesh: b3Mesh, bounds: b3AABB, fcn: V, stack: StaticArray<i32>): void {
 	let meshScale = mesh.scale;
 	let ccw = meshScale.x * meshScale.y * meshScale.z > 0.0;
 
@@ -1950,9 +1958,7 @@ export function b3QueryMesh(mesh: b3Mesh, bounds: b3AABB, fcn: b3MeshQueryFcn): 
 
 	let data = mesh.data;
 
-	// The callback may query again, so this stack is not shared
 	let count = 0;
-	let stack = new StaticArray<i32>(B3_MESH_STACK_SIZE);
 	let node = 0;
 	let nodes = data.nodes;
 	let triangles = data.triangles;
@@ -1996,7 +2002,7 @@ export function b3QueryMesh(mesh: b3Mesh, bounds: b3AABB, fcn: b3MeshQueryFcn): 
 						c = b3Mul(meshScale, vertex2);
 					}
 
-					let result = fcn(a, b, c, triangleIndex);
+					let result = b3VisitMeshTriangle<V>(fcn, a, b, c, triangleIndex);
 					if (result == false) {
 						return;
 					}

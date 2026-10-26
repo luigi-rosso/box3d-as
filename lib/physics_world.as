@@ -242,9 +242,16 @@ export class b3TaskContext {
 	// B3_CONTACT_MANIFOLD_COUNT_BUCKETS; a FixedArray length must be a literal
 	manifoldCounts: FixedArray<i32, 8>;
 
-	// Awake contact slots a parallel part leaves to the main lane: mesh, height field and compound contacts
+	// Awake contact slots a parallel part leaves to the main lane: compound contacts and those that would allocate
 	deferredContacts: StaticArray<i32> = new StaticArray<i32>(0);
 	deferredCount: i32 = 0;
+
+	// Fast awake body sims whose continuous collision a parallel part leaves to the main lane
+	deferredBodies: StaticArray<i32> = new StaticArray<i32>(0);
+	deferredBodyCount: i32 = 0;
+
+	// Bodies a parallel part found unstable, which the main lane logs
+	unstableCount: i32 = 0;
 }
 
 // The world struct manages all physics entities, dynamic simulation,  and asynchronous queries.

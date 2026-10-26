@@ -45,6 +45,7 @@ import {
 	b3HeightFieldData,
 	b3HeightFieldDef,
 	b3MeshQueryFcn,
+	b3VisitMeshTriangle,
 	b3PlaneResult,
 	b3RayCastInput,
 	b3ShapeCastInput,
@@ -1133,6 +1134,11 @@ export function b3OverlapHeightField(shape: b3HeightFieldData, shapeTransform: b
 }
 
 export function b3QueryHeightField(heightField: b3HeightFieldData, bounds: b3AABB, fcn: b3MeshQueryFcn): void {
+	b3QueryHeightFieldVisitor<b3MeshQueryFcn>(heightField, bounds, fcn);
+}
+
+/// b3QueryHeightField with a visitor whose visit(a, b, c, triangleIndex) method is the callback, which parallel parts can run
+export function b3QueryHeightFieldVisitor<V>(heightField: b3HeightFieldData, bounds: b3AABB, fcn: V): void {
 	let scale = heightField.scale;
 
 	let minRow = b3FloatToIntSat(Mathf.floor(bounds.lowerBound.z / scale.z));
@@ -1175,11 +1181,11 @@ export function b3QueryHeightField(heightField: b3HeightFieldData, bounds: b3AAB
 				let triangleIndex = 2 * quadIndex;
 
 				if (heightField.clockwise != 0) {
-					fcn(point11, point12, point21, triangleIndex);
-					fcn(point22, point21, point12, triangleIndex + 1);
+					b3VisitMeshTriangle<V>(fcn, point11, point12, point21, triangleIndex);
+					b3VisitMeshTriangle<V>(fcn, point22, point21, point12, triangleIndex + 1);
 				} else {
-					fcn(point11, point21, point12, triangleIndex);
-					fcn(point22, point12, point21, triangleIndex + 1);
+					b3VisitMeshTriangle<V>(fcn, point11, point21, point12, triangleIndex);
+					b3VisitMeshTriangle<V>(fcn, point22, point12, point21, triangleIndex + 1);
 				}
 			}
 		}

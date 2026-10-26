@@ -943,13 +943,14 @@ function b3AcquireClosestStack(): StaticArray<b3QueryClosestItem> {
 	return b3_closestDepth == 1 ? b3_closestStack : new StaticArray<b3QueryClosestItem>(B3_TREE_STACK_SIZE);
 }
 
-function b3QueryTreeStack(
+// V is the callback function type, or a visitor class whose visit method is called directly, as parallel parts need
+function b3QueryTreeStack<V>(
 	nodes: StaticArray<b3TreeNode>,
 	proxies: StaticArray<b3TreeProxy>,
 	aabb: b3AABB,
 	maskBits: u64,
 	requireAllBits: bool,
-	callback: b3TreeQueryCallbackFcn,
+	callback: V,
 	hasProxies: bool,
 	stack: StaticArray<i32>,
 ): b3TreeStats {
@@ -982,7 +983,12 @@ function b3QueryTreeStack(
 					userData = proxy.userData;
 				}
 
-				let proceed = callback(proxyId, userData);
+				let proceed: bool;
+				if (isFunction<V>()) {
+					proceed = callback(proxyId, userData);
+				} else {
+					proceed = callback.visit(proxyId, userData);
+				}
 				result.leafVisits += 1;
 
 				if (proceed == false) {
@@ -1015,7 +1021,7 @@ function b3QueryTreeView(
 	}
 
 	let stack = b3AcquireQueryStack();
-	let result = b3QueryTreeStack(nodes, proxies, aabb, maskBits, requireAllBits, callback, hasProxies, stack);
+	let result = b3QueryTreeStack<b3TreeQueryCallbackFcn>(nodes, proxies, aabb, maskBits, requireAllBits, callback, hasProxies, stack);
 	b3_queryDepth -= 1;
 	return result;
 }
@@ -1460,6 +1466,23 @@ export function b3DynamicTree_Query(
 	}
 
 	return b3QueryTreeView(tree.nodes, tree.proxies, aabb, maskBits, requireAllBits, callback, true);
+}
+
+/// b3DynamicTree_Query with a visitor whose visit(proxyId, userData) method is the callback, over the caller's stack of
+/// B3_TREE_STACK_SIZE, which parallel parts can run.
+export function b3DynamicTree_QueryVisitor<V>(
+	tree: b3DynamicTree,
+	aabb: b3AABB,
+	maskBits: u64,
+	requireAllBits: bool,
+	visitor: V,
+	stack: StaticArray<i32>,
+): b3TreeStats {
+	if (tree.proxyCount == 0 || b3IsEmptyNode(tree.nodes[B3_ROOT_NODE])) {
+		return b3TreeStats();
+	}
+
+	return b3QueryTreeStack<V>(tree.nodes, tree.proxies, aabb, maskBits, requireAllBits, visitor, true, stack);
 }
 
 /// Query an AABB for the closest object. The callback function is called for each proxy that might be closest to the supplied
@@ -1998,7 +2021,8 @@ export function b3DynamicTree_MarkProxyMovedSerial(tree: b3DynamicTree, proxyId:
 }
 
 // Update a proxy AABB and flag the ancestors as moved. C uses atomics here; the port is single threaded.
-export function b3DynamicTree_MarkProxyMoved(tree: b3DynamicTree, proxyId: i32, aabb: b3AABB): void {
+// Update a proxy AABB and flag the ancestors as moved. Thread-safe using atomics, as parallel parts finalize bodies.
+export unsafe function b3DynamicTree_MarkProxyMoved(tree: b3DynamicTree, proxyId: i32, aabb: b3AABB): void {
 	let nodes = tree.nodes;
 	let parents = tree.parents;
 
@@ -2012,14 +2036,18 @@ export function b3DynamicTree_MarkProxyMoved(tree: b3DynamicTree, proxyId: i32, 
 
 	index = parents[index];
 	while (index != B3_NULL_INDEX) {
-		ref ancestor = nodes[index];
+		let flagIndex = changetype<usize>(nodes) + <usize>index * sizeof<b3TreeNode>() + offsetof<b3TreeNode>("flagIndex");
 
-		// Ancestor already visited.
-		if (ancestor.flagIndex & B3_MOVED_NODE) {
+		// Read first to avoid the FetchOr if possible.
+		if ((load<u32>(flagIndex) & B3_MOVED_NODE) != 0) {
 			break;
 		}
 
-		ancestor.flagIndex |= B3_MOVED_NODE;
+		let previousFlags = atomic.or<u32>(flagIndex, B3_MOVED_NODE);
+		if ((previousFlags & B3_MOVED_NODE) != 0) {
+			// Ancestor already visited.
+			break;
+		}
 
 		index = parents[index];
 	}

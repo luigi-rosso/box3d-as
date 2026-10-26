@@ -2,13 +2,14 @@
 // SPDX-License-Identifier: MIT
 // AnimaScript port of src/shape.c
 
-import { B3_ASSERT, B3_ASSERT_ENABLED, B3_NULL_INDEX, B3_SECRET_COOKIE, FLT_EPSILON, b3GetLengthUnitsPerMeter } from "./core";
+import { B3_ASSERT, B3_ASSERT_ENABLED, B3_NULL_INDEX, B3_SECRET_COOKIE, FLT_EPSILON, b3GetLengthUnitsPerMeter, b3InParallel, b3OnMain } from "./core";
 import {
 	B3_AABB_MARGIN_FRACTION,
 	B3_LINEAR_SLOP,
 	B3_MAX_AABB_MARGIN,
 	B3_MAX_SHAPES,
 	B3_MAX_SHAPE_CAST_POINTS,
+	B3_MAX_WORKERS,
 	B3_SPECULATIVE_DISTANCE,
 } from "./constants";
 import {
@@ -163,7 +164,7 @@ import { b3Sensor, b3Visitor } from "./sensor";
 import { b3FarthestPointOnAABB } from "./aabb";
 import { b3AllocId, b3FreeId } from "./id_pool";
 import { b3Array_RemoveSwap } from "./container";
-import { b3GetSweepTransform, b3SetProxy, b3ShapeDistance, b3TimeOfImpact } from "./distance";
+import { b3CopyProxy, b3GetSweepTransform, b3MakeOwningProxy, b3SetProxy, b3ShapeDistance, b3TimeOfImpact, b3TimeOfImpactAt } from "./distance";
 import { b3ComputeCapsuleAABB, b3ComputeCapsuleMass, b3ComputeSweptCapsuleAABB, b3CollideMoverAndCapsule, b3OverlapCapsule, b3RayCastCapsule, b3ShapeCastCapsule } from "./capsule";
 import { b3ComputeSphereAABB, b3ComputeSphereMass, b3ComputeSweptSphereAABB, b3CollideMoverAndSphere, b3OverlapSphere, b3RayCastSphere, b3ShapeCastSphere } from "./sphere";
 import {
@@ -178,13 +179,24 @@ import {
 	b3RayCastHull,
 	b3ShapeCastHull,
 } from "./hull";
-import { b3CollideMoverAndMesh, b3ComputeMeshAABB, b3IsValidMesh, b3OverlapMesh, b3QueryMesh, b3RayCastMesh, b3ShapeCastMesh } from "./mesh";
+import {
+	B3_MESH_STACK_SIZE,
+	b3CollideMoverAndMesh,
+	b3ComputeMeshAABB,
+	b3IsValidMesh,
+	b3OverlapMesh,
+	b3QueryMesh,
+	b3QueryMeshVisitor,
+	b3RayCastMesh,
+	b3ShapeCastMesh,
+} from "./mesh";
 import {
 	b3CollideMoverAndHeightField,
 	b3ComputeHeightFieldAABB,
 	b3GetHeightFieldMaterial,
 	b3OverlapHeightField,
 	b3QueryHeightField,
+	b3QueryHeightFieldVisitor,
 	b3RayCastHeightField,
 	b3ShapeCastHeightField,
 } from "./height_field";
@@ -1299,6 +1311,36 @@ export function b3SetShapeProxy(proxy: b3ShapeProxy, shape: b3Shape, points: Sta
 
 const b3_noProxyPoints = new StaticArray<b3Vec3>(0);
 
+// b3SetShapeProxy into a proxy that owns its points, for parallel parts
+function b3CopyShapeProxy(proxy: b3ShapeProxy, shape: b3Shape): b3ShapeProxy {
+	let points = proxy.points;
+	switch (shape.type) {
+		case b3_capsuleShape:
+			points[0] = shape.capsule.center1;
+			points[1] = shape.capsule.center2;
+			proxy.count = 2;
+			proxy.radius = shape.capsule.radius;
+			return proxy;
+
+		case b3_sphereShape:
+			points[0] = shape.sphere.center;
+			proxy.count = 1;
+			proxy.radius = shape.sphere.radius;
+			return proxy;
+
+		case b3_hullShape: {
+			let hull = shape.hull!;
+			return b3CopyProxy(proxy, b3GetHullPoints(hull), hull.vertexCount, 0.0);
+		}
+
+		default:
+			if (B3_ASSERT_ENABLED) B3_ASSERT(false);
+			proxy.count = 0;
+			proxy.radius = 0.0;
+			return proxy;
+	}
+}
+
 export function b3MakeShapeProxy(shape: b3Shape): b3ShapeProxy {
 	switch (shape.type) {
 		case b3_capsuleShape: {
@@ -2217,10 +2259,18 @@ function b3CopyTOIInput(copy: b3TOIInput, input: b3TOIInput): b3TOIInput {
 	return copy;
 }
 
-function b3ResetMeshImpactContext(context: b3MeshImpactContext): b3MeshImpactContext {
+// A parallel part's context keeps its proxies, which own their points
+function b3ResetMeshImpactContext<M>(context: b3MeshImpactContext): b3MeshImpactContext {
 	let input = context.toiInput;
-	b3SetProxy(input.proxyA, b3_noProxyPoints, 0, 0.0);
-	b3SetProxy(input.proxyB, b3_noProxyPoints, 0, 0.0);
+	if (isBoolean<M>()) {
+		input.proxyA.count = 0;
+		input.proxyA.radius = 0.0;
+		input.proxyB.count = 0;
+		input.proxyB.radius = 0.0;
+	} else {
+		b3SetProxy(input.proxyA, b3_noProxyPoints, 0, 0.0);
+		b3SetProxy(input.proxyB, b3_noProxyPoints, 0, 0.0);
+	}
 	input.sweepA = b3Sweep();
 	input.sweepB = b3Sweep();
 	input.maxFraction = 0.0;
@@ -2244,11 +2294,64 @@ const s_impactInput = new b3TOIInput();
 const s_impactChild = new b3ChildShape();
 const s_impactChildMaterial = new Uint16Array(1);
 
-function b3MeshTimeOfImpactCallback(a: b3Vec3, b: b3Vec3, c: b3Vec3, triangleIndex: i32): bool {
-	return b3MeshTimeOfImpactFcn(a, b, c, triangleIndex, s_meshImpactContext);
+// The same locals per worker for parallel parts, with proxies that own their points or already point at the context's
+// triangle, and the mesh query's stack and visitor
+class b3ImpactScratch {
+	meshContext: b3MeshImpactContext = new b3MeshImpactContext();
+	fallbackInput: b3TOIInput = new b3TOIInput();
+	fallbackCentroid: StaticArray<b3Vec3> = new StaticArray<b3Vec3>(1);
+	impactInput: b3TOIInput = new b3TOIInput();
+	meshStack: StaticArray<i32> = new StaticArray<i32>(B3_MESH_STACK_SIZE);
+	visitor: b3MeshImpactVisitor;
+
+	constructor(workerIndex: i32) {
+		let meshInput = this.meshContext.toiInput;
+		meshInput.proxyA.points = this.meshContext.triangle;
+		meshInput.proxyB = b3MakeOwningProxy(B3_MAX_SHAPE_CAST_POINTS);
+		this.fallbackInput.proxyA.points = this.meshContext.triangle;
+		this.fallbackInput.proxyB.points = this.fallbackCentroid;
+		this.impactInput.proxyA = b3MakeOwningProxy(B3_MAX_SHAPE_CAST_POINTS);
+		this.impactInput.proxyB = b3MakeOwningProxy(B3_MAX_SHAPE_CAST_POINTS);
+		this.visitor = new b3MeshImpactVisitor(this.meshContext, workerIndex);
+	}
 }
 
-function b3MeshTimeOfImpactFcn(a: b3Vec3, b: b3Vec3, c: b3Vec3, _triangleIndex: i32, toiContext: b3MeshImpactContext): bool {
+class b3MeshImpactVisitor {
+	context: b3MeshImpactContext;
+	workerIndex: i32;
+
+	constructor(context: b3MeshImpactContext, workerIndex: i32) {
+		this.context = context;
+		this.workerIndex = workerIndex;
+	}
+
+	visit(a: b3Vec3, b: b3Vec3, c: b3Vec3, triangleIndex: i32): bool {
+		return b3MeshTimeOfImpactFcn<b3InParallel>(a, b, c, triangleIndex, this.context, this.workerIndex);
+	}
+}
+
+function b3MakeImpactScratch(): StaticArray<b3ImpactScratch> {
+	let scratch = new StaticArray<b3ImpactScratch>(B3_MAX_WORKERS);
+	for (let i = 0; i < B3_MAX_WORKERS; ++i) {
+		scratch[i] = new b3ImpactScratch(i);
+	}
+	return scratch;
+}
+
+const s_impactScratch = b3MakeImpactScratch();
+
+function b3MeshTimeOfImpactCallback(a: b3Vec3, b: b3Vec3, c: b3Vec3, triangleIndex: i32): bool {
+	return b3MeshTimeOfImpactFcn<b3OnMain>(a, b, c, triangleIndex, s_meshImpactContext, 0);
+}
+
+function b3MeshTimeOfImpactFcn<M>(
+	a: b3Vec3,
+	b: b3Vec3,
+	c: b3Vec3,
+	_triangleIndex: i32,
+	toiContext: b3MeshImpactContext,
+	workerIndex: i32,
+): bool {
 	// Early out for parallel movement
 	let c1 = toiContext.meshLocalCentroidB1;
 	let c2 = toiContext.meshLocalCentroidB2;
@@ -2271,10 +2374,12 @@ function b3MeshTimeOfImpactFcn(a: b3Vec3, b: b3Vec3, c: b3Vec3, _triangleIndex: 
 	triangle[0] = a;
 	triangle[1] = b;
 	triangle[2] = c;
-	toiContext.toiInput.proxyA.points = triangle;
+	if (!isBoolean<M>()) {
+		toiContext.toiInput.proxyA.points = triangle;
+	}
 	toiContext.toiInput.proxyA.count = 3;
 
-	let output = b3TimeOfImpact(toiContext.toiInput);
+	let output = b3TimeOfImpactAt<M>(toiContext.toiInput, workerIndex);
 
 	// It is possible for a hit at fraction == 0
 
@@ -2283,11 +2388,27 @@ function b3MeshTimeOfImpactFcn(a: b3Vec3, b: b3Vec3, c: b3Vec3, _triangleIndex: 
 		toiContext.toiInput.maxFraction = output.fraction;
 	} else if (0.0 == output.fraction) {
 		// fallback to TOI of a small circle around the fast shape centroid
-		let fallbackInput = b3CopyTOIInput(s_fallbackInput, toiContext.toiInput);
-		let centroid = s_fallbackCentroid;
-		centroid[0] = toiContext.localCentroidB;
-		b3SetProxy(fallbackInput.proxyB, centroid, 1, toiContext.fallbackRadius + B3_LINEAR_SLOP());
-		output = b3TimeOfImpact(fallbackInput);
+		let fallbackInput = s_fallbackInput;
+		if (isBoolean<M>()) {
+			// Its proxies already point at the context's triangle and its own centroid
+			let scratch = s_impactScratch[workerIndex];
+			fallbackInput = scratch.fallbackInput;
+			let input = toiContext.toiInput;
+			fallbackInput.proxyA.count = input.proxyA.count;
+			fallbackInput.proxyA.radius = input.proxyA.radius;
+			fallbackInput.sweepA = input.sweepA;
+			fallbackInput.sweepB = input.sweepB;
+			fallbackInput.maxFraction = input.maxFraction;
+			scratch.fallbackCentroid[0] = toiContext.localCentroidB;
+			fallbackInput.proxyB.count = 1;
+			fallbackInput.proxyB.radius = toiContext.fallbackRadius + B3_LINEAR_SLOP();
+		} else {
+			b3CopyTOIInput(fallbackInput, toiContext.toiInput);
+			let centroid = s_fallbackCentroid;
+			centroid[0] = toiContext.localCentroidB;
+			b3SetProxy(fallbackInput.proxyB, centroid, 1, toiContext.fallbackRadius + B3_LINEAR_SLOP());
+		}
+		output = b3TimeOfImpactAt<M>(fallbackInput, workerIndex);
 
 		if (0.0 < output.fraction && output.fraction < toiContext.toiInput.maxFraction) {
 			toiContext.toiOutput = output;
@@ -2349,7 +2470,7 @@ function b3CompoundTimeOfImpactFcn(compound: b3CompoundData, childIndex: i32, to
 		}
 
 		case b3_meshShape: {
-			let meshContext = b3ResetMeshImpactContext(s_meshImpactContext);
+			let meshContext = b3ResetMeshImpactContext<b3OnMain>(s_meshImpactContext);
 			b3CopyTOIInput(meshContext.toiInput, toiContext.toiInput);
 			meshContext.isSensor = false;
 			meshContext.localCentroidB = toiContext.localCentroidB;
@@ -2402,10 +2523,25 @@ function b3CompoundTimeOfImpactFcn(compound: b3CompoundData, childIndex: i32, to
 }
 
 export function b3ShapeTimeOfImpact(shapeA: b3Shape, shapeB: b3Shape, sweepA: b3Sweep, sweepB: b3Sweep, maxFraction: f32): b3TOIOutput {
+	return b3ShapeTimeOfImpactAt<b3OnMain>(shapeA, shapeB, sweepA, sweepB, maxFraction, 0);
+}
+
+// b3ShapeTimeOfImpact for worker workerIndex. Parallel parts never pass a compound shapeA.
+export function b3ShapeTimeOfImpactAt<M>(
+	shapeA: b3Shape,
+	shapeB: b3Shape,
+	sweepA: b3Sweep,
+	sweepB: b3Sweep,
+	maxFraction: f32,
+	workerIndex: i32,
+): b3TOIOutput {
 	let isSensor = shapeA.sensorIndex != B3_NULL_INDEX;
+	let scratch = s_impactScratch[workerIndex];
 
 	let typeA = shapeA.type;
-	if (typeA == b3_compoundShape) {
+	if (isBoolean<M>()) {
+		if (B3_ASSERT_ENABLED) B3_ASSERT(typeA != b3_compoundShape);
+	} else if (typeA == b3_compoundShape) {
 		// todo implement b3CompoundTimeOfImpact
 		let context = s_compoundImpactContext;
 		b3SetProxy(context.toiInput.proxyA, b3_noProxyPoints, 0, 0.0);
@@ -2439,10 +2575,16 @@ export function b3ShapeTimeOfImpact(shapeA: b3Shape, shapeB: b3Shape, sweepA: b3
 		// todo implement b3MeshTimeOfImpact and b3HeightFieldTimeOfImpact
 		// Note: assuming mesh is static
 
-		let context = b3ResetMeshImpactContext(s_meshImpactContext);
+		let context = s_meshImpactContext;
+		if (isBoolean<M>()) {
+			context = b3ResetMeshImpactContext<M>(scratch.meshContext);
+			b3CopyShapeProxy(context.toiInput.proxyB, shapeB);
+		} else {
+			b3ResetMeshImpactContext<M>(context);
+			b3SetShapeProxy(context.toiInput.proxyB, shapeB, s_impactPointsB);
+		}
 		context.toiInput.sweepA = sweepA;
 		context.toiInput.proxyA.count = 3;
-		b3SetShapeProxy(context.toiInput.proxyB, shapeB, s_impactPointsB);
 		context.toiInput.sweepB = sweepB;
 		context.toiInput.maxFraction = maxFraction;
 		context.isSensor = isSensor;
@@ -2470,7 +2612,13 @@ export function b3ShapeTimeOfImpact(shapeA: b3Shape, shapeB: b3Shape, sweepA: b3
 		// Bounds local to mesh
 		let localBounds = b3AABB_Transform(b3InvertTransform(xfA), bounds);
 
-		if (typeA == b3_meshShape) {
+		if (isBoolean<M>()) {
+			if (typeA == b3_meshShape) {
+				b3QueryMeshVisitor<b3MeshImpactVisitor>(shapeA.mesh!, localBounds, scratch.visitor, scratch.meshStack);
+			} else if (typeA == b3_heightShape) {
+				b3QueryHeightFieldVisitor<b3MeshImpactVisitor>(shapeA.heightField!, localBounds, scratch.visitor);
+			}
+		} else if (typeA == b3_meshShape) {
 			b3QueryMesh(shapeA.mesh!, localBounds, b3MeshTimeOfImpactCallback);
 		} else if (typeA == b3_heightShape) {
 			b3QueryHeightField(shapeA.heightField!, localBounds, b3MeshTimeOfImpactCallback);
@@ -2483,13 +2631,19 @@ export function b3ShapeTimeOfImpact(shapeA: b3Shape, shapeB: b3Shape, sweepA: b3
 		B3_ASSERT(shapeB.type != b3_compoundShape && shapeB.type != b3_meshShape && shapeB.type != b3_heightShape);
 
 	let input = s_impactInput;
-	b3SetShapeProxy(input.proxyA, shapeA, s_impactPointsA);
-	b3SetShapeProxy(input.proxyB, shapeB, s_impactPointsB);
+	if (isBoolean<M>()) {
+		input = scratch.impactInput;
+		b3CopyShapeProxy(input.proxyA, shapeA);
+		b3CopyShapeProxy(input.proxyB, shapeB);
+	} else {
+		b3SetShapeProxy(input.proxyA, shapeA, s_impactPointsA);
+		b3SetShapeProxy(input.proxyB, shapeB, s_impactPointsB);
+	}
 	input.sweepA = sweepA;
 	input.sweepB = sweepB;
 	input.maxFraction = maxFraction;
 
-	let output = b3TimeOfImpact(input);
+	let output = b3TimeOfImpactAt<M>(input, workerIndex);
 
 	return output;
 }

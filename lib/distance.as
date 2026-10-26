@@ -4,8 +4,8 @@
 
 // Dirk Gregorius contributed portions of this code
 
-import { B3_ASSERT, B3_ASSERT_ENABLED, FLT_EPSILON, FLT_MAX, FLT_MIN, B3_NULL_INDEX, b3Log } from "./core";
-import { B3_LINEAR_SLOP, B3_MAX_WORKERS } from "./constants";
+import { B3_ASSERT, B3_ASSERT_ENABLED, FLT_EPSILON, FLT_MAX, FLT_MIN, B3_NULL_INDEX, b3Log, b3OnMain } from "./core";
+import { B3_LINEAR_SLOP, B3_MAX_SHAPE_CAST_POINTS, B3_MAX_WORKERS } from "./constants";
 import {
 	b3AbsFloat,
 	b3Add,
@@ -1320,7 +1320,31 @@ class b3SeparationFunction {
 
 const s_separationFunction = new b3SeparationFunction(new b3ShapeProxy(), new b3ShapeProxy());
 
-function b3MakeSeparationFunction(
+// What b3TimeOfImpact keeps per worker for parallel parts: its distance input, whose proxies own their points, and a
+// separation function over those proxies
+class b3TOIScratch {
+	distanceInput: b3DistanceInput = new b3DistanceInput();
+	separation: b3SeparationFunction;
+
+	constructor() {
+		this.distanceInput.proxyA = b3MakeOwningProxy(B3_MAX_SHAPE_CAST_POINTS);
+		this.distanceInput.proxyB = b3MakeOwningProxy(B3_MAX_SHAPE_CAST_POINTS);
+		this.separation = new b3SeparationFunction(this.distanceInput.proxyA, this.distanceInput.proxyB);
+	}
+}
+
+function b3MakeTOIScratch(): StaticArray<b3TOIScratch> {
+	let scratch = new StaticArray<b3TOIScratch>(B3_MAX_WORKERS);
+	for (let i = 0; i < B3_MAX_WORKERS; ++i) {
+		scratch[i] = new b3TOIScratch();
+	}
+	return scratch;
+}
+
+const s_toiScratch = b3MakeTOIScratch();
+
+// A parallel part passes its own proxies, which its separation function already holds
+function b3MakeSeparationFunction<M>(
 	cache: b3SimplexCache,
 	proxyA: b3ShapeProxy,
 	sweepA: b3Sweep,
@@ -1328,13 +1352,17 @@ function b3MakeSeparationFunction(
 	sweepB: b3Sweep,
 	worldNormal: b3Vec3,
 	t1: f32,
+	workerIndex: i32,
 ): b3SeparationFunction {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(1 <= cache.count && cache.count <= 3);
 
-	// C's stack value; one object serves every call, since b3TimeOfImpact does not nest
-	let fcn = s_separationFunction;
-	fcn.proxyA = proxyA;
-	fcn.proxyB = proxyB;
+	// C's stack value; one object per worker serves every call, since b3TimeOfImpact does not nest
+	let fcn = s_toiScratch[workerIndex].separation;
+	if (!isBoolean<M>()) {
+		fcn = s_separationFunction;
+		fcn.proxyA = proxyA;
+		fcn.proxyB = proxyB;
+	}
 	fcn.witness1 = b3Vec3();
 	fcn.witness2 = b3Vec3();
 	fcn.sweepA = sweepA;
@@ -1686,6 +1714,11 @@ function b3ForceFixedAxis(fcn: b3SeparationFunction, beta: f32): void {
 const s_toiDistanceInput = new b3DistanceInput();
 
 export function b3TimeOfImpact(input: b3TOIInput): b3TOIOutput {
+	return b3TimeOfImpactAt<b3OnMain>(input, 0);
+}
+
+// b3TimeOfImpact for worker workerIndex; M is b3InParallel for the instantiation parallel parts run
+export function b3TimeOfImpactAt<M>(input: b3TOIInput, workerIndex: i32): b3TOIOutput {
 	let output = b3TOIOutput();
 
 	// Set these to invalid values so they can be validated on exit
@@ -1721,9 +1754,16 @@ export function b3TimeOfImpact(input: b3TOIInput): b3TOIOutput {
 
 	// Prepare input for distance query. C's stack value; b3TimeOfImpact does not nest.
 	let cache = b3SimplexCache();
-	let distanceInput = s_toiDistanceInput;
-	distanceInput.proxyA = proxyA;
-	distanceInput.proxyB = proxyB;
+	let distanceInput = s_toiScratch[workerIndex].distanceInput;
+	if (isBoolean<M>()) {
+		// Parallel parts may not point the distance input at the input's proxies, so they copy them
+		proxyA = b3CopyProxy(distanceInput.proxyA, proxyA.points, proxyA.count, proxyA.radius);
+		proxyB = b3CopyProxy(distanceInput.proxyB, proxyB.points, proxyB.count, proxyB.radius);
+	} else {
+		distanceInput = s_toiDistanceInput;
+		distanceInput.proxyA = proxyA;
+		distanceInput.proxyB = proxyB;
+	}
 	distanceInput.useRadii = false;
 
 	// The outer loop progressively attempts to compute new separating axes.
@@ -1733,7 +1773,7 @@ export function b3TimeOfImpact(input: b3TOIInput): b3TOIOutput {
 		let xfA = b3GetSweepTransform(sweepA, t1);
 		let xfB = b3GetSweepTransform(sweepB, t1);
 		distanceInput.transform = b3InvMulTransforms(xfA, xfB);
-		let distanceOutput = b3ShapeDistance(distanceInput, cache, null, 0);
+		let distanceOutput = b3ShapeDistance(distanceInput, cache, null, 0, workerIndex);
 		output.distance = distanceOutput.distance;
 
 		// The distance query runs in frame A, project the witness data back to the shifted world
@@ -1789,7 +1829,7 @@ export function b3TimeOfImpact(input: b3TOIInput): b3TOIOutput {
 		}
 
 		// Initialize the separating axis.
-		let fcn = b3MakeSeparationFunction(cache, proxyA, sweepA, proxyB, sweepB, worldNormal, t1);
+		let fcn = b3MakeSeparationFunction<M>(cache, proxyA, sweepA, proxyB, sweepB, worldNormal, t1, workerIndex);
 
 		// Compute the TOI on the separating axis. We do this by successively resolving the deepest point.
 		let done = false;
@@ -1940,6 +1980,22 @@ export function b3SetProxy(proxy: b3ShapeProxy, points: StaticArray<b3Vec3>, cou
 	proxy.count = count;
 	proxy.radius = radius;
 	return proxy;
+}
+
+/// b3SetProxy into a proxy that owns its points, which it copies, as parallel parts may not point a proxy elsewhere
+export function b3CopyProxy(proxy: b3ShapeProxy, points: StaticArray<b3Vec3>, count: i32, radius: f32): b3ShapeProxy {
+	let own = proxy.points;
+	for (let i = 0; i < count; ++i) {
+		own[i] = points[i];
+	}
+	proxy.count = count;
+	proxy.radius = radius;
+	return proxy;
+}
+
+/// A proxy with a point buffer of its own for b3CopyProxy
+export function b3MakeOwningProxy(capacity: i32): b3ShapeProxy {
+	return new b3ShapeProxy(new StaticArray<b3Vec3>(capacity), 0, 0.0);
 }
 
 /// Make a two point proxy, as C does with &capsule->center1.

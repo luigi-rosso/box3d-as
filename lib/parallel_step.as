@@ -23,7 +23,16 @@ import {
 	b3SolveJoints_Overflow,
 } from "./joint";
 import { b3ReserveMeshScratchForWorkers } from "./mesh_contact";
-import { b3ExecuteBlock, b3SetLaneSolve, b3SolverStage, b3StepContext } from "./solver";
+import {
+	b3ExecuteBlock,
+	b3FinalizeBodiesTask,
+	b3FinishParallelFinalize,
+	b3PrepareParallelContinuous,
+	b3SetLaneFinalize,
+	b3SetLaneSolve,
+	b3SolverStage,
+	b3StepContext,
+} from "./solver";
 import {
 	b3CollideTask,
 	b3DefaultFrictionCallback,
@@ -192,14 +201,13 @@ function b3ParallelSolve(context: b3StepContext): bool {
 	}
 }
 
-// b3ParallelFor's block size for the narrow phase's minRange of 20 and world.workerCount workers
-function b3CollideBlockSize(contactCount: i32, workerCount: i32): i32 {
-	let minRange = 20;
+// b3ParallelFor's block size for itemCount items of at least minRange each over workerCount workers
+function b3ParallelForBlockSize(itemCount: i32, minRange: i32, workerCount: i32): i32 {
 	let maxBlockCount = 32 * workerCount;
-	if (contactCount <= minRange * maxBlockCount) {
+	if (itemCount <= minRange * maxBlockCount) {
 		return minRange;
 	}
-	return (contactCount + maxBlockCount - 1) / maxBlockCount;
+	return (itemCount + maxBlockCount - 1) / maxBlockCount;
 }
 
 function b3ParallelCollide(context: b3StepContext, contactCount: i32): bool {
@@ -219,7 +227,7 @@ function b3ParallelCollide(context: b3StepContext, contactCount: i32): bool {
 	}
 	b3ReserveMeshScratchForWorkers(world.workerCount);
 
-	Parallel.run(b3ParallelCollideTask, context, contactCount, b3CollideBlockSize(contactCount, world.workerCount));
+	Parallel.run(b3ParallelCollideTask, context, contactCount, b3ParallelForBlockSize(contactCount, 20, world.workerCount));
 
 	for (let i = 0; i < world.workerCount; ++i) {
 		let taskContext = world.taskContexts[i];
@@ -232,11 +240,40 @@ function b3ParallelCollide(context: b3StepContext, contactCount: i32): bool {
 	return true;
 }
 
-// Runs worldId's solver stages and narrow phase, as tasks picks, on parallel calls. The world gets a task context
+@parallel.inplace export unsafe function b3ParallelFinalizeTask(part: Part, context: b3StepContext, bodyCount: i32, blockSize: i32): void {
+	let workerIndex = part.index;
+	for (let start = part.claim(bodyCount, blockSize); start < bodyCount; start = part.claim(bodyCount, blockSize)) {
+		b3FinalizeBodiesTask<b3InParallel>(start, min(start + blockSize, bodyCount), workerIndex, context);
+	}
+}
+
+unsafe function b3ParallelFinalize(context: b3StepContext, bodyCount: i32): bool {
+	let world = context.world;
+	if (Parallel.size() > world.workerCount) {
+		return false;
+	}
+
+	for (let i = 0; i < world.workerCount; ++i) {
+		let taskContext = world.taskContexts[i];
+		if (taskContext.deferredBodies.length < bodyCount) {
+			taskContext.deferredBodies = new StaticArray<i32>(bodyCount + (bodyCount >> 1));
+		}
+		taskContext.deferredBodyCount = 0;
+		taskContext.unstableCount = 0;
+	}
+	context.parallelContinuous = b3PrepareParallelContinuous(world);
+
+	Parallel.run(b3ParallelFinalizeTask, context, bodyCount, b3ParallelForBlockSize(bodyCount, 8, world.workerCount));
+	b3FinishParallelFinalize(world, context);
+	return true;
+}
+
+// Runs worldId's narrow phase, and its solver stages and body finalization, as tasks picks, on parallel calls. The world gets a task context
 // per part, which leaves its results unchanged as C's do at any worker count. tasks 0 turns it off.
 export function b3World_EnableParallel(worldId: b3WorldId, tasks: i32): void {
 	b3SetLaneSolve(null);
 	b3SetLaneCollide(null);
+	b3SetLaneFinalize(null);
 	if (tasks == 0) {
 		return;
 	}
@@ -247,5 +284,6 @@ export function b3World_EnableParallel(worldId: b3WorldId, tasks: i32): void {
 	}
 	if ((tasks & b3_parallelSolve) != 0) {
 		b3SetLaneSolve((context: b3StepContext): bool => b3ParallelSolve(context));
+		b3SetLaneFinalize((context: b3StepContext, bodyCount: i32): bool => b3ParallelFinalize(context, bodyCount));
 	}
 }

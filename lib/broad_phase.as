@@ -115,7 +115,7 @@ export class b3BroadPhase {
 	b3DynamicTree_MarkProxyMovedSerial(bp.trees[proxyType], proxyId);
 }
 
-@inline export function b3BroadPhase_MarkProxyMoved(bp: b3BroadPhase, proxyKey: i32, aabb: b3AABB): void {
+@inline export unsafe function b3BroadPhase_MarkProxyMoved(bp: b3BroadPhase, proxyKey: i32, aabb: b3AABB): void {
 	let proxyType = B3_PROXY_TYPE(proxyKey);
 	let proxyId = B3_PROXY_ID(proxyKey);
 	b3DynamicTree_MarkProxyMoved(bp.trees[proxyType], proxyId, aabb);

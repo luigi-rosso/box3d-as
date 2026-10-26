@@ -1653,6 +1653,14 @@ export function b3GetHeightFieldFlags(hf: b3HeightFieldData): StaticArray<u8> {
 /// Query callback. The closure carries C's context.
 export type b3MeshQueryFcn = (a: b3Vec3, b: b3Vec3, c: b3Vec3, triangleIndex: i32) => bool;
 
+// Calls a b3MeshQueryFcn, or the visit method of a visitor class directly, which parallel parts can run
+@inline export function b3VisitMeshTriangle<V>(visitor: V, a: b3Vec3, b: b3Vec3, c: b3Vec3, triangleIndex: i32): bool {
+	if (isFunction<V>()) {
+		return visitor(a, b, c, triangleIndex);
+	}
+	return visitor.visit(a, b, c, triangleIndex);
+}
+
 /// This is used for computing 2D hulls in service of contact manifold simplification.
 /// Placed here for testing. Internal.
 export struct b3Point2D {
