@@ -87,7 +87,9 @@ own scheduler; the C wasm build is the same with pthreads (`-pthread`, shared me
 runs on rive's threaded web runtime (librive's web scripting harness built with `--web_threads`), lanes on
 workers (TASKS=2, the solver) and the best lane configuration of three (solve or both on workers, solve on jobs).
 Parallel calls do not run in a browser yet (below), so their row is native WAMR AOT, from the rive
-`parallel-calls` branch, in a separate session with its own native column.
+`parallel-calls` branch at a4fa1239d4, in a separate session with its own native column (3 rounds, load 5 to 15,
+every final hash matching native). The same session on the branch's previous head, 28be2e0b62, at load 5 to 15,
+gave the same within 10% (large_pyramid 4.42, 2.33, 1.37, 1.18).
 
 large_pyramid:
 
@@ -100,8 +102,8 @@ large_pyramid:
 | AS lanes, solve on workers | node | 4.78 | 4.71 | 4.43 | 4.92 |
 | AS lanes, solve on workers | Chrome | 4.65 | 4.81 | 4.81 | 5.34 |
 | AS lanes, best config | node | 4.77 | 4.71 | 4.43 | 4.83 |
-| native NEON (parallel session) | native | 3.39 | 1.78 | 1.03 | 0.98 |
-| AS parallel calls, AOT | native | 4.42 | 2.33 | 1.37 | 1.18 |
+| native NEON (parallel session) | native | 3.39 | 1.78 | 1.04 | 1.03 |
+| AS parallel calls, AOT | native | 4.51 | 2.46 | 1.50 | 1.28 |
 
 many_bodies:
 
@@ -114,8 +116,8 @@ many_bodies:
 | AS lanes, solve on workers | node | 9.96 | 9.57 | 8.27 | 9.37 |
 | AS lanes, solve on workers | Chrome | 9.81 | 10.69 | 8.92 | 9.97 |
 | AS lanes, best config | node | 9.94 | 9.57 | 8.27 | 7.52 (jobs) |
-| native NEON (parallel session) | native | 6.71 | 3.53 | 2.00 | 1.53 |
-| AS parallel calls, AOT | native | 9.01 | 4.69 | 2.80 | 2.13 |
+| native NEON (parallel session) | native | 7.10 | 3.43 | 2.05 | 1.71 |
+| AS parallel calls, AOT | native | 9.82 | 5.04 | 2.86 | 2.06 |
 
 mesh_drop (120 steps):
 
@@ -128,8 +130,8 @@ mesh_drop (120 steps):
 | AS lanes, solve on workers | node | 8.67 | 8.30 | 8.17 | 7.83 |
 | AS lanes, solve on workers | Chrome | 8.80 | 8.15 | 8.24 | 8.30 |
 | AS lanes, best config | node | 8.60 | 8.30 | 7.57 | 7.45 (both) |
-| native NEON (parallel session) | native | 6.74 | 3.46 | 2.00 | 1.58 |
-| AS parallel calls, AOT | native | 8.65 | 4.50 | 2.90 | 2.04 |
+| native NEON (parallel session) | native | 6.56 | 3.42 | 1.93 | 1.56 |
+| AS parallel calls, AOT | native | 8.38 | 4.77 | 2.81 | 2.09 |
 
 village (120 steps):
 
@@ -142,8 +144,8 @@ village (120 steps):
 | AS lanes, solve on workers | node | 3.05 | 3.34 | 3.52 | 4.44 |
 | AS lanes, solve on workers | Chrome | 3.16 | 3.72 | 3.84 | 4.82 |
 | AS lanes, best config | node | 3.05 | 3.34 | 3.52 | 4.44 |
-| native NEON (parallel session) | native | 2.12 | 1.34 | 0.94 | 0.92 |
-| AS parallel calls, AOT | native | 2.78 | 1.74 | 1.28 | 1.25 |
+| native NEON (parallel session) | native | 2.14 | 1.34 | 0.92 | 0.92 |
+| AS parallel calls, AOT | native | 2.77 | 1.81 | 1.24 | 1.36 |
 
 What the threaded tables say:
 
@@ -153,8 +155,8 @@ What the threaded tables say:
 - **Lanes do not scale on the web, as they did not natively** (notes/threading.md): at best 1.1 to 1.4x of serial,
   and village gets slower with every lane. At 8 workers C wasm is 4.6x (large_pyramid), 4.4x (many_bodies), 4.4x
   (mesh_drop) and 4.4x (village) faster than the port's best lanes on the same page.
-- **Parallel calls would close that.** Natively they scale like C (4.4 to 2.33 to 1.37 to 1.18 ms on large_pyramid)
-  and sit 1.2 to 1.45x native at every count. If the web build scaled as C's pthreads build does, the port would
+- **Parallel calls would close that.** Natively they scale like C (4.51, 2.46, 1.50 and 1.28 ms on large_pyramid,
+  3.5 to 4.9x at 8 parts except village) and sit 1.2 to 1.5x native at every count. If the web build scaled as C's pthreads build does, the port would
   land at about 1.3x C wasm threaded, the single threaded ratio.
 
 ## Parity
@@ -291,7 +293,8 @@ The same module runs within 10% on V8 and on WAMR AOT, though the two lose time 
   1.2x, both on workers losing). On the web the workers also need the page to yield before their threads start, so
   the bake must idle a few frames after creating them (`IDLEFRAMES=30` in bench/threads; without it the first
   step's `b3LaneAwait` spins on workers that have not started and gives up).
-- **Parallel calls do not run in a browser yet.** On the `parallel-calls` branch (28be2e0b62):
+- **Parallel calls do not run in a browser yet.** On the `parallel-calls` branch (checked at 28be2e0b62 and again at
+  a4fa1239d4, the web harness rebuilt at each):
   - The web host never links `rive_parallel_v1.run`. `wasm_parallel.cpp` and `parallelRunImpl` build only under
     `RIVE_WASM_PARALLEL`, which is `WITH_RIVE_SCRIPTING_WASM && !__EMSCRIPTEN__`, so `rive_scripting_pre.js` binds
     `unlinkedImport('rive_parallel_v1', 'run')`.
