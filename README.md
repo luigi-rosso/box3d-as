@@ -1,167 +1,305 @@
 # box3d-as
 
-Box3D, Erin Catto's 3D physics engine, ported to AnimaScript as a Rive
-scripting library. Bit exact against native Box3D, step for step.
+Box3D, Erin Catto's 3D physics engine, ported to AnimaScript as a Rive scripting library. It keeps Box3D's C API
+names, and every result matches native Box3D bit for bit, step for step.
 
-Upstream: https://github.com/erincatto/box3d at
-`f36d061ba26998c87cb7dc593a4065aaa03fb7eb` (v0.1.0 plus fixes). Box3D is MIT
-licensed; the port keeps that licence and its attribution, see `LICENSE`.
+Upstream: [erincatto/box3d](https://github.com/erincatto/box3d) at `f36d061ba26998c87cb7dc593a4065aaa03fb7eb` (v0.1.0
+plus fixes). Box3D is MIT licensed. The port keeps that licence and Erin Catto's copyright on every file (`LICENSE`).
 
-## Use
+## What it is
 
-`lib/box3d.as` re-exports the public API with Box3D's C names. Ids are handles
-(`b3WorldId`, `b3BodyId`, ...), plain data are structs, and callbacks are
-closures. `CONVENTIONS.md` says how the C maps to AnimaScript.
+- **All of Box3D's simulation.** Upstream `src/` is ported to about 55,700 lines of AnimaScript in 56 files under
+  `lib/`, one file per C source, with functions in C's order:
+  - shapes: spheres, capsules, hulls with Box3D's quickhull, triangle meshes, height fields and baked compounds;
+  - the dynamic tree broad phase;
+  - the narrow phase: GJK, shape casts, time of impact, SAT with its caches, and convex, triangle and mesh manifolds;
+  - the soft step solver, with graph coloring and the 4 wide contact solver on wasm SIMD;
+  - all nine joint types;
+  - islands and sleeping, continuous collision and bullets, sensors and events;
+  - ray casts, shape casts and overlaps, and the character mover.
+- **Box3D's API, under the same names.** `lib/box3d.as` re-exports 670 of the 716 public functions. Ids are handles
+  (`b3BodyId`), plain C structs are AnimaScript structs, and callbacks are closures. `CONVENTIONS.md` has the full
+  C to AnimaScript mapping.
+- **Bit exact.** The same float operations in the same order, checked against native Box3D on every module and on
+  every step of 13 scenes (see Parity below).
+- **Threaded on lanes.** The narrow phase, the solver stages and the tree rebuild run on lanes, with the same results
+  at any lane count. A parallel calls backend that scales like native is on a branch (see Threading below).
+- **Left out:** debug draw; recording, replay and the world snapshots they use; file IO; the built in thread
+  scheduler, whose place lanes take; and the SSE2, AVX2 and NEON backends. The 4 lane SIMD layer runs on wasm
+  `v128`, or on scalar lanes when the build has no SIMD.
+
+## Quick start
 
 ```as
-import { b3DefaultWorldDef, b3CreateWorld, b3DefaultBodyDef, b3CreateBody, b3_dynamicBody,
-         b3DefaultShapeDef, b3MakeBoxHull, b3CreateHullShape, b3World_Step } from "./lib/box3d";
+import { b3Body_GetPosition, b3CreateBody, b3CreateHullShape, b3CreateWorld, b3DefaultBodyDef, b3DefaultShapeDef,
+	b3DefaultWorldDef, b3DestroyWorld, b3MakeBoxHull, b3Vec3, b3World_Step, b3_dynamicBody } from "./lib/box3d";
 
-let world = b3CreateWorld(b3DefaultWorldDef());
+let worldId = b3CreateWorld(b3DefaultWorldDef());
+
+let groundDef = b3DefaultBodyDef();
+groundDef.position = b3Vec3(0.0, -1.0, 0.0);
+let groundId = b3CreateBody(worldId, groundDef);
+b3CreateHullShape(groundId, b3DefaultShapeDef(), b3MakeBoxHull(10.0, 1.0, 10.0).base);
+
 let bodyDef = b3DefaultBodyDef();
 bodyDef.type = b3_dynamicBody;
-let body = b3CreateBody(world, bodyDef);
-let box = b3MakeBoxHull(0.5, 0.5, 0.5);
-b3CreateHullShape(body, b3DefaultShapeDef(), box.base);
-b3World_Step(world, <f32>(1.0 / 60.0), 4);
+bodyDef.position = b3Vec3(0.0, 4.0, 0.0);
+let bodyId = b3CreateBody(worldId, bodyDef);
+b3CreateHullShape(bodyId, b3DefaultShapeDef(), b3MakeBoxHull(0.5, 0.5, 0.5).base);
+
+let timeStep: f32 = <f32>(1.0 / 60.0);
+for (let i = 0; i < 180; ++i) {
+	b3World_Step(worldId, timeStep, 4);
+}
+let y = b3Body_GetPosition(bodyId).y; // 0.5: the box rests on the ground
+b3DestroyWorld(worldId);
 ```
 
-The demo at the repo root is a rive-cli project:
-`RIVE_WAMRC=~/Projects/tools/wamrc rive . --aot`. Its seven scenes are a
-pyramid, a card house, ragdolls with a wrecking ball, rain on a mesh, a height
-field, bullets and a kinematic capsule character. Interactions are orbit,
-pick, shoot, and overlays for contacts, joints and the profile. See
-`notes/demo.md`.
+rive-cli resolves imports only inside a project, so copy or sync `lib/` into yours. As in C, write float constants
+as `f32` (`<f32>(1.0 / 60.0)`; a constant expression of float literals is `f64`).
 
-## What was ported
+- **`examples/`** has one short file per area of the API: [hello world](examples/hello_world.as),
+  [shapes](examples/shapes.as) (sphere, capsule, hull, mesh, height field, compound),
+  [joints](examples/joints.as) (a revolute chain, a prismatic elevator), [queries](examples/queries.as) (ray casts,
+  a shape cast, overlaps), [events](examples/events.as) (contact, sensor and hit events),
+  [the character mover](examples/mover.as) and [threading](examples/threading.as).
+  `examples/check.sh` runs each one under `rive --test` and checks what it shows (`examples/tests.as`), such as the
+  box coming to rest or four lanes ending bit for bit where the serial path does.
+- **The demo** at the repo root is a rive-cli project with seven scenes: pyramid, card house, ragdolls with a
+  wrecking ball, rain on a mesh, height field, bullets, and a capsule character. Orbit, pick and shoot, with overlays
+  for contacts, joints and the profile (`notes/demo.md`). It needs AOT for interactive rates:
 
-Everything in the library, about 41,000 lines of C, into about 54,500 lines of
-AnimaScript across 56 files in `lib/`:
+  ```sh
+  RIVE_WAMRC=<wamrc> rive . --aot
+  ```
 
-- **Collision shapes:** spheres, capsules, hulls with Box3D's quickhull,
-  triangle meshes with their BVH, height fields and baked compounds.
-- **Broad phase:** the dynamic tree broad phase.
-- **Narrow phase:** GJK, shape casts, time of impact, SAT with its caches,
-  convex, triangle and mesh manifolds, and contact recycling.
-- **Solver:** the soft step solver with graph coloring and the 4 wide contact
-  solver.
-- **Joints:** all of them: distance, motor, parallel, prismatic, revolute,
-  spherical, weld, wheel and filter.
-- **Islands, sleeping, continuous collision and bullets.**
-- **Sensors and events.**
-- **Queries:** ray casts, shape casts and overlaps.
-- **Character mover:** `b3World_CastMover`, `b3World_CollideMover`,
-  `b3SolvePlanes`, `b3ClipVector`, plus the per body versions.
+## API availability
 
-Skipped: debug draw, recording and replay, world snapshots, the built in
-scheduler, and the x86 and NEON SIMD backends. The 4 lane SIMD layer is ported
-on scalar lanes and on wasm `v128`.
+Generated by `docs/api.py` from the upstream public headers (`box3d.h`, `collision.h`, `math_functions.h`,
+`types.h`, `base.h` and `id.h`: every `B3_API` function plus the inline ones), against what `lib/box3d.as` exports.
+[`docs/api.md`](docs/api.md) lists every function with the module that defines it. Box3D has no chain shapes; meshes,
+height fields and compounds have a row of their own.
+
+| area | ported | not ported, and why |
+|---|---|---|
+| world | 46 / 47 | `b3World_DumpShapeBounds` (other: file IO) |
+| bodies | 77 / 77 |  |
+| shapes | 33 / 33 |  |
+| mesh, height field and compound shapes | 10 / 10 |  |
+| joints, common | 26 / 26 |  |
+| distance joint | 25 / 25 |  |
+| filter joint | 2 / 2 |  |
+| motor joint | 22 / 22 |  |
+| parallel joint | 8 / 8 |  |
+| prismatic joint | 24 / 24 |  |
+| revolute joint | 23 / 23 |  |
+| spherical joint | 28 / 28 |  |
+| weld joint | 10 / 10 |  |
+| wheel joint | 38 / 38 |  |
+| queries | 7 / 7 |  |
+| events | 21 / 21 |  |
+| character mover | 6 / 6 |  |
+| geometry and collision | 98 / 101 | `b3DumpHeightData` (other: file IO), `b3LoadHeightField` (other: file IO), `b3ValidateCompound` (other: validates serialized bytes) |
+| dynamic tree | 22 / 24 | `b3DynamicTree_Load` (other: file IO), `b3DynamicTree_Save` (other: file IO) |
+| math | 112 / 112 |  |
+| ids and defs | 17 / 17 |  |
+| base | 15 / 15 |  |
+| debug draw | 0 / 4 | all: debug draw |
+| recording and replay | 0 / 36 | all: recording and replay |
+| **all** | **670 / 716** | |
+
+Exported but with nothing to do in a runtime that owns memory and threads: `b3SetAllocator`, `b3GetByteCount` (0),
+`b3IsAVX2Available` (false), `b3Yield`, `b3Sleep`, `b3World_DumpMemoryStats`, and the `b3Destroy*` functions for
+hulls, meshes, height fields and compounds (the collector frees them).
 
 ## Parity
 
-Native reference: the scalar Box3D build with `-ffp-contract=off`. Native
-Box3D gives identical results for the scalar and NEON builds and for any
-worker count (`notes/scenes.md`), so the port is held to bit exactness, not a
-tolerance.
+The reference is native Box3D's scalar build (`BOX3D_DISABLE_SIMD`, `-ffp-contract=off`). Native Box3D gives the
+same bits for its scalar and NEON builds and for any worker count (`notes/scenes.md`), so the port is held to bit
+exactness, with no tolerance.
 
-- **Module checks:** `verify/run.sh` runs 29 modules. Each compares every
-  output value bit for bit against C over fixed and seeded random inputs,
-  about 69 million values in total, all matching.
-- **Trajectories:** `verify/traj.sh --large` runs 13 scenes. Every step's
-  bodies, the mover state and the world counters match the native recording
-  bit for bit. The scenes are pyramid, large pyramid, card house, ragdolls and
-  chains, capsules on a mesh, height field, bullets, mover, many bodies, plank
-  pile, mesh drop, village and queries.
-- **Builds:** both gates pass on the scalar artifact and on the SIMD artifact,
-  on AOT and on the interpreter.
-- **Threaded runs:** `verify/threads.sh` checks the threaded port at 1, 2, 4
-  and 8 lanes against the same recordings.
-- **Upstream bugs found:** a clip buffer overflow, a hull builder hang, a
-  stale move index write and a few API edge bugs, in `notes/upstream.md`. The
-  port reproduces each one so it stays faithful.
+| gate | what it checks | covers |
+|---|---|---|
+| `verify/run.sh` | each module's outputs against a C driver over fixed and seeded random inputs, every value's bits | 29 modules, about 69 million values |
+| `verify/traj.sh --large` | every body's state, the mover and the world counters, every step, against a native recording | 13 scenes |
+| `verify/threads.sh --large` | the per step state hash under rive-cli with lanes at 1, 2, 4 and 8, on workers and on jobs | 130 runs |
+| `bench/web/verify.sh` | the state hash of every step on V8, for the port and for C Box3D on wasm | 13 scenes, 6 builds |
+| `examples/check.sh` | the examples run and show what they say | 7 cases |
 
-## Performance
+The 13 scenes are pyramid, large pyramid, card house, ragdolls and chains, capsules on a mesh, height field,
+bullets, mover, many bodies, plank pile, mesh drop, village (compounds) and queries. Both module and trajectory
+gates pass on the scalar and the SIMD artifact. Every bench run below also checks its hash against the recording.
+The port found four upstream bugs (a clip buffer overflow, a hull builder hang, a stale move index write, API edge
+cases; `notes/upstream.md`) and reproduces each, to stay faithful.
 
-Single threaded, AOT on WAMR, SIMD artifact, against native Box3D SIMD (NEON)
-on one worker, Apple M5 Max (`notes/perf_3.md`; the machine was shared, so
-differences under about 20% are noise):
+## Performance compared to C
 
-| scene | native SIMD ms/step | AnimaScript ms/step | ratio |
-|---|---|---|---|
-| large pyramid, 5051 boxes | 4.95 | 5.28 | 1.07x |
-| plank pile | 0.98 | 1.02 | 1.04x |
-| many bodies, 10781 boxes | 8.71 | 11.53 | 1.32x |
-| village, compounds | 2.86 | 4.08 | 1.43x |
-| mesh drop | 6.13 | 10.17 | 1.66x |
-| small pyramid | 0.034 | 0.061 | 1.8x |
-| chains, joints | 0.044 | 0.090 | 2.0x |
+ms per step. The single threaded tables take each run's median step and the min over interleaved rounds. Machine:
+Apple M5 Max (6 performance and 12 efficiency cores), macOS 26.5, shared with other work, so compare ratios within a
+table, not milliseconds across tables.
 
-The first AOT build ran large pyramid at 6x native scalar. Three passes closed
-that gap:
+### V8: the port against C Box3D compiled to wasm
 
-1. **Solver:** step scratch reused instead of allocated, the 4 lane kernels on
-   `v128`, flat body state gathers, and no body sim copies
-   (`notes/perf_solver.md`).
-2. **Narrow phase and queries:** nothing allocated per contact or per query,
-   field reads instead of struct copies, and a call free GJK
-   (`notes/perf_collide.md`).
-3. **Data layout:** prepare rows loaded as `v128`, contacts reuse their slot
-   objects, and continuous collision works through addresses
-   (`notes/perf_3.md`).
+The same scenes in node 26.3.1 (V8 14.6): C Box3D at f36d061 through emscripten 6.0.13 (`-O3 -ffp-contract=off`;
+SIMD is Box3D's SSE2 path on `-msimd128`, scalar is `BOX3D_DISABLE_SIMD`), and the port's release bake (rasc `-O2`,
+binaryen 133, as rive-cli bakes a release). Native ARM64 Box3D for scale. main at the master toolchain, 5 rounds,
+320 runs, load 5.8 to 8.6, 2026-10-26; every run's hash matched the recording on every step.
 
-The interpreter runs the small pyramid at about 1 ms a step, which is 30x
-native, so the live demo needs `--aot`.
+| scene | native NEON | C wasm SIMD | AS SIMD | AS / C SIMD | C wasm scalar | AS scalar | AS / C scalar |
+|---|---|---|---|---|---|---|---|
+| large_pyramid | 3.59 | 4.28 | 4.08 | 0.95 | 10.31 | 8.75 | 0.85 |
+| many_bodies | 7.59 | 8.83 | 9.73 | 1.10 | 21.14 | 18.56 | 0.88 |
+| mesh_drop | 5.49 | 6.53 | 7.00 | 1.07 | 11.33 | 11.99 | 1.06 |
+| village | 2.63 | 3.04 | 3.70 | 1.21 | 4.91 | 5.07 | 1.03 |
+| plank_pile | 0.670 | 0.740 | 0.726 | 0.98 | 0.830 | 0.801 | 0.96 |
+| chains | 0.0175 | 0.0239 | 0.0246 | 1.03 | 0.0236 | 0.0242 | 1.03 |
+| pyramid | 0.0291 | 0.0374 | 0.0362 | 0.97 | 0.0928 | 0.0740 | 0.80 |
+| queries | 0.116 | 0.142 | 0.154 | 1.08 | 0.149 | 0.161 | 1.08 |
 
-Most of what remains is outside the library's source:
+- With SIMD the port runs at 0.95 to 1.21x C on the same engine; C on wasm is itself 1.1 to 1.4x native.
+- Without SIMD it beats C's scalar wasm on the solver heavy scenes: C's scalar build gets no autovectorization on
+  wasm, while the port's scalar artifact runs one lane at a time and skips empty lanes.
+- The same session ran single-core's builds from the parallel-calls toolchain, where `notes/perf_4.md` measured 0.99
+  to 1.17x: within 5% of main's on every scene, either way. Headless Chrome 155 agrees with node (`notes/web.md`).
 
-- WAMR's software bounds checks cost 6 to 8%.
-- WAMR reloads the memory base after stores in functions that call, 8 to 10%
-  of instructions in the collide paths.
-- WAMR spills v128 registers and pays a stub on every call.
-- rasc lacks the SIMD lane loads and stores.
-- `clock()` calls `getenv` on every call.
+Reproduce: `EMSDK=<emsdk> WASM_OPT=<binaryen 133 wasm-opt> bench/web/build.sh`, `bench/web/build_native.sh`, then
+`ROUNDS=5 node bench/web/bench.mjs` (`notes/web.md` has the build details).
+
+### WAMR AOT: the port against native Box3D
+
+rive-cli's own runtime: the release bake of `bench/as` on WAMR AOT (`--aot`, `RIVE_WASM_AOT_SYNC=o3`, the SIMD
+artifact, software bounds checks as shipped), interleaved with native NEON Box3D on one worker and with the same
+module on V8. main on the master toolchain, `bench/web/aot.mjs`, 3 rounds, 96 runs, load 6.2 to 8.7, 2026-10-26;
+medians from step 1, every hash matched.
+
+| scene | native NEON | AS WAMR AOT | AOT / native | AS on V8 | V8 / native |
+|---|---|---|---|---|---|
+| large_pyramid | 3.60 | 5.01 | 1.39 | 4.40 | 1.22 |
+| many_bodies | 7.45 | 10.81 | 1.45 | 9.19 | 1.23 |
+| mesh_drop | 4.77 | 6.31 | 1.32 | 5.27 | 1.10 |
+| village | 2.62 | 3.40 | 1.30 | 3.42 | 1.30 |
+| plank_pile | 0.670 | 0.684 | 1.02 | 0.724 | 1.08 |
+| chains | 0.0182 | 0.0411 | 2.25 | 0.0397 | 2.18 |
+| pyramid | 0.0292 | 0.0430 | 1.47 | 0.0364 | 1.25 |
+| queries | 0.126 | 0.159 | 1.26 | 0.152 | 1.21 |
+
+- On the big scenes WAMR AOT runs the port at 1.3 to 1.45x native; plank_pile is at native speed.
+- The small scenes vary most between sessions: chains read 0.033 ms on AOT in a later A/B of the same bake, and
+  `notes/perf_4.md` measured 1.0 to 1.6x across all eight. Rive master's CLI and the parallel-calls CLI ran the same
+  bake within 1% of each other on chains, pyramid, large_pyramid and village (3 interleaved rounds).
+- Hardware bounds checks (a CLI built with `--wasm_hw_bounds`, not yet shippable) bring the big scenes to 1.2 to 1.3x
+  (`notes/perf_4.md`).
+
+Reproduce: `ROUNDS=3 RIVE_WAMRC=<wamrc> node bench/web/aot.mjs`, then `node bench/web/bench.mjs --table=<log>`, or
+`bench/as/run.sh` for the AOT tier alone against bench/native (`notes/bench.md`).
+
+What is left, from the profiles (`notes/perf_4.md`): prepare and store impulses (1.2 to 1.5x C on V8), where each
+lane's manifold lives in its contact's own array; collide and pairs (1.1 to 1.3x), where contacts and shapes are
+objects reached through references; on WAMR, software bounds checks and the per call cost of AOT code, which is why
+the small, call heavy scenes (chains, queries) trail most there.
+
+### Threaded
+
+ms per step at 1 / 2 / 4 / 8 workers, lanes or parts, mean from step 1, min over 3 rounds (`notes/web.md`,
+`notes/threading.md`, 2026-10-26, load 4 to 15). C Box3D uses its own scheduler: natively on threads, on the web on
+emscripten pthreads (8 pooled workers) in headless Chrome 155. The port's lanes ran in Chrome on rive's threaded web
+runtime, the solver stages on workers. Parallel calls ran natively on WAMR AOT, from the `parallel` branch on the
+rive `parallel-calls` toolchain (#15105, not landed); they do not run on the web yet.
+
+| scene | native NEON | C wasm pthreads, Chrome | AS lanes, Chrome (serial) | AS parallel calls, native AOT (branch only) |
+|---|---|---|---|---|
+| large_pyramid | 3.42 / 1.78 / 1.01 / 0.99 | 3.81 / 1.99 / 1.15 / 1.08 | 4.65 / 4.81 / 4.81 / 5.34 (4.64) | 4.51 / 2.46 / 1.50 / 1.28 |
+| many_bodies | 7.22 / 3.40 / 2.02 / 1.55 | 8.08 / 4.28 / 2.26 / 1.72 | 9.81 / 10.69 / 8.92 / 9.97 (10.11) | 9.82 / 5.04 / 2.86 / 2.06 |
+| mesh_drop | 6.52 / 3.44 / 1.95 / 1.52 | 7.48 / 3.95 / 2.19 / 1.63 | 8.80 / 8.15 / 8.24 / 8.30 (8.77) | 8.38 / 4.77 / 2.81 / 2.09 |
+| village | 2.13 / 1.34 / 0.93 / 0.97 | 2.45 / 1.54 / 1.06 / 0.98 | 3.16 / 3.72 / 3.84 / 4.82 (3.22) | 2.77 / 1.81 / 1.24 / 1.36 |
+
+C threads as well on the web as natively. The port's lanes do not scale, natively or on the web; parallel calls do,
+at 1.2 to 1.5x native at every count. The lane and parallel rows predate the fourth single threaded pass.
+
+Reproduce: `THREADS=1 bench/web/build.sh`, then `bench/web/threads.mjs` and `bench/web/browser.mjs` (the commands and
+the threaded web harness build are in `notes/web.md`); `bench/threads/run.sh` for native lanes, and on the `parallel`
+branch with the `parallel-calls` CLI and wamrc for parallel calls.
 
 ## Threading
 
-Box3D's tasks run on script lanes (`lib/lanes.as`, `lib/lane_collide.as`,
-`lib/lane_tree.as`, enabled with `b3World_EnableLanes`). They cover the narrow
-phase, every solver stage and the tree rebuild. Results stay bit exact at any
-lane count.
+- **Lanes, on main:** `b3World_EnableLanes(worldId, lanes, backend, tasks)` from `lib/lanes.as` puts the narrow phase,
+  the solver stages and the tree rebuild on workers or jobs ([example](examples/threading.as)). Lanes share no memory,
+  so each step serializes the solver's data to the lanes and back and syncs 84 colored stages: the whole step gains
+  at most 1.1 to 1.5x, and village gets slower with every lane. `notes/threading.md` measures why and ranks the
+  changes to AnimaScript threading that would fix it, led by shared memory.
+- **Parallel calls, on `parallel` and `single-core`:** `b3World_EnableParallel(worldId, tasks)` runs the pair finding,
+  the narrow phase with the tree rebuild, the solver stages and finalize as `@parallel.inplace` calls over the world's
+  own memory, with no serialization. It is bit exact at every part count and scales 3.3 to 4.4x from 1 to 8 parts
+  (village 2.3x), as native's workers do. It needs the rive `parallel-calls` toolchain (#15105) and does not run in a
+  browser yet.
 
-On today's share-nothing lanes the whole step gains at most 1.1 to 1.2x,
-while native gains 3.6 to 4.3x from 1 to 8 workers:
+## Branches
 
-| scene | native 1 / 4 / 8 workers ms/step | AnimaScript serial | best on lanes |
-|---|---|---|---|
-| large pyramid | 3.24 / 0.99 / 0.89 | 4.15 | 3.46 (4 lanes) |
-| many bodies | 6.12 / 1.83 / 1.44 | 7.86 | 6.92 (4 lanes) |
-| mesh drop | 4.57 / 1.44 / 1.14 | 6.14 | 5.46 (8 lanes) |
-| village | 2.05 / 0.87 / 0.87 | 2.80 | slower on any lane count |
+| branch | what | toolchain |
+|---|---|---|
+| `main` | the port, the examples, the gates and every bench but parallel calls | rive master (b0b4628806 or later) |
+| `single-core` | `main` plus the parallel calls backend, `lib/parallel_step.as` and BACKEND=3 in the threaded bench and gate | rive `parallel-calls` (#15105, a4fa1239d4) |
+| `parallel` | the parallel calls backend as first written, before the fourth single threaded pass | rive `parallel-calls` |
+| `web-bench`, `threads` | merged into main | |
 
-The solver stages alone gain 1.3 to 1.8x; the narrow phase on lanes loses,
-and the tree rebuild job is a small clean win. Why:
+`single-core` keeps main merged in, with one commit on top that brings the parallel backend back. When #15105 lands,
+main takes that commit.
 
-- Moving the solver's data once each way costs 60 to 100% of the solver's own
-  work. That is per record packing of an object graph, not bandwidth.
-- Each of the 84 colored solver stage syncs per step costs about as much as
-  the work it separates.
+## Layout and tooling
 
-`notes/threading.md` has the tables, the analysis, and a ranked list of
-changes to AnimaScript threading that would fix this, led by shared linear
-memory between lanes. The lane hooks do nothing unless enabled.
+| path | what |
+|---|---|
+| `lib/` | the port; `box3d.as` is the public API, `lanes.as` the lanes backend |
+| `examples/` | one example per API area, `tests.as` and `check.sh` |
+| `main.as`, `demo/`, `rive.yaml` | the demo |
+| `verify/` | parity gates: `cref/` C drivers, `as/` AnimaScript drivers, `scenes/` the 13 scenes in C and AnimaScript |
+| `bench/native`, `bench/as`, `bench/threads`, `bench/web` | native timings, WAMR AOT timings, threaded timings, V8 against C on wasm |
+| `docs/` | `api.md` and the script that generates it |
+| `notes/` | porting notes, findings, perf passes |
+
+Toolchain, from a rive master checkout (`R` below):
+
+```sh
+cd $R/packages/rasc/animascript && RIVE_OUT=out/release RIVE_PREMAKE_ARGS= build_rive.sh release -- rasc
+cd $R/packages/rive-cli && ./build.sh release
+# wamrc for --aot, from the patched WAMR the CLI build downloads, against Homebrew llvm@18
+cmake -S $R/packages/rive-cli/dependencies/bytecodealliance_wasm-micro-runtime_WAMR-2.4.5/wamr-compiler \
+	-B wamrc-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DWAMR_BUILD_WITH_CUSTOM_LLVM=1 \
+	-DLLVM_DIR=/opt/homebrew/opt/llvm@18/lib/cmake/llvm && cmake --build wamrc-build
+```
+
+`build_rive.sh` is in `$R/packages/runtime/build`. A dependency's patches apply only when it is first downloaded, so
+delete `packages/*/dependencies/bytecodealliance_wasm-micro-runtime_*` when rive's WAMR patches change. The scripts
+default to `~/Projects/rive-master`; `RASC`, `AS_STD`, `RIVE` and `RIVE_WAMRC` override.
+
+The gates need upstream Box3D at `~/Projects/box3d` (`BOX3D`), built in `build/scalar` (`BOX3D_DISABLE_SIMD=ON`,
+`-ffp-contract=off`) and `build/release`. The native recordings in `verify/scenes/out` are not committed:
+`NATIVE=1 verify/traj.sh --large` records them.
+
+```sh
+KEEP_GOING=1 RASC_FLAGS="-O" verify/run.sh
+KEEP_GOING=1 RASC_FLAGS="-O --enable-simd" verify/run.sh
+RASC_FLAGS="-O" verify/traj.sh --large
+RASC_FLAGS="-O --enable-simd" verify/traj.sh --large
+RIVE_WAMRC=<wamrc> verify/threads.sh --large
+examples/check.sh
+python3 verify/exports.py && python3 docs/api.py
+```
+
+Benches: `bench/native/run.sh`, `bench/as/run.sh` (WAMR AOT, `notes/bench.md`), `bench/threads/run.sh`, and
+`bench/web/` (`notes/web.md`: `build.sh` builds C Box3D with emscripten and the port's release bake, `bench.mjs`
+runs the V8 rounds, `aot.mjs` WAMR AOT against V8 and native).
 
 ## Notes
 
-- `notes/findings.md`: rasc and runtime issues hit along the way, each with a
-  minimal repro.
-- `notes/upstream.md`: upstream Box3D issues.
-- `notes/<module>.md`: per module porting notes.
-- `notes/bench.md` and `bench/`: benches and profiling recipes.
-
-## Tooling
-
-- rasc and rive-cli from rive master.
-- `verify/` needs the native Box3D checkout at `~/Projects/box3d`, built in
-  `build/scalar` and `build/release`.
-- The native recordings in `verify/scenes/out` are not committed;
-  `NATIVE=1 verify/traj.sh` records them.
+| note | what |
+|---|---|
+| `CONVENTIONS.md` | how C maps to AnimaScript: files, names, types, structs and classes, pointers, callbacks |
+| `notes/findings.md` | rasc and runtime issues hit along the way, each with a minimal repro |
+| `notes/upstream.md` | upstream Box3D bugs the port found |
+| `notes/perf_solver.md`, `perf_collide.md`, `perf_3.md`, `perf_4.md` | the four performance passes |
+| `notes/web.md` | Box3D on the web: the port against C on V8, threaded, in Chrome |
+| `notes/threading.md` | lanes and parallel calls: design, results, what AnimaScript threading should change |
+| `notes/bench.md`, `notes/scenes.md`, `notes/parity.md` | bench recipes, the scenes and the parity method |
+| `notes/demo.md` | the demo's structure |
+| `notes/<module>.md` | per module porting notes: deviations, skipped functions |

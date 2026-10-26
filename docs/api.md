@@ -23,13 +23,13 @@ porting more of the API. Types, enums and constants are exported with the same n
 | queries | 7 / 7 |  |
 | events | 21 / 21 |  |
 | character mover | 6 / 6 |  |
-| geometry and collision | 98 / 101 | `b3DumpHeightData` (other: file IO), `b3LoadHeightField` (other: file IO), `b3ValidateCompound` (other: compounds are built in memory, never loaded from bytes) |
+| geometry and collision | 98 / 101 | `b3DumpHeightData` (other: file IO), `b3LoadHeightField` (other: file IO), `b3ValidateCompound` (other: validates serialized bytes) |
 | dynamic tree | 22 / 24 | `b3DynamicTree_Load` (other: file IO), `b3DynamicTree_Save` (other: file IO) |
 | math | 112 / 112 |  |
 | ids and defs | 17 / 17 |  |
 | base | 15 / 15 |  |
-| debug draw | 0 / 4 | not ported: debug draw |
-| recording and replay | 0 / 36 | not ported: recording and replay |
+| debug draw | 0 / 4 | all: debug draw |
+| recording and replay | 0 / 36 | all: recording and replay |
 | **all** | **670 / 716** | |
 
 ## Not ported
@@ -39,7 +39,7 @@ porting more of the API. Types, enums and constants are exported with the same n
 | `b3World_DumpShapeBounds` | world | other: file IO |
 | `b3DumpHeightData` | geometry and collision | other: file IO |
 | `b3LoadHeightField` | geometry and collision | other: file IO |
-| `b3ValidateCompound` | geometry and collision | other: compounds are built in memory, never loaded from bytes |
+| `b3ValidateCompound` | geometry and collision | other: validates serialized bytes |
 | `b3DynamicTree_Load` | dynamic tree | other: file IO |
 | `b3DynamicTree_Save` | dynamic tree | other: file IO |
 | `b3DefaultDebugDraw` | debug draw | debug draw |

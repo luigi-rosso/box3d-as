@@ -34,7 +34,7 @@ REASONS = [
 	(lambda n: area_of(n) == 'recording and replay', 'recording and replay'),
 	(lambda n: n in {'b3DumpHeightData', 'b3LoadHeightField', 'b3DynamicTree_Save', 'b3DynamicTree_Load',
 		'b3World_DumpShapeBounds'}, 'other: file IO'),
-	(lambda n: n == 'b3ValidateCompound', 'other: compounds are built in memory, never loaded from bytes'),
+	(lambda n: n == 'b3ValidateCompound', 'other: validates serialized bytes'),
 ]
 
 # Exported, but with nothing to do here: the runtime owns memory and threads
@@ -133,7 +133,7 @@ def summary_rows():
 		reasons = sorted({reason_of(n) for n in missing})
 		note = ''
 		if missing and len(missing) == len(names):
-			note = 'not ported: ' + ', '.join(reasons)
+			note = 'all: ' + ', '.join(reasons)
 		elif missing:
 			note = ', '.join('`%s` (%s)' % (n, reason_of(n)) for n in missing)
 		rows.append((area, len(names) - len(missing), len(names), note))
