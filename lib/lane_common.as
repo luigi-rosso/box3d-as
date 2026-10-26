@@ -10,7 +10,7 @@ import { b3TaskContext } from "./physics_world";
 
 export const b3_laneBackendJobs: i32 = 1;
 export const b3_laneBackendWorkers: i32 = 2;
-// Parallel calls over the world's own memory, lib/parallel_step.as
+// Parallel calls over the world's own memory, lib/parallel_step.as on the parallel branch
 export const b3_laneBackendParallel: i32 = 3;
 
 export const B3_MAX_LANES: i32 = 8;

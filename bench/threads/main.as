@@ -1,6 +1,6 @@
 // Step timing with Box3D's tasks on lanes, the threaded side of bench/native; bench/as/main.as with lanes.
 // LANES=n runs the tasks on n partitions, partition 0 on the main lane (0, the default, leaves the serial path);
-// TASKS is a mask of 1 collide, 2 solve and 4 the tree rebuild, 3 (the default) collide and solve; BACKEND=1 jobs, 2 (the default) workers, 3 parallel calls; HASHLOG=1 logs the
+// TASKS is a mask of 1 collide, 2 solve and 4 the tree rebuild, 3 (the default) collide and solve; BACKEND=1 jobs, 2 (the default) workers, 3 parallel calls (parallel branch); HASHLOG=1 logs the
 // state hash after every step, outside the timing, for verify/threads.sh; REPLICA=1 with LANES=1 sends the main
 // lane's solver partition through the serialized path. Each option comes from the options blob run1.sh writes,
 // so every run shares one bake and its compiled code, or else from a --define of the same name.
@@ -14,8 +14,6 @@
 import { Layout, Context } from "rive/host";
 import { clock } from "rive/os";
 import { formatFixed } from "rive/format";
-import { Parallel } from "rive/parallel";
-import { b3_parallelStats } from "./lib/parallel_step";
 import {
 	b3BodyId,
 	b3CreateBody,
@@ -367,9 +365,6 @@ export class Main extends Layout {
 				lanes.replicaOnMain = replicaOnMain();
 			}
 		}
-		if (laneCount() > 0 && laneBackend() == b3_laneBackendParallel) {
-			console.log("BENCH parallel size=" + Parallel.size().toString());
-		}
 		console.log("BENCH start scene=" + sceneName(this.scene) + " steps=" + this.steps.toString() +
 			" create=" + formatFixed(this.createMs, 2) + "ms");
 		return true;
@@ -462,12 +457,6 @@ export class Main extends Layout {
 			}
 		}
 		line += " hash=" + stateHash(this.hashBodies()).toString();
-		line += " parts=" + Parallel.size().toString();
-		let ps = b3_parallelStats;
-		line += " parSolves=" + ps.solves.toString() + " parCollides=" + ps.collides.toString() + " parFinalizes=" + ps.finalizes.toString();
-		line += " parContacts=" + formatFixed(<f64>ps.contacts / <f64>max(1, ps.collides), 1);
-		line += " parDeferredContacts=" + formatFixed(<f64>ps.deferredContacts / <f64>max(1, ps.collides), 1);
-		line += " parDeferredBodies=" + formatFixed(<f64>ps.deferredBodies / <f64>max(1, ps.finalizes), 1);
 		line += " lanes=" + laneCount().toString() + " backend=" + laneBackend().toString() + " tasks=" + laneTasks().toString();
 		let lanes = this.lanes;
 		if (lanes != null) {

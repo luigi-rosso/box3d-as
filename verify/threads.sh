@@ -6,7 +6,7 @@
 #   verify/threads.sh                 every scene except large_pyramid, many_bodies, mesh_drop and village
 #   verify/threads.sh --large         all scenes
 #   verify/threads.sh chains village  only those
-# LANES="1 2 4 8" BACKENDS="2 1" (2 workers, 1 jobs, 3 parallel calls) TASKS=3 (1 collide, 2 solve, 3 both) pick the
+# LANES="1 2 4 8" BACKENDS="2 1" (2 workers, 1 jobs, 3 parallel calls on the parallel branch) TASKS=3 (1 collide, 2 solve, 3 both) pick the
 # runs; LANES=1 also runs the main lane's partition through the serialized replica path. Parallel calls take their
 # part count from the job pool, so backend 3 runs PARTS="1 2 4 8" instead, 1 being --parallel-safe, plus the default
 # pool. WASM_SIMD=off takes the scalar artifact.

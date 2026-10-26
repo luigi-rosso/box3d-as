@@ -4,7 +4,7 @@
 # lane count, recording uptime before each run since the machine may be shared; compare min over rounds.
 #   ROUNDS=3 NATIVE_REPEATS=3 bench/threads/run.sh
 #   CONFIGS="solve:2:2" LANE_COUNTS="2 4" SCENES="large_pyramid:200:1" bench/threads/run.sh
-# A config is name:tasks:backend, tasks 1 collide, 2 solve, 3 both; backend 1 jobs, 2 workers, 3 parallel calls, whose
+# A config is name:tasks:backend, tasks 1 collide, 2 solve, 3 both; backend 1 jobs, 2 workers, 3 parallel calls (parallel branch), whose
 # part count comes from the job pool: n parts is --job-threads=n-1, one part --parallel-safe. AOT, SIMD artifact.
 # Writes out/session_<timestamp>.log and prints the tables.
 set -e
@@ -12,7 +12,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 ROUNDS=${ROUNDS:-3}
 NATIVE_REPEATS=${NATIVE_REPEATS:-3}
 LANE_COUNTS=${LANE_COUNTS:-1 2 4 8}
-CONFIGS=${CONFIGS:-parallel:3:3 solve:2:2 solve-jobs:2:1}
+CONFIGS=${CONFIGS:-solve:2:2 solve-jobs:2:1}
 # scene:steps:define, the define numbering in main.as
 SCENES=${SCENES:-large_pyramid:200:1 many_bodies:100:2 mesh_drop:170:5 village:200:6}
 NATIVE=$HERE/../native/bin/bench_simd
