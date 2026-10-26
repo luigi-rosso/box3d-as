@@ -9,6 +9,7 @@ from collections import defaultdict
 
 STAGES = ['pairs', 'collide', 'solve', 'constraints', 'prepareConstraints', 'warmStart', 'solveImpulses',
           'relaxImpulses', 'storeImpulses', 'transforms']
+PARALLEL_FIELDS = ['parContacts', 'parDeferredContacts', 'parDeferredBodies', 'parts']
 LANE_FIELDS = ['lanePack', 'laneBlob', 'lanePartition0', 'laneWait', 'laneApply', 'part_exchange',
                'part_firstWait', 'laneMBin', 'laneMBout', 'laneShared', 'laneExchanges', 'collidePack',
                'collidePartition0', 'collideWait', 'collideApply', 'collideMBin', 'collideMBout']
@@ -104,8 +105,33 @@ def stage_table(stage, impls_shown):
             print(f'| {scene} | {impl} | ' + ' | '.join(cells) + ' |')
 
 
-stage_table('constraints', ['native', 'solve', 'all'])
-stage_table('collide', ['native', 'all'])
+stage_table('constraints', ['native', 'solve', 'all', 'parallel'])
+stage_table('collide', ['native', 'all', 'parallel'])
+stage_table('pairs', ['native', 'parallel'])
+stage_table('transforms', ['native', 'parallel'])
+
+# Where a step's time goes: the narrow phase, the solver stages and the rest, which on parallel calls is what the main
+# lane runs alone between the calls (pair finding, body finalization and the step's own serial parts included in it)
+print()
+print('Step breakdown of the best run, ms per step: collide, constraints, and the rest of the step.')
+print()
+print('| scene | impl | ' + ' | '.join(f'{n}' for n in counts) + ' |')
+print('|---|---|' + '---|' * len(counts))
+for scene in scenes:
+    for impl in impls:
+        if not (impl == 'native simd' or 'parallel' in impl or impl == 'AS serial'):
+            continue
+        cells = []
+        for n in counts:
+            b = best(scene, impl, 0 if impl == 'AS serial' else n)
+            if not b or (impl == 'AS serial' and n != counts[0]):
+                cells.append('')
+                continue
+            step = float(b.get('step', b.get('mean')))
+            collide = float(b['collide'])
+            constraints = float(b['constraints'])
+            cells.append(f'{step:.2f} = {collide:.2f} + {constraints:.2f} + {step - collide - constraints:.2f}')
+        print(f'| {scene} | {impl} | ' + ' | '.join(cells) + ' |')
 
 print()
 print('Stages of the best run, ms per step:')
@@ -137,6 +163,21 @@ for scene in scenes:
                 continue
             cells = [b.get(f, '') for f in LANE_FIELDS]
             print(f'| {scene} | {impl} | {n} | ' + ' | '.join(cells) + ' |')
+
+print()
+print('Parallel call counts of the best run, per step: awake contacts, those the parts left to the main lane, fast bodies swept on the main lane, and Parallel.size().')
+print()
+print('| scene | impl | n | ' + ' | '.join(PARALLEL_FIELDS) + ' |')
+print('|---|---|---|' + '---|' * len(PARALLEL_FIELDS))
+for scene in scenes:
+    for impl in impls:
+        if 'parallel' not in impl:
+            continue
+        for n in counts:
+            b = best(scene, impl, n)
+            if not b:
+                continue
+            print(f'| {scene} | {impl} | {n} | ' + ' | '.join(b.get(f, '') for f in PARALLEL_FIELDS) + ' |')
 
 if bad:
     print()
