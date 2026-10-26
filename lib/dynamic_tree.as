@@ -1485,6 +1485,23 @@ export function b3DynamicTree_QueryVisitor<V>(
 	return b3QueryTreeStack<V>(tree.nodes, tree.proxies, aabb, maskBits, requireAllBits, visitor, true, stack);
 }
 
+/// b3TreeView_Query of a view without proxies, such as a compound's, with a visitor and the caller's stack, which parallel
+/// parts can run
+export function b3QueryNodesVisitor<V>(
+	nodes: StaticArray<b3TreeNode>,
+	aabb: b3AABB,
+	maskBits: u64,
+	requireAllBits: bool,
+	visitor: V,
+	stack: StaticArray<i32>,
+): b3TreeStats {
+	if (b3IsEmptyNode(nodes[B3_ROOT_NODE])) {
+		return b3TreeStats();
+	}
+
+	return b3QueryTreeStack<V>(nodes, b3_noProxies, aabb, maskBits, requireAllBits, visitor, false, stack);
+}
+
 /// Query an AABB for the closest object. The callback function is called for each proxy that might be closest to the supplied
 /// point.
 /// @param minDistanceSqr the initial and final minimum squared distance. Provide a small initial to restrict the search and

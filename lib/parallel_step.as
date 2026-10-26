@@ -357,8 +357,8 @@ unsafe function b3ParallelFinalize(context: b3StepContext, bodyCount: i32): bool
 let s_pairKeyCapacity = 1024;
 
 function b3ParallelPairs(world: b3World, crossContext: b3CrossContext, crossCount: i32, selfCount: i32): bool {
-	// Parts cannot expand compound pairs or call a custom filter
-	if (world.compoundShapeCount > 0 || world.customFilterFcn != null || Parallel.size() > world.workerCount) {
+	// Parts cannot call a custom filter
+	if (world.customFilterFcn != null || Parallel.size() > world.workerCount) {
 		return false;
 	}
 

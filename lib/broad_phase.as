@@ -28,12 +28,12 @@ import {
 	b3DynamicTree_MarkProxyMovedSerial,
 	b3DynamicTree_MoveProxyInternal,
 	b3DynamicTree_FinishRebuild,
-	b3DynamicTree_Rebuild,
 	b3DynamicTree_RebuildAt,
 	b3DynamicTree_ReserveRebuild,
 	b3DynamicTree_Validate,
 	b3DynamicTree_ValidateNoMoved,
 	b3GetLeftChild,
+	b3QueryNodesVisitor,
 	b3HasTreeMoved,
 	b3IsLeaf,
 	b3NeedsRebuild,
@@ -237,6 +237,10 @@ class b3PairContext {
 	parallelKeyCount: i32 = 0;
 	overflow: bool = false;
 
+	// A parallel part's compound child query, b3PrepareParallelPairs
+	compoundContext: b3CompoundPairContext = new b3CompoundPairContext();
+	compoundStack: StaticArray<i32> = new StaticArray<i32>(B3_TREE_STACK_SIZE);
+
 	constructor(world: b3World, pairKeys: Array<u64>) {
 		this.world = world;
 		this.pairKeys = pairKeys;
@@ -323,6 +327,27 @@ class b3CompoundPairContext {
 	pairSet: b3HashSet? = null;
 	compoundShapeId: i32 = 0;
 	otherShapeId: i32 = 0;
+
+	// b3CompoundChildCallback for a parallel part, called directly
+	visit(_proxyId: i32, userData: u64): bool {
+		let childIndex = <i32>userData;
+
+		let key = b3ShapePairKey(this.compoundShapeId, this.otherShapeId, childIndex);
+		if (b3ContainsKey(this.pairSet!, key) == false) {
+			b3AddParallelKey(this.pairContext!, key);
+		}
+
+		return true;
+	}
+}
+
+@inline function b3AddParallelKey(context: b3PairContext, key: u64): void {
+	if (context.parallelKeyCount < context.parallelKeys.length) {
+		context.parallelKeys[context.parallelKeyCount] = key;
+		context.parallelKeyCount += 1;
+	} else {
+		context.overflow = true;
+	}
 }
 
 const s_compoundPairContext = new b3CompoundPairContext();
@@ -345,7 +370,7 @@ function b3CompoundChildCallback(_proxyId: i32, userData: u64, compoundContext: 
 // One of the two shapes is a compound, so the pair becomes one pair per overlapping child. The
 // child boxes live in the compound frame, so the other shape's box has to be demoted and pulled
 // into that frame first.
-function b3EmitCompoundPairs(context: b3PairContext, compoundShapeId: i32, otherShapeId: i32): void {
+function b3EmitCompoundPairs<M>(context: b3PairContext, compoundShapeId: i32, otherShapeId: i32): void {
 	let world = context.world;
 
 	let compoundShape = world.shapes[compoundShapeId];
@@ -359,18 +384,39 @@ function b3EmitCompoundPairs(context: b3PairContext, compoundShapeId: i32, other
 	let compoundTransform = b3ToRelativeTransform(b3GetBodyTransform(world, compoundShape.bodyId), b3Pos_zero);
 	let localAABB = b3AABB_Transform(b3InvertTransform(compoundTransform), otherAABB);
 
-	let compoundContext = s_compoundPairContext;
-	compoundContext.pairContext = context;
-	compoundContext.pairSet = world.broadPhase.pairSet;
+	// A parallel part's context already points at its pair context and the pair set
+	let compoundContext = context.compoundContext;
+	if (!isBoolean<M>()) {
+		compoundContext = s_compoundPairContext;
+		compoundContext.pairContext = context;
+		compoundContext.pairSet = world.broadPhase.pairSet;
+	}
 	compoundContext.compoundShapeId = compoundShapeId;
 	compoundContext.otherShapeId = otherShapeId;
+
+	if (isBoolean<M>()) {
+		let startCount = context.parallelKeyCount;
+		b3QueryNodesVisitor<b3CompoundPairContext>(
+			compoundShape.compound!.nodes,
+			localAABB,
+			B3_DEFAULT_MASK_BITS,
+			false,
+			compoundContext,
+			context.compoundStack,
+		);
+
+		if (context.parallelKeyCount > startCount && b3ShouldCreatePair<M>(world, compoundShapeId, otherShapeId) == false) {
+			context.parallelKeyCount = startCount;
+		}
+		return;
+	}
 
 	let startCount = context.pairKeys.length;
 
 	let view = b3GetCompoundTreeView(compoundShape.compound!);
 	b3TreeView_Query(view, localAABB, B3_DEFAULT_MASK_BITS, false, b3CompoundChildTreeCallback);
 
-	if (context.pairKeys.length > startCount && b3ShouldCreatePair<b3OnMain>(world, compoundShapeId, otherShapeId) == false) {
+	if (context.pairKeys.length > startCount && b3ShouldCreatePair<M>(world, compoundShapeId, otherShapeId) == false) {
 		b3Array_Resize(context.pairKeys, startCount);
 	}
 }
@@ -385,13 +431,7 @@ function b3FlushCandidatePairs<M>(context: b3PairContext): void {
 	let plain = context.plain;
 	let plainCount = 0;
 
-	// Parallel parts run only without compounds
-	if (isBoolean<M>()) {
-		for (let i = 0; i < count1; ++i) {
-			plain[i] = context.batch[i];
-		}
-		plainCount = count1;
-	} else if (context.checkCompounds) {
+	if (context.checkCompounds) {
 		// A compound expands into one pair per child, so its key is not known yet and it cannot
 		// ride the batched cull below.
 		let shapes = world.shapes;
@@ -403,9 +443,9 @@ function b3FlushCandidatePairs<M>(context: b3PairContext): void {
 			if (compoundA) {
 				// Compound versus compound is not supported
 				B3_ASSERT(compoundB == false);
-				b3EmitCompoundPairs(context, candidate.shapeIdA, candidate.shapeIdB);
+				b3EmitCompoundPairs<M>(context, candidate.shapeIdA, candidate.shapeIdB);
 			} else if (compoundB) {
-				b3EmitCompoundPairs(context, candidate.shapeIdB, candidate.shapeIdA);
+				b3EmitCompoundPairs<M>(context, candidate.shapeIdB, candidate.shapeIdA);
 			} else {
 				plain[plainCount] = candidate;
 				plainCount += 1;
@@ -441,12 +481,7 @@ function b3FlushCandidatePairs<M>(context: b3PairContext): void {
 		if (b3ShouldCreatePair<M>(world, candidates[i].shapeIdA, candidates[i].shapeIdB)) {
 			// The pair passed the gauntlet. A new contact will be created.
 			if (isBoolean<M>()) {
-				if (context.parallelKeyCount < context.parallelKeys.length) {
-					context.parallelKeys[context.parallelKeyCount] = keys[i];
-					context.parallelKeyCount += 1;
-				} else {
-					context.overflow = true;
-				}
+				b3AddParallelKey(context, keys[i]);
 			} else {
 				context.pairKeys.push(keys[i]);
 			}
@@ -804,6 +839,8 @@ export function b3PrepareParallelPairs(world: b3World, keyCapacity: i32): void {
 		}
 		context.parallelKeyCount = 0;
 		context.overflow = false;
+		context.compoundContext.pairContext = context;
+		context.compoundContext.pairSet = world.broadPhase.pairSet;
 	}
 }
 

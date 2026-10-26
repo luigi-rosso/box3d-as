@@ -89,7 +89,6 @@ import {
 	b3JointId,
 	b3ShapeId,
 	b3_dynamicBody,
-	b3_compoundShape,
 	b3_heightShape,
 	b3_hullShape,
 	b3_capsuleShape,
@@ -132,7 +131,7 @@ import {
 	b3_lockLinearY,
 	b3_lockLinearZ,
 } from "./body";
-import { b3ContactSpec } from "./contact";
+import { b3ContactSpec, b3PrepareCompoundContacts } from "./contact";
 import {
 	b3JointSim,
 	b3GetJointReaction,
@@ -143,7 +142,7 @@ import {
 	b3WarmStartJoint,
 	b3WarmStartJoints_Overflow,
 } from "./joint";
-import { b3TaskContext, b3World, b3_awakeSet, b3_staticSet } from "./physics_world";
+import { b3TaskContext, b3World, b3_awakeSet } from "./physics_world";
 import { B3_OVERFLOW_INDEX, b3ConstraintGraph } from "./constraint_graph";
 import {
 	b3ContactConstraint,
@@ -181,6 +180,7 @@ import {
 	b3ComputeShapeAABB,
 	b3ComputeShapeMinExtent,
 	b3GetShapeUserMaterialId,
+	b3PrepareParallelImpacts,
 	b3ShapeTimeOfImpactAt,
 	b3ShouldShapesCollide,
 } from "./shape";
@@ -797,8 +797,6 @@ function b3SolveJointsTask(block: b3SolverBlock, context: b3StepContext, useBias
 
 const B2_MAX_CONTINUOUS_SENSOR_HITS: i32 = 8;
 
-const b3_noShape = new b3Shape();
-
 class b3ContinuousContext {
 	world: b3World? = null;
 	// The fast body sim's flags and body id, all the query reads of it; neither changes during the sweep.
@@ -971,24 +969,16 @@ function b3MakeContinuousScratch(): StaticArray<b3ContinuousScratch> {
 
 const s_continuousScratch = b3MakeContinuousScratch();
 
-// Whether parallel parts can sweep world's fast bodies: they cannot call its filter or pre-solve callbacks, push
-// sensor hits, or sweep against a static compound. Points each worker's continuous context at world.
+// Whether parallel parts can sweep world's fast bodies: they cannot call its filter or pre-solve callbacks, or push sensor
+// hits. Points each worker's continuous context at world.
 export function b3PrepareParallelContinuous(world: b3World): bool {
 	if (world.customFilterFcn != null || world.preSolveFcn != null || world.sensors.length > 0) {
 		return false;
 	}
 
-	let staticSims = world.solverSets[b3_staticSet].bodySims;
-	for (let i = 0; i < staticSims.length; ++i) {
-		let shapeId = world.bodies[staticSims[i].bodyId].headShapeId;
-		while (shapeId != B3_NULL_INDEX) {
-			let shape = world.shapes[shapeId];
-			if (shape.type == b3_compoundShape) {
-				return false;
-			}
-			shapeId = shape.nextShapeId;
-		}
-	}
+	// Sweeps against a static compound read its children as shapes
+	b3PrepareCompoundContacts(world);
+	b3PrepareParallelImpacts(world, world.workerCount);
 
 	for (let i = 0; i < world.workerCount; ++i) {
 		s_continuousScratch[i].context.world = world;
