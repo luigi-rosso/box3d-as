@@ -332,7 +332,8 @@ The same module runs within 10% on V8 and on WAMR AOT, though the two lose time 
 - **Native**: `bench/web/build_native.sh` links the same driver against `~/Projects/box3d/build/release` (NEON) and
   `build/scalar`, `-O3 -ffp-contract=off`.
 - **rive's threaded web runtime**: the web scripting harness of the `parallel-calls` worktree (master plus
-  parallel calls), built into its own out dir with emsdk 4.0.23:
+  parallel calls; the lanes runs used its 28be2e0b62 build, whose lanes code is master's), built into its own out
+  dir with emsdk 4.0.23:
   `RIVE_OUT=out/wasm_threads_release build_rive.sh wasm release --with_rive_scripting --scripting_vm=wasm
   --with_rive_layout --with_rive_tools --web_threads -- web_scripting_harness web_scripting_page` in
   `packages/runtime/tests/web_scripting`. `bench/web/lanes.mjs` drives the node harness, `lanes.html` the page one.
