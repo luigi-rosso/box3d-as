@@ -110,28 +110,25 @@ stage_table('collide', ['native', 'all', 'parallel'])
 stage_table('pairs', ['native', 'parallel'])
 stage_table('transforms', ['native', 'parallel'])
 
-# Where a step's time goes: the narrow phase, the solver stages and the rest, which on parallel calls is what the main
-# lane runs alone between the calls (pair finding, body finalization and the step's own serial parts included in it)
+# Where a step's time goes. On parallel calls the pairs, collide, solver stages and finalize spans each hold one
+# parallel call plus the main lane's own share around it; the rest is the main lane alone.
 print()
-print('Step breakdown of the best run, ms per step: collide, constraints, and the rest of the step.')
+print('Step breakdown of the best run, ms per step: step = pairs + collide + solver stages + finalize + rest.')
 print()
-print('| scene | impl | ' + ' | '.join(f'{n}' for n in counts) + ' |')
-print('|---|---|' + '---|' * len(counts))
+print('| scene | impl | n | step | pairs | collide | solver stages | finalize | rest |')
+print('|---|---|---|---|---|---|---|---|---|')
 for scene in scenes:
     for impl in impls:
         if not (impl == 'native simd' or 'parallel' in impl or impl == 'AS serial'):
             continue
-        cells = []
-        for n in counts:
-            b = best(scene, impl, 0 if impl == 'AS serial' else n)
-            if not b or (impl == 'AS serial' and n != counts[0]):
-                cells.append('')
+        for n in ([0] if impl == 'AS serial' else counts):
+            b = best(scene, impl, n)
+            if not b:
                 continue
             step = float(b.get('step', b.get('mean')))
-            collide = float(b['collide'])
-            constraints = float(b['constraints'])
-            cells.append(f'{step:.2f} = {collide:.2f} + {constraints:.2f} + {step - collide - constraints:.2f}')
-        print(f'| {scene} | {impl} | ' + ' | '.join(cells) + ' |')
+            parts = [float(b[k]) for k in ('pairs', 'collide', 'constraints', 'transforms')]
+            cells = [f'{v:.3f}' for v in parts] + [f'{step - sum(parts):.3f}']
+            print(f'| {scene} | {impl} | {n} | {step:.3f} | ' + ' | '.join(cells) + ' |')
 
 print()
 print('Stages of the best run, ms per step:')
