@@ -82,10 +82,14 @@ export function f(x: u32): u32 { return (x & A) | <u32>E | (x & F); }
 asc inlines constant globals. The release bake's binaryen pass removes the
 cost; plain `rasc -O` does not.
 
+Fixed on the `parallel-calls` toolchain (a4fa1239d4, from #15091): `-O` folds all three to immediates.
+
 ## `-O` never inlines struct constructors or struct returning functions
 
 Every `b3Vec3(...)` and helper returning a struct stays a call, `@inline` or
 not. The release bake's binaryen pass inlines them; plain `rasc -O` does not.
+
+Fixed by #15091: struct constructors and struct helpers splice under `-O`.
 
 ## A function that folds to nothing stays a call
 
@@ -170,12 +174,16 @@ on the interpreter needs `wasmSimd: off`, or functions that keep their v128 loca
 kernels now do (notes/perf_solver.md, round 2), and `bench/as/tools/v128cells.py <module.wasm>` lists each
 function's last v128 offset in a bake; `bench/as/run.sh` runs it after a SIMD session.
 
+Fixed by #15091 (WAMR patch 0030): the 80 local repro prints the same on the interpreter and on AOT with the `parallel-calls` CLI, so bench/as/run.sh no longer runs the cell check and the kernels no longer reload values to stay under it (notes/perf_4.md).
+
 ## `@inline` does not reach binaryen
 
 rasc emits no `metadata.code.inline` hint, so the release bake's binaryen inlines only by its own size rule
 (at most 100 nodes and no calls, `flexibleInlineMaxSize = 100` in `wasm_opt_binaryen.cpp`). An `@inline`
 helper that rasc -O does not inline itself (struct returning ones, see above) stays a call when it is
 bigger, `b3CrossW4` among them. Helpers that return one scalar or one v128 are inlined by rasc already.
+
+Fixed by #15091: `@inline` and `@noinline` reach binaryen as code annotations. `b3BarycentricCoordsTri` is a helper again and the release bake inlines it at its five sites.
 
 ## `dataStart` is refused on value class arrays
 
@@ -208,6 +216,8 @@ in a loop and also calls a function, compiled by wamrc with `--bounds-checks=1`;
 reloads go. The fix belongs in WAMR (treat the base and bound as invariant between calls, since only a call
 or memory.grow can move them). Until then hot store heavy code should live in functions without calls.
 
+Fixed by #15091 (WAMR patch 0037): in a `parallel-calls` bake `wamrc --format=object` shows 0 to 3 base or bound reloads per function (only after calls) in the solver kernels, `b3ShapeDistance`, the joint solvers, `b3UpdateConvexContact` and `b3ComputeMeshManifoldsAt`.
+
 ## There is no way to keep a function out of line in the release bake
 
 Binaryen (version 133, `src/passes/Inlining.cpp`, `worthFullInlining`) inlines every function with one
@@ -218,6 +228,8 @@ inherits the reloads. A module constant referencing the function (`const f = lea
 and does not help. What works is a second direct call site (lib/mesh_contact.as calls b3PrefilterTriangles
 once for meshes and once for height fields), which is a hack. A `@noinline` decorator, or `@inline(never)`
 emitted as the code annotation, would solve it.
+
+Fixed by #15091: `@noinline`. `b3PrefilterTriangles` has one call site with it, and the joint type functions use it to stay out of `b3SolveJoint` as in C.
 
 ## `@inline` is not honored for functions that take a struct parameter
 
@@ -246,6 +258,8 @@ The release bake's binaryen then inlines it when it is at most 100 nodes, so sma
 larger `@inline` helper with struct parameters stays a call (b3BarycentricCoordsTri, which lib/distance.as now
 writes out at its five sites).
 
+Fixed by #15091: the repro inlines `pickV`.
+
 ## The host clock reads the environment on every call
 
 `rtNowImpl` in `packages/runtime/src/wasm/wasm_scripting_vm.cpp` (near 1756) calls
@@ -254,6 +268,8 @@ b3Profile reads the clock about 40 times per step, as C does with mach time. In 
 the CPU profile has `__findenv_locked` / `getenv` / `steady_clock::now` / `wasm_runtime_invoke_native_quick`
 under `rtNow` at about 17% of all samples, against 26% for all AOT script code, which is why the smallest
 scenes run 4 to 7 times native per step. A static flag, as `rtDateNowImpl` has, would fix it.
+
+Fixed by #15091.
 
 ## Jobs and workers have no clock
 
@@ -272,6 +288,8 @@ import { clock } from "rive/os";
 
 So a lane cannot time its own stages. lib/lane_common.as times only the main lane's partition, through a clock
 function the main lane installs and the lanes see as null; per lane stage times are not measurable.
+
+Fixed by #15091 for jobs and workers, and on `parallel-calls` for parallel code: lib/parallel_step.as now fills the solver stage times of b3Profile on part 0, as C times them on its main thread.
 
 ## A contended region lock parks its waiters
 
@@ -311,3 +329,63 @@ A lane that traps reports only `worker b3LaneWorker failed: unreachable` (or `wa
 host_obj_advance: unreachable` on the main lane), in release and debug bakes alike, so an index out of range in
 lane code has no location. Debugging the solver replica took a mode that runs it on the main lane
 (`replicaOnMain`, `REPLICA=1` in bench/threads) and console lines.
+
+## A variable index into a FixedArray local compiles to a jump table
+
+```as
+export function f(p: i32, n: i32): i32 {
+	let a: FixedArray<i32, 4>;
+	for (let i = 0; i < 4; ++i) {
+		a[i] = p + i;
+	}
+	let s = 0;
+	for (let i = 0; i < n; ++i) {
+		s += a[i & 3];
+	}
+	return s;
+}
+// rasc -O --release, and still after the -O2 binaryen pass: each access is an index check and a br_table over
+// four locals
+```
+
+A fixed array local lives in wasm locals, so an index that is not a constant becomes a `br_table` and a range check
+per read and per write, where C keeps the array in registers after unrolling or on the stack. Box3D's wide prepare and
+store impulses kept their per lane contacts, manifolds, sims and counts in such arrays: 70 to 120 jump tables per call
+and the largest share of their extra ops over C. Writing the lanes into the constraint (as C does) and reading them back
+with raw loads, or unrolling the lane loop through an `@inline` helper, removed them (notes/perf_4.md, change 2). Either
+rasc should place a fixed array indexed by a variable in the shadow stack, or the docs should say to keep such indices
+constant.
+
+## binaryen's offset folding needs low memory unused, and rasc's static data starts at 8
+
+binaryen folds `(load (i32.add x (i32.const C)))` into `(load offset=C x)` only under `--low-memory-unused`
+(`OptimizeAddedConstants`, for C < 1024), which emscripten passes and rasc's post pass (`postOptimizeInProcess`,
+`kWasmOptFlags`) does not. Passing it to a rasc module as it is laid out today miscompiles: static data starts at
+`kDataBase = 8` (compiler.h), and the frame runtime's raw allocator indexes its size class table at static address 424
+with a negative offset that binaryen's reassociation produces (`(-clz(x) << 2) + 424`). With the flag the 424 moves
+into the store's offset, the address no longer wraps and the store traps: `memory access out of bounds` in
+`rememberAdd` on the first steps of large_pyramid.
+
+Prototyped outside the rive worktree: a copy of rasc with `kDataBase = 1024` (the lane reset then clears the first
+1024 bytes with a `memory.fill` instead of one i64 store) and `--low-memory-unused` added to the external wasm-opt run.
+The Box3D web bake then runs bit exact on every scene, and the kernels lose most of their address adds (solve 190 to 32
+`i32.add`, prepare 236 to 69; loads with a constant offset 4 to 154 in solve). Measured:
+
+- V8 (node 26.3, 3 interleaved rounds): no change, every stage within 2%. TurboFan's arm64 code absorbs the adds.
+- WAMR AOT, static (`wamrc --format=object`, the ladder's flags, software bounds): 10 to 20% fewer instructions in the
+  kernels and 19% in `b3ShapeDistance`, mostly bounds checks: with the offsets in the immediate LLVM merges the checks of
+  accesses off one base (`b3ShapeDistance` 735 to 393 compares and branches, warm start 253 to 166).
+- WAMR AOT at run time: not measured, since rive-cli bakes through its in-process post pass and the prototype cannot
+  reach it without a CLI change.
+
+So the change is worth making for WAMR with software bounds checks: start static data at 1024 (one constant) and set
+`lowMemoryUnused` in both post pass paths. Under hardware bounds most of the gain (the merged checks) goes away.
+
+## binaryen does not simplify a shuffle of shuffles, and V8 lowers a non canonical one to lane moves
+
+The port's first transposes took each column as `shuffle(shuffle(r0, r1, 0, 4, 0, 4), shuffle(r2, r3, 0, 4, 0, 4), 0, 1,
+4, 5)`. binaryen keeps all three shuffles, and V8's arm64 backend has no single instruction for `0, 4, 0, 4`, so it
+moves lanes one by one: 296 lane moves in the solve kernel against C's 50. LLVM (WAMR AOT) picks good instructions for
+the same code. Writing every shuffle as one of the zip patterns (`0, 4, 1, 5` and `2, 6, 3, 7`), as SSE2's unpacks
+compile, fixed it in source (notes/perf_4.md, change 1). A shuffle simplification in rasc or binaryen would make the
+pattern a non issue.

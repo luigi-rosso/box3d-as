@@ -134,7 +134,7 @@ scratch, mode branches, visitor queries, re-indented blocks), most of it mechani
 - **Compile time specialization only folds a direct `if (isBoolean<M>())`.** An `@inline` wrapper returning it, a
   `const` local holding it and a ternary on it all leave the other branch in, so the check still refuses it.
 - **Static array literals read in parallel code fail the CLI build as a global write** (below); the tables were rebuilt
-  from a function.
+  from a function. Fixed at `parallel-calls` b89a090a2f; the tables are literals again (notes/perf_4.md).
 - **Nothing about the solver needed changing.** Its kernels already ran over raw pointers into the awake set; 84 stage
   syncs a step on large_pyramid cost nothing visible next to the stage work.
 
@@ -165,6 +165,7 @@ function f(w: W, x: f32): f32 { return w.cb(x); }
 2. **List every refusal, and point at the offending instruction** (the call through a value, the allocation) rather than
    the last call of the path.
 3. **Fold literal const arrays and parallel reads of them** (repro above), and say why when a read counts as a write.
+   Fixed at b89a090a2f: the initializer's store is charged to the initializer.
 4. **A documented compile time "in a part" constant**, or overloads per mode, instead of a type argument and
    `isBoolean`; and fold it through `@inline`, `const` and ternaries.
 5. **Calling known functions through values.** C's callbacks (friction, restitution, pre-solve, filters, query
@@ -177,7 +178,7 @@ function f(w: W, x: f32): f32 { return w.cb(x); }
    chosen by restarting with `--job-threads`, so benching 2 and 4 parts needs a run each, and 8 parts on this machine
    lands on the second core cluster.
 8. **The monotonic clock in parallel code.** C times each solver stage on the main thread; here those profile fields
-   read 0 on the parallel path.
+   read 0 on the parallel path. Fixed at dc5083bc5a; part 0 now times the stages.
 9. **Document `atomic.*` on heap addresses in unsafe `@parallel.inplace` code.** It works and is what C's atomics on
    tree nodes need, but the guide mentions only `SharedArray` atomics.
 10. **`@parallel.inplace` reads well** in real code: five entry points, one annotation each, and the reach of each is
