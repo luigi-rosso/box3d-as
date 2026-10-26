@@ -5,7 +5,7 @@
 
 import { Parallel, Part } from "rive/parallel";
 
-import { b3InParallel, b3OnMain } from "./core";
+import { b3GetMillisecondsAndReset, b3GetTicks, b3InParallel, b3OnMain, b3Ticks } from "./core";
 import { b3SetBitCountAndClear } from "./bitset";
 import { b3GetIdCapacity } from "./id_pool";
 import { B3_OVERFLOW_INDEX } from "./constraint_graph";
@@ -128,6 +128,12 @@ function b3RunOverflow(part: Part, context: b3StepContext, kind: i32, hasOverflo
 	let stages = context.stages;
 	let overflow = context.graph.colors[B3_OVERFLOW_INDEX];
 	let hasOverflow = overflow.contacts.length > 0 || overflow.jointSims.length > 0;
+	let world = context.world;
+
+	// C's main thread times the stages; here part 0 is the main lane
+	let main = part.index == 0;
+	let ticks = b3Ticks();
+	ticks.value = main ? b3GetTicks() : 0;
 
 	let stageIndex = 0;
 
@@ -140,6 +146,9 @@ function b3RunOverflow(part: Part, context: b3StepContext, kind: i32, hasOverflo
 	stageIndex += 1;
 
 	b3RunOverflow(part, context, OVERFLOW_PREPARE, hasOverflow);
+	if (main) {
+		world.profile.prepareConstraints += b3GetMillisecondsAndReset(ticks.value);
+	}
 
 	let subStepCount = context.subStepCount;
 	for (let subStepIndex = 0; subStepIndex < subStepCount; ++subStepIndex) {
@@ -148,12 +157,18 @@ function b3RunOverflow(part: Part, context: b3StepContext, kind: i32, hasOverflo
 		// Integrate velocities
 		b3RunStage(part, stages[iterationStageIndex], context);
 		iterationStageIndex += 1;
+		if (main) {
+			world.profile.integrateVelocities += b3GetMillisecondsAndReset(ticks.value);
+		}
 
 		// Warm start constraints
 		b3RunOverflow(part, context, OVERFLOW_WARM_START, hasOverflow);
 		for (let colorIndex = 0; colorIndex < activeColorCount; ++colorIndex) {
 			b3RunStage(part, stages[iterationStageIndex], context);
 			iterationStageIndex += 1;
+		}
+		if (main) {
+			world.profile.warmStart += b3GetMillisecondsAndReset(ticks.value);
 		}
 
 		// Solve constraints, ITERATIONS is 1
@@ -162,16 +177,25 @@ function b3RunOverflow(part: Part, context: b3StepContext, kind: i32, hasOverflo
 			b3RunStage(part, stages[iterationStageIndex], context);
 			iterationStageIndex += 1;
 		}
+		if (main) {
+			world.profile.solveImpulses += b3GetMillisecondsAndReset(ticks.value);
+		}
 
 		// Integrate positions
 		b3RunStage(part, stages[iterationStageIndex], context);
 		iterationStageIndex += 1;
+		if (main) {
+			world.profile.integratePositions += b3GetMillisecondsAndReset(ticks.value);
+		}
 
 		// Relax constraints, RELAX_ITERATIONS is 1
 		b3RunOverflow(part, context, OVERFLOW_RELAX, hasOverflow);
 		for (let colorIndex = 0; colorIndex < activeColorCount; ++colorIndex) {
 			b3RunStage(part, stages[iterationStageIndex], context);
 			iterationStageIndex += 1;
+		}
+		if (main) {
+			world.profile.relaxImpulses += b3GetMillisecondsAndReset(ticks.value);
 		}
 	}
 
@@ -188,6 +212,9 @@ function b3RunOverflow(part: Part, context: b3StepContext, kind: i32, hasOverflo
 				iterationStageIndex += 1;
 			}
 		}
+		if (main) {
+			world.profile.restitution += b3GetMillisecondsAndReset(ticks.value);
+		}
 	}
 
 	stageIndex += activeColorCount;
@@ -197,6 +224,9 @@ function b3RunOverflow(part: Part, context: b3StepContext, kind: i32, hasOverflo
 	b3RunStage(part, stages[stageIndex], context);
 	stageIndex += 1;
 	b3RunStage(part, stages[stageIndex], context);
+	if (main) {
+		world.profile.storeImpulses += b3GetMillisecondsAndReset(ticks.value);
+	}
 }
 
 function b3ParallelSolve(context: b3StepContext): bool {
