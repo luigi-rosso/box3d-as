@@ -1,4 +1,4 @@
-# threading: Box3D's tasks on AnimaScript lanes
+# threading: Box3D's tasks on AnimaScript lanes and parallel calls
 
 Box3D threads by handing closures to `b3EnqueueTaskCallback` and joining them with `b3FinishTaskCallback`:
 `b3ParallelFor` (narrow phase, finalize bodies, pair finding, sensors, bullets), the solver's stage workers and the
@@ -6,7 +6,186 @@ tree rebuild. AnimaScript lanes share no memory and no closure crosses to one, s
 inputs and outputs can be serialized onto jobs and workers, keeps every result bit exact with the serial port and
 native at any lane count, and measures what it costs.
 
-## Results
+
+## Parallel calls (2026-10-26)
+
+Parallel calls (rive draft PR #15105, branch `parallel-calls`) run one `@parallel` function on several threads at once
+over the main module's own memory. The threaded step now runs on them as a third backend, `b3_laneBackendParallel`
+(`BACKEND=3`), beside workers and jobs: `lib/parallel_step.as`, `b3World_EnableParallel(worldId, tasks)`.
+
+### Results
+
+Bit exact at every part count. verify/threads.sh with `BACKENDS=3` runs all 13 scenes at 1 part (`--parallel-safe`), 2,
+4 and 8 parts (`--job-threads=1/3/7`) and the default pool (7 parts), checks `Parallel.size()` in each run, and compares
+every step's state hash with the native recording: 65 of 65 pass on the final code. The lanes backends still pass
+(13 scenes x {1 lane, 1 lane serialized, 4 lanes} x {workers, jobs}, 78 of 78), as do verify/run.sh (29 modules) and
+verify/traj.sh --large (13 scenes).
+
+Whole step, ms per step (bench/threads/run.sh, session `bench/threads/out/session_20261026_115333.log`, AOT -O3, SIMD
+artifact, Apple M5 Max (18 cores: 6 + 12), macOS 26.5.2, 3 rounds interleaved with native SIMD at the same worker
+count, min over rounds, 1 minute load 5 to 14 from other agents in parentheses; x is AS serial over the cell; AS serial
+is the serial path of the same bake). n is native's worker count and the parallel call's part count:
+
+| scene | impl | 1 | 2 | 4 | 8 |
+|---|---|---|---|---|---|
+| large_pyramid | native simd | 3.340 (11) | 1.811 (14) | 1.027 (14) | 0.962 (14) |
+| large_pyramid | AS serial | **4.518** (14) | | | |
+| large_pyramid | AS parallel | 4.316 (12, x1.05) | 2.291 (13, x1.97) | 1.394 (12, x3.24) | 1.303 (12, x3.47) |
+| large_pyramid | AS solve (workers) | 4.439 | 4.048 | 3.330 | 3.624 |
+| many_bodies | native simd | 6.933 (5) | 3.522 (5) | 1.976 (5) | 1.630 (5) |
+| many_bodies | AS serial | **10.133** (5) | | | |
+| many_bodies | AS parallel | 8.632 (5, x1.17) | 4.589 (6, x2.21) | 2.607 (6, x3.89) | 1.958 (7, x5.18) |
+| many_bodies | AS solve (workers) | 9.327 | 9.061 | 7.220 | 6.739 |
+| mesh_drop | native simd | 4.678 (5) | 2.498 (5) | 1.447 (10) | 1.153 (5) |
+| mesh_drop | AS serial | **6.222** (6) | | | |
+| mesh_drop | AS parallel | 6.395 (6, x0.97) | 3.413 (6, x1.82) | 2.018 (6, x3.08) | 1.676 (9, x3.71) |
+| mesh_drop | AS solve-jobs | 6.117 | 5.866 | 5.485 | 5.619 |
+| village | native simd | 2.098 (7) | 1.313 (9) | 0.896 (7) | 0.918 (10) |
+| village | AS serial | **2.883** (7) | | | |
+| village | AS parallel | 2.745 (10, x1.05) | 1.732 (9, x1.66) | 1.168 (6, x2.47) | 1.175 (9, x2.45) |
+| village | AS solve (workers) | 2.759 | 2.893 | 2.827 | 3.646 |
+
+- **Parallel calls track native.** From 1 to 8 parts the step gets 3.3 to 4.4x faster (village 2.3x), against native's
+  3.5, 4.3, 4.1 and 2.3x over 1 to 8 workers. The ratio to native stays 1.2 to 1.45x at every count: at 8, 1.35x
+  (large_pyramid), 1.20x (many_bodies), 1.45x (mesh_drop), 1.28x (village); at 4, 1.36, 1.32, 1.39 and 1.30x. The
+  runtime side's estimate (about 1.3x, large_pyramid about 1.2 ms at 8) holds: 1.30 ms here at load 12, 1.14 ms in the
+  session before (`session_20261026_113150.log`, load 6 to 13).
+- **Lanes, measured in the same session, stay at 1.1 to 1.5x** of serial at best and lose on village, as before.
+- The rows are AS's mean step, which for village includes the scene's queries. World step only, village is 0.928 ms at
+  4 parts against native's 0.726.
+
+Where the step goes (the profile spans of the best run, ms per step; on parallel calls each of pairs, collide, solver
+stages and finalize is one parallel call plus the main lane's share around it, rest is the main lane alone):
+
+| scene | impl, n | step | pairs | collide | solver stages | finalize | rest |
+|---|---|---|---|---|---|---|---|
+| large_pyramid | native 1 / 8 | 3.340 / 0.962 | 0.186 / 0.043 | 0.449 / 0.135 | 2.516 / 0.713 | 0.180 / 0.059 | 0.010 / 0.012 |
+| large_pyramid | parallel 1 / 8 | 4.316 / 1.303 | 0.167 / 0.068 | 0.732 / 0.194 | 3.195 / 0.965 | 0.206 / 0.057 | 0.015 / 0.019 |
+| many_bodies | native 1 / 8 | 6.933 / 1.629 | 0 / 0 | 1.103 / 0.265 | 5.471 / 1.267 | 0.357 / 0.095 | 0.001 / 0.003 |
+| many_bodies | parallel 1 / 8 | 8.632 / 1.958 | 0 / 0 | 1.560 / 0.338 | 6.651 / 1.530 | 0.414 / 0.083 | 0.007 / 0.007 |
+| mesh_drop | native 1 / 8 | 4.678 / 1.153 | 0.353 / 0.070 | 1.327 / 0.322 | 1.710 / 0.408 | 1.214 / 0.274 | 0.074 / 0.079 |
+| mesh_drop | parallel 1 / 8 | 6.394 / 1.676 | 0.206 / 0.119 | 2.416 / 0.555 | 1.947 / 0.432 | 1.709 / 0.440 | 0.117 / 0.130 |
+| village | native 1 / 8 | 1.927 / 0.743 | 0.276 / 0.129 | 0.569 / 0.160 | 0.821 / 0.344 | 0.236 / 0.082 | 0.024 / 0.029 |
+| village | parallel 1 / 8 | 2.504 / 0.931 | 0.220 / 0.178 | 0.969 / 0.254 | 0.959 / 0.357 | 0.319 / 0.099 | 0.037 / 0.042 |
+
+- **Solver stages:** 3.3 to 4.5x from 1 to 8 parts, village 2.7x (native 3.5 to 4.3x, village 2.4x); the parts scale
+  like native's workers, so the gap at 8 is the single lane's (0.97 against 0.71 ms on large_pyramid).
+- **Narrow phase:** 3.8 to 4.6x from 1 to 8 parts (native 3.3 to 4.2x). On mesh_drop the parts leave 162 of 5373 contacts a step to the
+  main lane (mesh refreshes past the cache's capacity); elsewhere 0 to 4.
+- **Pairs** on parallel calls is faster than serial even at one part: the tree rebuild moved into the narrow phase's
+  call, which it overlaps as C's tree task does. The rest of pairs (sorting, creating contacts) stays serial.
+- **The main lane's own share** (rest) is 0.007 to 0.13 ms: the serial parts between the calls are small. What remains
+  of the gap to native is the single lane ratio, not synchronization or serial work.
+- One part (`--parallel-safe`) runs at 0.97 to 1.17x the speed of the serial path in the same bake. The shared memory a parallel bake
+  uses cost nothing measurable single threaded (same bake with and without the parallel import, within noise).
+
+### What runs on parallel calls
+
+| task | C | here |
+|---|---|---|
+| solver stages | `b3SolverTask` workers spin between stages | one `Parallel.run` of `b3ParallelSolverTask` per step, `@parallel.inplace`; every part walks the orchestrator's stages, claims blocks with `part.claim(blockCount, 1)` and syncs after each stage; the overflow constraints run on part 0 between two syncs |
+| narrow phase | `b3ParallelFor(b3CollideTask)` | one call claiming C's block sizes; the last part first rebuilds the dynamic and kinematic trees, as C's tree task overlaps the narrow phase, and the main lane swaps the rebuilt nodes in after |
+| finalize bodies | `b3ParallelFor(b3FinalizeBodiesTask)` with continuous collision inline | one call, continuous included: sweeps against static hulls, capsules, spheres, meshes, height fields and compounds |
+| pair finding | two `b3ParallelFor`s, cross seeds and self pairs | one call, cross seeds, a sync, then self pairs; compound pairs included |
+| bullets, sensors, island split | parallel for / task | serial, as before (only the bullets scene has bullets) |
+
+Every task falls back to the serial path when a world has a custom filter, pre-solve, friction or restitution callback
+(parts cannot call a function value), and continuous falls back when a world has sensors (parts cannot push sensor hits).
+A part leaves to the main lane, after the call and before it has changed anything, the few contacts whose update would
+allocate: a new convex contact without manifold storage, and a mesh contact whose refreshed triangle cache would outgrow
+its capacity or fill all 512 slots. The main lane then updates them as the serial path does; order does not matter, as
+in C, since each contact's update writes only its own state and its worker's task context.
+
+### What the port needed
+
+- **One task context per part.** `b3World_EnableParallel` sets the world's worker count to `Parallel.size()`, which C
+  results are independent of, and parts use `part.index` as C's worker index.
+- **Per worker scratch.** About 70 module level buffers on the parts' paths, the perf passes' stand-ins for C's stack
+  arrays, became one set per worker: the convex manifold clip buffers and the SAT arrays (38), the GJK simplexes, the
+  time of impact's distance input and separation function, the triangle manifold buffers, the mesh contact scratch
+  (20), the continuous, mesh impact and compound impact contexts, the tree, mesh and qsort stacks, the pair contexts'
+  output. A part reaches its set by worker index, passed down where C passes a pointer to stack memory.
+- **Proxies that own their points.** A distance or time of impact proxy pointing at a hull's points is a reference store,
+  so on the parallel path proxies keep their own buffers and the points are copied in (8 for a box).
+- **A mode type argument.** The functions both paths run take `<M>`, `b3InParallel` (bool) or `b3OnMain` (i32), and
+  `if (isBoolean<M>())` branches leave the callbacks, allocations and reference stores out of the parallel
+  instantiation: callbacks become C's defaults (`b3MixFriction<M>`), allocations become checks done before the call.
+- **Visitor queries.** The tree, mesh, height field and compound node queries gained `...Visitor<V>` variants that call
+  `visit` on a class directly, since a part cannot call the callbacks the C API takes.
+- **Storage that does not grow in a part.** A convex contact keeps one manifold from creation, a mesh contact one per
+  cached triangle (zeroed as C's fresh allocation is); mesh scratch is reserved on the main lane for the largest cache
+  seen; the triangle cache's length is set within its capacity by a raw store into std's `Array` fields.
+- **C's atomics.** The tree's moved flags use `atomic.or` (C's `b3AtomicFetchOrU32`), the bullet count `atomic.add`.
+- **Compound children as shapes.** The main lane builds each compound child as a `b3Shape` once, and refreshes it when
+  the parent's identity, flags or materials change, so parts read the child instead of filling the shared scratch child.
+
+Lane serialization that went away: all of it. The parallel backend is 449 lines with no packing, no blob, no region and
+no raw copy of world state; the lanes backend is 2969 lines, about 1200 of them serialization with 137 raw load, store
+and memory.copy sites. Making the port parallel safe changed 1519 lines and removed 631 elsewhere in lib/ (per worker
+scratch, mode branches, visitor queries, re-indented blocks), most of it mechanical.
+
+### What blocked or surprised
+
+- **Races through shared scratch are invisible to the build check and break bit exactness at once.** One slipped: the
+  mesh path called `b3CollideTriangleAndHull` without the new `workerIndex`, whose default 0 made every part share worker
+  0's clip buffers. The build passed; the parity gate failed at step 52 of mesh_drop at 2 and 8 parts and passed at 1.
+- **The check found everything else, one thing per build.** Each refusal named the path, so the work was a loop of build,
+  fix the first refusal, build again. The solver stages passed the check on the first build, unchanged.
+- **Compile time specialization only folds a direct `if (isBoolean<M>())`.** An `@inline` wrapper returning it, a
+  `const` local holding it and a ternary on it all leave the other branch in, so the check still refuses it.
+- **Static array literals read in parallel code fail the CLI build as a global write** (below); the tables were rebuilt
+  from a function.
+- **Nothing about the solver needed changing.** Its kernels already ran over raw pointers into the awake set; 84 stage
+  syncs a step on large_pyramid cost nothing visible next to the stage work.
+
+### Build errors that were unclear
+
+```as
+const table: StaticArray<i32> = [0, 4, 0, 4];
+@parallel export function lookup(part: Part, out: SharedArray<i32>): void {
+	out[part.index] = table.length;
+}
+// rive-cli: [lint] main.as:9:20: @parallel lookup writes a global
+// rasc on the same file compiles it; const table = makeTable() passes in both
+```
+
+```as
+function f(w: W, x: f32): f32 { return w.cb(x); }
+@parallel.inplace export function run(part: Part, w: W): void { w.v = f(w, 1.0); }
+// error: @parallel run calls a function value, which a parallel call cannot check (through f)
+// at f(w, 1.0) in run, not at w.cb(x) in f; in Box3D it pointed at a call into b3UpdateConvexContact, whose friction
+// callback was the value
+```
+
+### API gaps worth fixing before release
+
+1. **Report races through objects reachable from globals**, at least as a warning: a write in `@parallel.inplace` code to
+   an object a module global holds is a write every part shares. It would have named all 70 scratch sites and the one
+   that slipped.
+2. **List every refusal, and point at the offending instruction** (the call through a value, the allocation) rather than
+   the last call of the path.
+3. **Fold literal const arrays and parallel reads of them** (repro above), and say why when a read counts as a write.
+4. **A documented compile time "in a part" constant**, or overloads per mode, instead of a type argument and
+   `isBoolean`; and fold it through `@inline`, `const` and ternaries.
+5. **Calling known functions through values.** C's callbacks (friction, restitution, pre-solve, filters, query
+   callbacks) run on workers. A function type marked `@parallel`, whose every assigned function the check verifies, would
+   keep the C API instead of visitor copies and fallbacks.
+6. **Appends into preallocated storage.** Parts need per part output (deferred contacts, pair keys, sensor hits, bullet
+   lists, the triangle cache's new length): `Array` length writes within capacity, or a `SharedArray` append that bumps
+   atomically and reports overflow, would replace raw stores into std's `Array` fields.
+7. **`Parallel.run` with at most n parts**, and a default that stays on the performance cores. The part count can only be
+   chosen by restarting with `--job-threads`, so benching 2 and 4 parts needs a run each, and 8 parts on this machine
+   lands on the second core cluster.
+8. **The monotonic clock in parallel code.** C times each solver stage on the main thread; here those profile fields
+   read 0 on the parallel path.
+9. **Document `atomic.*` on heap addresses in unsafe `@parallel.inplace` code.** It works and is what C's atomics on
+   tree nodes need, but the guide mentions only `SharedArray` atomics.
+10. **`@parallel.inplace` reads well** in real code: five entry points, one annotation each, and the reach of each is
+    checked; nothing about it was confusing.
+11. A combined result from `Parallel.run` was not missed: Box3D reduces per worker task contexts on the main lane, as C
+    does.
+
+## Lanes results (2026-10-24)
 
 Bit exact: verify/threads.sh runs all 13 trajectory scenes with the narrow phase, the solver stages and the tree
 rebuild on lanes, at 1 lane, 1 lane through the serialized path, 2, 4 and 8 lanes, on workers and on jobs, and
@@ -480,5 +659,6 @@ change the outcome of this port.
 | lib/lanes.as | the solver partitions, workers, jobs, the hooks, `b3World_EnableLanes(worldId, lanes, backend, tasks)` |
 | lib/lane_collide.as | the shape snapshot, the collide replica, packing and applying |
 | lib/lane_tree.as | the tree rebuild job |
+| lib/parallel_step.as | the parallel calls backend: solver stages, narrow phase with the tree rebuild, finalize, pair finding, `b3World_EnableParallel(worldId, tasks)` |
 | bench/threads/ | the bench project (`main.as`, `run.sh`, `run1.sh`, `table.py`) and `micro/`, the lane primitive costs |
 | verify/threads.sh, threads.mjs | the threaded parity gate |
