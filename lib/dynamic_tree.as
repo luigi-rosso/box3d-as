@@ -915,14 +915,21 @@ export function b3DynamicTree_GetByteCount(tree: b3DynamicTree): i32 {
 	return requireAllBits ? (categoryBits & maskBits) == maskBits : (categoryBits & maskBits) != 0;
 }
 
-// C keeps the query stacks on the C stack. Here the outermost query uses a static one and
-// a query nested inside a callback gets its own.
+// C keeps the query stacks on the C stack. Here each nesting depth keeps a static one, since a query nested inside
+// a callback (a ray reaching a mesh's own tree) runs once per candidate shape.
 let b3_queryStack = new StaticArray<i32>(B3_TREE_STACK_SIZE);
+let b3_nestedQueryStacks = new Array<StaticArray<i32>>();
 let b3_queryDepth = 0;
 
 function b3AcquireQueryStack(): StaticArray<i32> {
 	b3_queryDepth += 1;
-	return b3_queryDepth == 1 ? b3_queryStack : new StaticArray<i32>(B3_TREE_STACK_SIZE);
+	if (b3_queryDepth == 1) {
+		return b3_queryStack;
+	}
+	while (b3_nestedQueryStacks.length < b3_queryDepth - 1) {
+		b3_nestedQueryStacks.push(new StaticArray<i32>(B3_TREE_STACK_SIZE));
+	}
+	return b3_nestedQueryStacks[b3_queryDepth - 2];
 }
 
 struct b3QueryClosestItem {
