@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 // AnimaScript port of src/dynamic_tree.c
 
-import { B3_ASSERT, B3_ASSERT_ENABLED, B3_ENABLE_VALIDATION, B3_NULL_INDEX, FLT_MAX } from "./core";
+import { B3_ASSERT, B3_ASSERT_ENABLED, B3_ENABLE_VALIDATION, B3_NULL_INDEX, FLT_MAX, b3OnMain } from "./core";
 import {
 	b3AABB,
 	b3AABB_Center,
@@ -1918,6 +1918,51 @@ function b3BuildTree(tree: b3DynamicTree, leafCount: i32): void {
 // refitting much faster. This is done async with threading, so the cost is hidden.
 // Not safe to access tree during this operation.
 export function b3DynamicTree_Rebuild(tree: b3DynamicTree, fullBuild: bool): i32 {
+	return b3DynamicTree_RebuildAt<b3OnMain>(tree, fullBuild);
+}
+
+// Allocates what a rebuild of the tree needs, so a parallel part can run it
+export function b3DynamicTree_ReserveRebuild(tree: b3DynamicTree): void {
+	if (tree.swapNodes.length == 0) {
+		tree.swapNodes = new StaticArray<b3TreeNode>(tree.nodeCapacity);
+	}
+
+	let proxyCount = tree.proxyCount;
+	if (proxyCount > tree.rebuildCapacity) {
+		let newCapacity = proxyCount + proxyCount / 2;
+		tree.leafIndices = new StaticArray<i32>(newCapacity);
+		tree.leafNodes = new StaticArray<b3TreeNode>(newCapacity);
+		tree.leafCenters = new StaticArray<b3Vec3>(newCapacity);
+		tree.rebuildCapacity = newCapacity;
+	}
+}
+
+// Makes a parallel part's rebuild the tree; nothing reads the tree in between
+export function b3DynamicTree_FinishRebuild(tree: b3DynamicTree, fullBuild: bool): void {
+	if (tree.swapPending) {
+		tree.swapPending = false;
+		b3SwapRebuiltNodes(tree, fullBuild);
+	}
+}
+
+function b3SwapRebuiltNodes(tree: b3DynamicTree, fullBuild: bool): void {
+	// The spare is now the tree and the old array is the spare. The build is dense, so the
+	// stale tail of the old array sits above the end and is never read.
+	let temp = tree.nodes;
+	tree.nodes = tree.swapNodes;
+	tree.swapNodes = temp;
+	tree.pairFreeList = B3_NULL_INDEX;
+	tree.dfsOrdered = true;
+
+	b3DynamicTree_Validate(tree);
+	if (fullBuild == false) {
+		b3DynamicTree_ValidateNoMoved(tree);
+	}
+}
+
+// A parallel part, b3InParallel, runs it after b3DynamicTree_ReserveRebuild and leaves the swap to
+// b3DynamicTree_FinishRebuild
+export function b3DynamicTree_RebuildAt<M>(tree: b3DynamicTree, fullBuild: bool): i32 {
 	let proxyCount = tree.proxyCount;
 	if (proxyCount == 0) {
 		return 0;
@@ -1931,16 +1976,8 @@ export function b3DynamicTree_Rebuild(tree: b3DynamicTree, fullBuild: bool): i32
 		return 0;
 	}
 
-	if (tree.swapNodes.length == 0) {
-		tree.swapNodes = new StaticArray<b3TreeNode>(tree.nodeCapacity);
-	}
-
-	if (proxyCount > tree.rebuildCapacity) {
-		let newCapacity = proxyCount + proxyCount / 2;
-		tree.leafIndices = new StaticArray<i32>(newCapacity);
-		tree.leafNodes = new StaticArray<b3TreeNode>(newCapacity);
-		tree.leafCenters = new StaticArray<b3Vec3>(newCapacity);
-		tree.rebuildCapacity = newCapacity;
+	if (!isBoolean<M>()) {
+		b3DynamicTree_ReserveRebuild(tree);
 	}
 
 	let leafIndices = tree.leafIndices;
@@ -1991,17 +2028,10 @@ export function b3DynamicTree_Rebuild(tree: b3DynamicTree, fullBuild: bool): i32
 
 	b3BuildTree(tree, leafCount);
 
-	// The spare is now the tree and the old array is the spare. The build is dense, so the
-	// stale tail of the old array sits above the end and is never read.
-	let temp = tree.nodes;
-	tree.nodes = tree.swapNodes;
-	tree.swapNodes = temp;
-	tree.pairFreeList = B3_NULL_INDEX;
-	tree.dfsOrdered = true;
-
-	b3DynamicTree_Validate(tree);
-	if (fullBuild == false) {
-		b3DynamicTree_ValidateNoMoved(tree);
+	if (isBoolean<M>()) {
+		tree.swapPending = true;
+	} else {
+		b3SwapRebuiltNodes(tree, fullBuild);
 	}
 
 	return leafCount;

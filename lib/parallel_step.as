@@ -33,14 +33,17 @@ import {
 	b3SolverStage,
 	b3StepContext,
 } from "./solver";
+import { b3FinishTreesTask, b3ReserveTreesTask, b3UpdateTreesTaskAt } from "./broad_phase";
 import {
 	b3CollideTask,
 	b3DefaultFrictionCallback,
 	b3DefaultRestitutionCallback,
+	b3GetWorldFromId,
 	b3SetLaneCollide,
+	b3World,
 	b3World_SetWorkerCount,
 } from "./physics_world";
-import { b3WorldId } from "./types";
+import { b3EnqueueTaskCallback, b3FinishTaskCallback, b3TaskCallback, b3WorldId } from "./types";
 
 export const b3_parallelCollide: i32 = 1;
 export const b3_parallelSolve: i32 = 2;
@@ -193,8 +196,19 @@ function b3ParallelSolve(context: b3StepContext): bool {
 	return true;
 }
 
-// b3ParallelFor's blocks over the awake contacts, claimed by whichever part asks next
-@parallel.inplace export function b3ParallelCollideTask(part: Part, context: b3StepContext, contactCount: i32, blockSize: i32): void {
+// b3ParallelFor's blocks over the awake contacts, claimed by whichever part asks next. The last part first rebuilds the
+// trees when rebuildTrees is set, as C's tree task overlaps the narrow phase.
+@parallel.inplace export function b3ParallelCollideTask(
+	part: Part,
+	context: b3StepContext,
+	contactCount: i32,
+	blockSize: i32,
+	rebuildTrees: bool,
+): void {
+	if (rebuildTrees && part.index == part.count - 1) {
+		b3UpdateTreesTaskAt<b3InParallel>(context.world);
+	}
+
 	let workerIndex = part.index;
 	for (let start = part.claim(contactCount, blockSize); start < contactCount; start = part.claim(contactCount, blockSize)) {
 		b3CollideTask<b3InParallel>(start, min(start + blockSize, contactCount), workerIndex, context);
@@ -227,7 +241,23 @@ function b3ParallelCollide(context: b3StepContext, contactCount: i32): bool {
 	}
 	b3ReserveMeshScratchForWorkers(world.workerCount);
 
-	Parallel.run(b3ParallelCollideTask, context, contactCount, b3ParallelForBlockSize(contactCount, 20, world.workerCount));
+	let rebuildTrees = s_treesPending;
+	if (rebuildTrees) {
+		b3ReserveTreesTask(world);
+	}
+
+	Parallel.run(
+		b3ParallelCollideTask,
+		context,
+		contactCount,
+		b3ParallelForBlockSize(contactCount, 20, world.workerCount),
+		rebuildTrees,
+	);
+
+	if (rebuildTrees) {
+		s_treesPending = false;
+		b3FinishTreesTask(world);
+	}
 
 	for (let i = 0; i < world.workerCount; ++i) {
 		let taskContext = world.taskContexts[i];
@@ -268,19 +298,60 @@ unsafe function b3ParallelFinalize(context: b3StepContext, bodyCount: i32): bool
 	return true;
 }
 
+// The tree rebuild task b3UpdateBroadPhasePairs enqueues, run by the narrow phase's parallel call or else when finished
+let s_treesPending = false;
+const B3_TREES_TASK: u64 = 1;
+
+function b3ParallelEnqueue(task: b3TaskCallback, taskContext: u64, name: string): u64 {
+	if (name == "rebuild tree") {
+		s_treesPending = true;
+		return B3_TREES_TASK;
+	}
+
+	task(taskContext);
+	return 0;
+}
+
+function b3ParallelFinish(world: b3World, userTask: u64): void {
+	if (userTask == B3_TREES_TASK && s_treesPending) {
+		s_treesPending = false;
+		b3UpdateTreesTaskAt<b3OnMain>(world);
+	}
+}
+
+// The task callbacks the world had before b3World_EnableParallel
+const s_savedWorlds = new Array<b3World>();
+const s_savedEnqueue = new Array<b3EnqueueTaskCallback>();
+const s_savedFinish = new Array<b3FinishTaskCallback>();
+
 // Runs worldId's narrow phase, and its solver stages and body finalization, as tasks picks, on parallel calls. The world gets a task context
 // per part, which leaves its results unchanged as C's do at any worker count. tasks 0 turns it off.
 export function b3World_EnableParallel(worldId: b3WorldId, tasks: i32): void {
 	b3SetLaneSolve(null);
 	b3SetLaneCollide(null);
 	b3SetLaneFinalize(null);
+	for (let i = 0; i < s_savedWorlds.length; ++i) {
+		s_savedWorlds[i].enqueueTaskFcn = s_savedEnqueue[i];
+		s_savedWorlds[i].finishTaskFcn = s_savedFinish[i];
+	}
+	s_savedWorlds.length = 0;
+	s_savedEnqueue.length = 0;
+	s_savedFinish.length = 0;
+	s_treesPending = false;
 	if (tasks == 0) {
 		return;
 	}
 
 	b3World_SetWorkerCount(worldId, Parallel.size());
+	let world = b3GetWorldFromId(worldId);
 	if ((tasks & b3_parallelCollide) != 0) {
 		b3SetLaneCollide((context: b3StepContext, contactCount: i32): bool => b3ParallelCollide(context, contactCount));
+		s_savedWorlds.push(world);
+		s_savedEnqueue.push(world.enqueueTaskFcn);
+		s_savedFinish.push(world.finishTaskFcn);
+		world.enqueueTaskFcn = (task: b3TaskCallback, taskContext: u64, userContext: u64, name: string): u64 =>
+			b3ParallelEnqueue(task, taskContext, name);
+		world.finishTaskFcn = (userTask: u64, userContext: u64): void => b3ParallelFinish(world, userTask);
 	}
 	if ((tasks & b3_parallelSolve) != 0) {
 		b3SetLaneSolve((context: b3StepContext): bool => b3ParallelSolve(context));

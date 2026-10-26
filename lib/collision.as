@@ -331,6 +331,8 @@ export class b3DynamicTree {
 
 	/// Array of nodes for rebuild.
 	swapNodes: StaticArray<b3TreeNode> = new StaticArray<b3TreeNode>(0);
+	// A parallel part's rebuild left in swapNodes, b3DynamicTree_FinishRebuild
+	swapPending: bool = false;
 
 	/// Leaf indices for rebuild
 	leafIndices: StaticArray<i32> = new StaticArray<i32>(0);

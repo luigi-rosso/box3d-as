@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 // AnimaScript port of src/broad_phase.c
 
-import { B3_ASSERT, B3_ENABLE_VALIDATION, B3_NULL_INDEX } from "./core";
+import { B3_ASSERT, B3_ENABLE_VALIDATION, B3_NULL_INDEX, b3OnMain } from "./core";
 import { B3_MAX_TASKS, B3_SHAPE_POWER } from "./constants";
 import {
 	b3AABB,
@@ -27,7 +27,10 @@ import {
 	b3DynamicTree_MarkProxyMoved,
 	b3DynamicTree_MarkProxyMovedSerial,
 	b3DynamicTree_MoveProxyInternal,
+	b3DynamicTree_FinishRebuild,
 	b3DynamicTree_Rebuild,
+	b3DynamicTree_RebuildAt,
+	b3DynamicTree_ReserveRebuild,
 	b3DynamicTree_Validate,
 	b3DynamicTree_ValidateNoMoved,
 	b3GetLeftChild,
@@ -692,8 +695,23 @@ function b3CrossPairsTask(startIndex: i32, endIndex: i32, workerIndex: i32, cros
 }
 
 function b3UpdateTreesTask(world: b3World): void {
-	b3DynamicTree_Rebuild(world.broadPhase.trees[b3_dynamicBody], false);
-	b3DynamicTree_Rebuild(world.broadPhase.trees[b3_kinematicBody], false);
+	b3UpdateTreesTaskAt<b3OnMain>(world);
+}
+
+// b3UpdateTreesTask in a parallel part, b3InParallel, between b3ReserveTreesTask and b3FinishTreesTask
+export function b3UpdateTreesTaskAt<M>(world: b3World): void {
+	b3DynamicTree_RebuildAt<M>(world.broadPhase.trees[b3_dynamicBody], false);
+	b3DynamicTree_RebuildAt<M>(world.broadPhase.trees[b3_kinematicBody], false);
+}
+
+export function b3ReserveTreesTask(world: b3World): void {
+	b3DynamicTree_ReserveRebuild(world.broadPhase.trees[b3_dynamicBody]);
+	b3DynamicTree_ReserveRebuild(world.broadPhase.trees[b3_kinematicBody]);
+}
+
+export function b3FinishTreesTask(world: b3World): void {
+	b3DynamicTree_FinishRebuild(world.broadPhase.trees[b3_dynamicBody], false);
+	b3DynamicTree_FinishRebuild(world.broadPhase.trees[b3_kinematicBody], false);
 }
 
 // Task that can be done in parallel with the narrow-phase
