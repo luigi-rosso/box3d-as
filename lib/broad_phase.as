@@ -232,6 +232,11 @@ class b3PairContext {
 	proxyStack: StaticArray<i32> = new StaticArray<i32>(B3_TREE_STACK_SIZE);
 	pairStack: StaticArray<b3IndexPair> = new StaticArray<b3IndexPair>(B3_TREE_STACK_SIZE);
 
+	// A parallel part's new pair keys, which it cannot push; overflow when they outgrow the buffer
+	parallelKeys: StaticArray<u64> = new StaticArray<u64>(0);
+	parallelKeyCount: i32 = 0;
+	overflow: bool = false;
+
 	constructor(world: b3World, pairKeys: Array<u64>) {
 		this.world = world;
 		this.pairKeys = pairKeys;
@@ -262,7 +267,7 @@ struct b3IndexPair {
 
 // The shape pair gauntlet. Everything here is a property of the pair, not of a compound child,
 // so a compound runs it once for the whole pair.
-function b3ShouldCreatePair(world: b3World, shapeIdA: i32, shapeIdB: i32): bool {
+function b3ShouldCreatePair<M>(world: b3World, shapeIdA: i32, shapeIdB: i32): bool {
 	let shapeA = world.shapes[shapeIdA];
 	let shapeB = world.shapes[shapeIdB];
 
@@ -288,20 +293,22 @@ function b3ShouldCreatePair(world: b3World, shapeIdA: i32, shapeIdB: i32): bool 
 		return false;
 	}
 
-	// Custom user filter
-	if ((shapeA.flags & b3_enableCustomFiltering) != 0 || (shapeB.flags & b3_enableCustomFiltering) != 0) {
-		let customFilterFcn = world.customFilterFcn;
-		if (customFilterFcn != null) {
-			let idA = b3ShapeId();
-			idA.index1 = shapeIdA + 1;
-			idA.world0 = world.worldId;
-			idA.generation = shapeA.generation;
-			let idB = b3ShapeId();
-			idB.index1 = shapeIdB + 1;
-			idB.world0 = world.worldId;
-			idB.generation = shapeB.generation;
-			if (customFilterFcn(idA, idB) == false) {
-				return false;
+	// Custom user filter; parallel parts run only without one
+	if (!isBoolean<M>()) {
+		if ((shapeA.flags & b3_enableCustomFiltering) != 0 || (shapeB.flags & b3_enableCustomFiltering) != 0) {
+			let customFilterFcn = world.customFilterFcn;
+			if (customFilterFcn != null) {
+				let idA = b3ShapeId();
+				idA.index1 = shapeIdA + 1;
+				idA.world0 = world.worldId;
+				idA.generation = shapeA.generation;
+				let idB = b3ShapeId();
+				idB.index1 = shapeIdB + 1;
+				idB.world0 = world.worldId;
+				idB.generation = shapeB.generation;
+				if (customFilterFcn(idA, idB) == false) {
+					return false;
+				}
 			}
 		}
 	}
@@ -363,12 +370,12 @@ function b3EmitCompoundPairs(context: b3PairContext, compoundShapeId: i32, other
 	let view = b3GetCompoundTreeView(compoundShape.compound!);
 	b3TreeView_Query(view, localAABB, B3_DEFAULT_MASK_BITS, false, b3CompoundChildTreeCallback);
 
-	if (context.pairKeys.length > startCount && b3ShouldCreatePair(world, compoundShapeId, otherShapeId) == false) {
+	if (context.pairKeys.length > startCount && b3ShouldCreatePair<b3OnMain>(world, compoundShapeId, otherShapeId) == false) {
 		b3Array_Resize(context.pairKeys, startCount);
 	}
 }
 
-function b3FlushCandidatePairs(context: b3PairContext): void {
+function b3FlushCandidatePairs<M>(context: b3PairContext): void {
 	let world = context.world;
 	let bp = world.broadPhase;
 
@@ -378,7 +385,13 @@ function b3FlushCandidatePairs(context: b3PairContext): void {
 	let plain = context.plain;
 	let plainCount = 0;
 
-	if (context.checkCompounds) {
+	// Parallel parts run only without compounds
+	if (isBoolean<M>()) {
+		for (let i = 0; i < count1; ++i) {
+			plain[i] = context.batch[i];
+		}
+		plainCount = count1;
+	} else if (context.checkCompounds) {
 		// A compound expands into one pair per child, so its key is not known yet and it cannot
 		// ride the batched cull below.
 		let shapes = world.shapes;
@@ -425,21 +438,30 @@ function b3FlushCandidatePairs(context: b3PairContext): void {
 
 	// Filter candidates.
 	for (let i = 0; i < count2; ++i) {
-		if (b3ShouldCreatePair(world, candidates[i].shapeIdA, candidates[i].shapeIdB)) {
+		if (b3ShouldCreatePair<M>(world, candidates[i].shapeIdA, candidates[i].shapeIdB)) {
 			// The pair passed the gauntlet. A new contact will be created.
-			context.pairKeys.push(keys[i]);
+			if (isBoolean<M>()) {
+				if (context.parallelKeyCount < context.parallelKeys.length) {
+					context.parallelKeys[context.parallelKeyCount] = keys[i];
+					context.parallelKeyCount += 1;
+				} else {
+					context.overflow = true;
+				}
+			} else {
+				context.pairKeys.push(keys[i]);
+			}
 		}
 	}
 }
 
-@inline function b3AddCandidatePair(shapeIdA: i32, shapeIdB: i32, context: b3PairContext): void {
+@inline function b3AddCandidatePair<M>(shapeIdA: i32, shapeIdB: i32, context: b3PairContext): void {
 	// Follow shape index order.
 	ref candidate = context.batch[context.batchCount];
 	candidate.shapeIdA = b3MinInt(shapeIdA, shapeIdB);
 	candidate.shapeIdB = b3MaxInt(shapeIdA, shapeIdB);
 	context.batchCount += 1;
 	if (context.batchCount == B3_CANDIDATE_BATCH) {
-		b3FlushCandidatePairs(context);
+		b3FlushCandidatePairs<M>(context);
 	}
 }
 
@@ -452,7 +474,7 @@ function b3FlushCandidatePairs(context: b3PairContext): void {
 	return b3OverlapV(a.aabb, b.aabb);
 }
 
-function b3CollideProxyAndSubtree(proxy: b3TreeNode, nodes: StaticArray<b3TreeNode>, pair: i32, context: b3PairContext): void {
+function b3CollideProxyAndSubtree<M>(proxy: b3TreeNode, nodes: StaticArray<b3TreeNode>, pair: i32, context: b3PairContext): void {
 	let proxyMark = proxy.flagIndex & B3_MOVED_NODE;
 	let boxv = b3LoadAABBV(proxy.aabb);
 	let shapeId = proxy.shapeIndex;
@@ -474,7 +496,7 @@ function b3CollideProxyAndSubtree(proxy: b3TreeNode, nodes: StaticArray<b3TreeNo
 			}
 
 			if (b3IsLeaf(node)) {
-				b3AddCandidatePair(shapeId, node.shapeIndex, context);
+				b3AddCandidatePair<M>(shapeId, node.shapeIndex, context);
 			} else {
 				if (stackCount < B3_TREE_STACK_SIZE) {
 					stack[stackCount++] = b3GetLeftChild(node);
@@ -488,7 +510,7 @@ function b3CollideProxyAndSubtree(proxy: b3TreeNode, nodes: StaticArray<b3TreeNo
 
 // Helper for b3CollideCrossPairs to avoid code duplication. Returns the new stack count, which C
 // writes through a pointer.
-@inline function b3VisitPair(
+@inline function b3VisitPair<M>(
 	arrayA: StaticArray<b3TreeNode>,
 	arrayB: StaticArray<b3TreeNode>,
 	nodeA: b3TreeNode,
@@ -504,11 +526,11 @@ function b3CollideProxyAndSubtree(proxy: b3TreeNode, nodes: StaticArray<b3TreeNo
 	let leafA = b3IsLeaf(nodeA);
 	let leafB = b3IsLeaf(nodeB);
 	if (leafA && leafB) {
-		b3AddCandidatePair(nodeA.shapeIndex, nodeB.shapeIndex, context);
+		b3AddCandidatePair<M>(nodeA.shapeIndex, nodeB.shapeIndex, context);
 	} else if (leafA) {
-		b3CollideProxyAndSubtree(nodeA, arrayB, b3GetLeftChild(nodeB), context);
+		b3CollideProxyAndSubtree<M>(nodeA, arrayB, b3GetLeftChild(nodeB), context);
 	} else if (leafB) {
-		b3CollideProxyAndSubtree(nodeB, arrayA, b3GetLeftChild(nodeA), context);
+		b3CollideProxyAndSubtree<M>(nodeB, arrayA, b3GetLeftChild(nodeA), context);
 	} else {
 		if (stackCount < B3_TREE_STACK_SIZE) {
 			stack[stackCount] = b3IndexPair(b3GetLeftChild(nodeA), b3GetLeftChild(nodeB));
@@ -533,7 +555,7 @@ function b3CollideProxyAndSubtree(proxy: b3TreeNode, nodes: StaticArray<b3TreeNo
 // See Real-time collision detection section 6.3.2. This is faster than querying every moved
 // proxy against the whole tree. Scaling is linear instead of linear * log.
 // Many other physics engines do this (Bepu, Rapier, etc). So nothing new here.
-function b3CollideCrossPairs(
+function b3CollideCrossPairs<M>(
 	arrayA: StaticArray<b3TreeNode>,
 	arrayB: StaticArray<b3TreeNode>,
 	subtreeA: b3TreeNode,
@@ -544,13 +566,13 @@ function b3CollideCrossPairs(
 	let stackCount = 0;
 
 	// Seed the stack.
-	stackCount = b3VisitPair(arrayA, arrayB, subtreeA, subtreeB, stack, stackCount, context);
+	stackCount = b3VisitPair<M>(arrayA, arrayB, subtreeA, subtreeB, stack, stackCount, context);
 
 	while (stackCount > 0) {
 		let pair = stack[--stackCount];
 		for (let i = 0; i < 2; ++i) {
 			for (let j = 0; j < 2; ++j) {
-				stackCount = b3VisitPair(arrayA, arrayB, arrayA[pair.a + i], arrayB[pair.b + j], stack, stackCount, context);
+				stackCount = b3VisitPair<M>(arrayA, arrayB, arrayA[pair.a + i], arrayB[pair.b + j], stack, stackCount, context);
 			}
 		}
 	}
@@ -558,8 +580,16 @@ function b3CollideCrossPairs(
 
 // This takes moved internal nodes and collides their sub-trees against each other.
 // One pair context per worker, reset for each task
-function b3AcquirePairContext(world: b3World, workerIndex: i32): b3PairContext {
+// A parallel part's context, which b3PrepareParallelPairs made, already points at the world
+function b3AcquirePairContext<M>(world: b3World, workerIndex: i32): b3PairContext {
 	let contexts = world.broadPhase.pairContexts;
+	if (isBoolean<M>()) {
+		let context = contexts[workerIndex];
+		context.batchCount = 0;
+		context.checkCompounds = false;
+		return context;
+	}
+
 	while (contexts.length <= workerIndex) {
 		contexts.push(new b3PairContext(world, world.taskContexts[contexts.length].pairKeys));
 	}
@@ -572,20 +602,20 @@ function b3AcquirePairContext(world: b3World, workerIndex: i32): b3PairContext {
 	return context;
 }
 
-function b3SelfPairsTask(startIndex: i32, endIndex: i32, workerIndex: i32, world: b3World): void {
+export function b3SelfPairsTask<M>(startIndex: i32, endIndex: i32, workerIndex: i32, world: b3World): void {
 	let bp = world.broadPhase;
 	let tree = bp.trees[b3_dynamicBody];
 	let nodes = tree.nodes;
 	let siblingIndices = bp.movedSiblings;
 
-	let pairContext = b3AcquirePairContext(world, workerIndex);
+	let pairContext = b3AcquirePairContext<M>(world, workerIndex);
 
 	for (let i = startIndex; i < endIndex; ++i) {
 		let nodeIndex = siblingIndices[i];
-		b3CollideCrossPairs(nodes, nodes, nodes[nodeIndex], nodes[nodeIndex + 1], pairContext);
+		b3CollideCrossPairs<M>(nodes, nodes, nodes[nodeIndex], nodes[nodeIndex + 1], pairContext);
 	}
 
-	b3FlushCandidatePairs(pairContext);
+	b3FlushCandidatePairs<M>(pairContext);
 }
 
 const B3_CROSS_SEED_COUNT: i32 = 64;
@@ -652,7 +682,7 @@ function b3GatherCrossSeeds(
 	return seedCount;
 }
 
-class b3CrossContext {
+export class b3CrossContext {
 	world: b3World;
 	seeds: StaticArray<b3NodePair>;
 	staticSeedCount: i32;
@@ -666,14 +696,14 @@ class b3CrossContext {
 	}
 }
 
-function b3CrossPairsTask(startIndex: i32, endIndex: i32, workerIndex: i32, crossContext: b3CrossContext): void {
+export function b3CrossPairsTask<M>(startIndex: i32, endIndex: i32, workerIndex: i32, crossContext: b3CrossContext): void {
 	let world = crossContext.world;
 	let bp = world.broadPhase;
 	let staticNodes = bp.trees[b3_staticBody].nodes;
 	let kinematicNodes = bp.trees[b3_kinematicBody].nodes;
 	let dynamicNodes = bp.trees[b3_dynamicBody].nodes;
 
-	let pairContext = b3AcquirePairContext(world, workerIndex);
+	let pairContext = b3AcquirePairContext<M>(world, workerIndex);
 
 	// Static seeds come first, so the two passes are contiguous sub-ranges. The batch is drained
 	// between them because only the static pass can meet a compound.
@@ -682,16 +712,16 @@ function b3CrossPairsTask(startIndex: i32, endIndex: i32, workerIndex: i32, cros
 	pairContext.checkCompounds = crossContext.checkCompounds;
 	for (let i = startIndex; i < staticEnd; ++i) {
 		let seed = crossContext.seeds[i];
-		b3CollideCrossPairs(dynamicNodes, staticNodes, seed.a, seed.b, pairContext);
+		b3CollideCrossPairs<M>(dynamicNodes, staticNodes, seed.a, seed.b, pairContext);
 	}
-	b3FlushCandidatePairs(pairContext);
+	b3FlushCandidatePairs<M>(pairContext);
 
 	pairContext.checkCompounds = false;
 	for (let i = b3MaxInt(startIndex, crossContext.staticSeedCount); i < endIndex; ++i) {
 		let seed = crossContext.seeds[i];
-		b3CollideCrossPairs(dynamicNodes, kinematicNodes, seed.a, seed.b, pairContext);
+		b3CollideCrossPairs<M>(dynamicNodes, kinematicNodes, seed.a, seed.b, pairContext);
 	}
-	b3FlushCandidatePairs(pairContext);
+	b3FlushCandidatePairs<M>(pairContext);
 }
 
 function b3UpdateTreesTask(world: b3World): void {
@@ -749,6 +779,56 @@ class b3PairKeySorter {
 
 const s_pairKeySorter = new b3PairKeySorter();
 
+// Finds a step's new pairs somewhere else, such as on parallel calls, or answers false to leave it here
+export type b3LanePairsFcn = (world: b3World, crossContext: b3CrossContext, crossCount: i32, selfCount: i32) => bool;
+
+let b3_lanePairs: b3LanePairsFcn? = null;
+
+export function b3SetLanePairs(fcn: b3LanePairsFcn?): void {
+	b3_lanePairs = fcn;
+}
+
+// Gives every worker a pair context pointing at the world, with room for keyCapacity new pairs
+export function b3PrepareParallelPairs(world: b3World, keyCapacity: i32): void {
+	let contexts = world.broadPhase.pairContexts;
+	while (contexts.length < world.workerCount) {
+		contexts.push(new b3PairContext(world, world.taskContexts[contexts.length].pairKeys));
+	}
+
+	for (let i = 0; i < world.workerCount; ++i) {
+		let context = contexts[i];
+		context.world = world;
+		context.pairKeys = world.taskContexts[i].pairKeys;
+		if (context.parallelKeys.length < keyCapacity) {
+			context.parallelKeys = new StaticArray<u64>(keyCapacity);
+		}
+		context.parallelKeyCount = 0;
+		context.overflow = false;
+	}
+}
+
+// Moves the parts' new pairs into the task contexts and answers how many, or -1 when a part ran out of room
+export function b3CollectParallelPairs(world: b3World): i32 {
+	let contexts = world.broadPhase.pairContexts;
+	let total = 0;
+	for (let i = 0; i < world.workerCount; ++i) {
+		if (contexts[i].overflow) {
+			return -1;
+		}
+		total += contexts[i].parallelKeyCount;
+	}
+
+	for (let i = 0; i < world.workerCount; ++i) {
+		let context = contexts[i];
+		let pairKeys = world.taskContexts[i].pairKeys;
+		let keys = context.parallelKeys;
+		for (let k = 0; k < context.parallelKeyCount; ++k) {
+			pairKeys.push(keys[k]);
+		}
+	}
+	return total;
+}
+
 export function b3UpdateBroadPhasePairs(world: b3World): void {
 	let bp = world.broadPhase;
 
@@ -786,23 +866,26 @@ export function b3UpdateBroadPhasePairs(world: b3World): void {
 
 		// Collide the dynamic body tree against the static and kinematic trees.
 		let crossContext = new b3CrossContext(world, crossSeeds, staticSeedCount, world.compoundShapeCount > 0);
-		b3ParallelFor(
-			world,
-			(startIndex: i32, endIndex: i32, workerIndex: i32): void =>
-				b3CrossPairsTask(startIndex, endIndex, workerIndex, crossContext),
-			crossMoveCount,
-			1,
-			"cross pairs",
-		);
+		let lanePairs = b3_lanePairs;
+		if (lanePairs == null || lanePairs(world, crossContext, crossMoveCount, dynamicMoveCount) == false) {
+			b3ParallelFor(
+				world,
+				(startIndex: i32, endIndex: i32, workerIndex: i32): void =>
+					b3CrossPairsTask<b3OnMain>(startIndex, endIndex, workerIndex, crossContext),
+				crossMoveCount,
+				1,
+				"cross pairs",
+			);
 
-		// Collide the dynamic body tree against itself.
-		b3ParallelFor(
-			world,
-			(startIndex: i32, endIndex: i32, workerIndex: i32): void => b3SelfPairsTask(startIndex, endIndex, workerIndex, world),
-			dynamicMoveCount,
-			64,
-			"self pairs",
-		);
+			// Collide the dynamic body tree against itself.
+			b3ParallelFor(
+				world,
+				(startIndex: i32, endIndex: i32, workerIndex: i32): void => b3SelfPairsTask<b3OnMain>(startIndex, endIndex, workerIndex, world),
+				dynamicMoveCount,
+				64,
+				"self pairs",
+			);
+		}
 	}
 
 	b3DynamicTree_ClearMoved(bp.trees[b3_staticBody]);

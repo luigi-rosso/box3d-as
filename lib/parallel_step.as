@@ -34,7 +34,17 @@ import {
 	b3SolverStage,
 	b3StepContext,
 } from "./solver";
-import { b3FinishTreesTask, b3ReserveTreesTask, b3UpdateTreesTaskAt } from "./broad_phase";
+import {
+	b3CollectParallelPairs,
+	b3CrossContext,
+	b3CrossPairsTask,
+	b3FinishTreesTask,
+	b3PrepareParallelPairs,
+	b3ReserveTreesTask,
+	b3SelfPairsTask,
+	b3SetLanePairs,
+	b3UpdateTreesTaskAt,
+} from "./broad_phase";
 import {
 	b3CollideTask,
 	b3DefaultFrictionCallback,
@@ -323,6 +333,56 @@ unsafe function b3ParallelFinalize(context: b3StepContext, bodyCount: i32): bool
 	return true;
 }
 
+// b3UpdateBroadPhasePairs' two parallel fors, the cross tree seeds and then the moved siblings of the dynamic tree
+@parallel.inplace export function b3ParallelPairsTask(
+	part: Part,
+	world: b3World,
+	crossContext: b3CrossContext,
+	crossCount: i32,
+	selfCount: i32,
+	selfBlockSize: i32,
+): void {
+	let workerIndex = part.index;
+	for (let i = part.claim(crossCount, 1); i < crossCount; i = part.claim(crossCount, 1)) {
+		b3CrossPairsTask<b3InParallel>(i, i + 1, workerIndex, crossContext);
+	}
+	part.sync();
+
+	for (let start = part.claim(selfCount, selfBlockSize); start < selfCount; start = part.claim(selfCount, selfBlockSize)) {
+		b3SelfPairsTask<b3InParallel>(start, min(start + selfBlockSize, selfCount), workerIndex, world);
+	}
+}
+
+// Room for this many new pairs per part, grown after a step that ran out
+let s_pairKeyCapacity = 1024;
+
+function b3ParallelPairs(world: b3World, crossContext: b3CrossContext, crossCount: i32, selfCount: i32): bool {
+	// Parts cannot expand compound pairs or call a custom filter
+	if (world.compoundShapeCount > 0 || world.customFilterFcn != null || Parallel.size() > world.workerCount) {
+		return false;
+	}
+
+	b3PrepareParallelPairs(world, s_pairKeyCapacity);
+	Parallel.run(
+		b3ParallelPairsTask,
+		world,
+		crossContext,
+		crossCount,
+		selfCount,
+		b3ParallelForBlockSize(selfCount, 64, world.workerCount),
+	);
+
+	// Finding pairs changes nothing else, so a part that ran out of room means finding them again here
+	if (b3CollectParallelPairs(world) < 0) {
+		s_pairKeyCapacity *= 4;
+		for (let i = 0; i < world.workerCount; ++i) {
+			world.taskContexts[i].pairKeys.length = 0;
+		}
+		return false;
+	}
+	return true;
+}
+
 // The tree rebuild task b3UpdateBroadPhasePairs enqueues, run by the narrow phase's parallel call or else when finished
 let s_treesPending = false;
 const B3_TREES_TASK: u64 = 1;
@@ -355,6 +415,7 @@ export function b3World_EnableParallel(worldId: b3WorldId, tasks: i32): void {
 	b3SetLaneSolve(null);
 	b3SetLaneCollide(null);
 	b3SetLaneFinalize(null);
+	b3SetLanePairs(null);
 	for (let i = 0; i < s_savedWorlds.length; ++i) {
 		s_savedWorlds[i].enqueueTaskFcn = s_savedEnqueue[i];
 		s_savedWorlds[i].finishTaskFcn = s_savedFinish[i];
@@ -371,6 +432,9 @@ export function b3World_EnableParallel(worldId: b3WorldId, tasks: i32): void {
 	let world = b3GetWorldFromId(worldId);
 	if ((tasks & b3_parallelCollide) != 0) {
 		b3SetLaneCollide((context: b3StepContext, contactCount: i32): bool => b3ParallelCollide(context, contactCount));
+		b3SetLanePairs((world: b3World, crossContext: b3CrossContext, crossCount: i32, selfCount: i32): bool =>
+			b3ParallelPairs(world, crossContext, crossCount, selfCount),
+		);
 		s_savedWorlds.push(world);
 		s_savedEnqueue.push(world.enqueueTaskFcn);
 		s_savedFinish.push(world.finishTaskFcn);
