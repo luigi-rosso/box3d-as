@@ -943,7 +943,6 @@ function b3PrefilterTriangles(
 	b3StoreL<T>(changetype<usize>(data) + <usize>index * 4, a);
 }
 
-@unchecked
 export unsafe function b3ComputeMeshManifolds(
 	world: b3World,
 	workerIndex: i32,
@@ -958,7 +957,9 @@ export unsafe function b3ComputeMeshManifolds(
 	return b3ComputeMeshManifoldsAt<b3OnMain>(world, workerIndex, contact, shapeA, materialMap, xfA, shapeB, xfB, isFast);
 }
 
-// M is b3InParallel for the instantiation parallel parts run
+// M is b3InParallel for the instantiation parallel parts run. Unchecked: its scratch covers the counts its loops are
+// bounded by (notes/perf_collide.md, change 7); reads of shape supplied data stay checked through helpers.
+@unchecked
 export unsafe function b3ComputeMeshManifoldsAt<M>(
 	world: b3World,
 	workerIndex: i32,
