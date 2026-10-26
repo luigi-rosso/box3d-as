@@ -13,6 +13,7 @@ import { b3GetTicks, b3GetLengthUnitsPerMeter, b3SetLengthUnitsPerMeter } from "
 import {
 	B3_MAX_LANES,
 	b3_laneBackendJobs,
+	b3_laneBackendParallel,
 	b3_laneBackendWorkers,
 	b3GrowI32,
 	b3GrowU32,
@@ -38,6 +39,7 @@ import {
 	b3LaneCollideReplica,
 	b3LaneCollideSupported,
 } from "./lane_collide";
+import { b3World_EnableParallel } from "./parallel_step";
 import { b3LaneTreeApply, b3LaneTreeJob, b3LaneTreeMain, b3LaneTreePack } from "./lane_tree";
 import { b3EnqueueTaskCallback, b3FinishTaskCallback, b3TaskCallback } from "./types";
 import { B3_GRAPH_COLOR_COUNT } from "./constants";
@@ -74,7 +76,7 @@ import {
 import { b3CollideTask, b3SetLaneCollide, b3World, b3GetWorldFromId } from "./physics_world";
 import { b3WorldId } from "./types";
 
-export { B3_MAX_LANES, b3_laneBackendJobs, b3_laneBackendWorkers } from "./lane_common";
+export { B3_MAX_LANES, b3_laneBackendJobs, b3_laneBackendParallel, b3_laneBackendWorkers } from "./lane_common";
 
 // Which tasks b3World_EnableLanes moves to lanes
 export const b3_laneCollide: i32 = 1;
@@ -1683,6 +1685,10 @@ export function b3World_EnableLanes(worldId: b3WorldId, lanes: i32, backend: i32
 	b3SetLaneSolve(null);
 	b3SetLaneCollide(null);
 	if (lanes <= 0) {
+		return null;
+	}
+	if (backend == b3_laneBackendParallel) {
+		b3World_EnableParallel(worldId, tasks & (b3_laneCollide | b3_laneSolve));
 		return null;
 	}
 	b3SetLaneClock((): f64 => <f64>b3GetTicks() * 1e-6);
