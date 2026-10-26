@@ -2,7 +2,7 @@
 # Builds the four single threaded web modules into bench/web/out:
 #   c_simd, c_scalar     native Box3D through emscripten (Release, -O3, wasm SIMD or BOX3D_DISABLE_SIMD)
 #   as_simd.wasm, as_scalar.wasm   the port through rasc -O2 (release bake: binaryen -O3 post pass)
-# THREADS=1 adds c_simd_mt and c_scalar_mt, the pthreads builds.
+# THREADS=1 adds c_simd_mt and c_scalar_mt, the pthreads builds; PROFILE=1 the named builds below.
 # EMSDK names the emsdk root, WASM_OPT the binaryen 133 wasm-opt that rive-cli links.
 set -e
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -34,6 +34,11 @@ c_build c_scalar -DBOX3D_DISABLE_SIMD=ON
 if [ "${THREADS:-0}" = "1" ]; then
 	c_build c_simd_mt -DBOX3D_DISABLE_SIMD=OFF -DWEB_THREADS=ON
 	c_build c_scalar_mt -DBOX3D_DISABLE_SIMD=ON -DWEB_THREADS=ON
+fi
+# PROFILE=1 adds c_simd_prof and c_scalar_prof, which keep function names for V8 profiles
+if [ "${PROFILE:-0}" = "1" ]; then
+	c_build c_simd_prof -DBOX3D_DISABLE_SIMD=OFF -DCMAKE_EXE_LINKER_FLAGS=--profiling-funcs
+	c_build c_scalar_prof -DBOX3D_DISABLE_SIMD=ON -DCMAKE_EXE_LINKER_FLAGS=--profiling-funcs
 fi
 
 # Release bake flags: optimized, no fuel (dangerouslyFast), throws stripped, frame collector

@@ -13,6 +13,8 @@ import { appendFileSync, mkdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { dirname, join, normalize, extname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { readFileSync, existsSync } from 'node:fs';
+import { parseBench, recordingHashes } from './core.mjs';
 
 const here = dirname( fileURLToPath( import.meta.url ) );
 const root = join( here, '..', '..' );
@@ -43,11 +45,7 @@ await new Promise( ( resolve ) => server.listen( 0, '127.0.0.1', resolve ) );
 const url = `http://127.0.0.1:${server.address().port}/bench/web/page.html`;
 
 const browser = await chromium.launch( { channel: 'chrome', headless: true } );
-if ( process.env.RIVS )
-{
-	await runRivs( process.env.RIVS.split( /\s+/ ).filter( Boolean ) );
-	process.exit( 0 );
-}
+
 const rounds = Number( process.env.ROUNDS ?? 3 );
 const impls = ( process.env.IMPLS ?? 'c_simd c_scalar as_simd as_scalar' ).split( /\s+/ ).filter( Boolean );
 const scenes = ( process.env.SCENES ??
@@ -60,6 +58,11 @@ const log = join( here, 'out', `chrome_${stamp}.jsonl` );
 appendFileSync( log, JSON.stringify( { node: `Chrome ${browser.version()}`, v8: 'chrome', machine:
 	execFileSync( 'sysctl', [ '-n', 'machdep.cpu.brand_string' ] ).toString().trim() } ) + '\n' );
 console.log( `log ${log}` );
+if ( process.env.RIVS )
+{
+	await runRivs( process.env.RIVS.split( /\s+/ ).filter( Boolean ) );
+	process.exit( 0 );
+}
 for ( let r = 0; r < rounds; ++r )
 {
 	for ( const entry of scenes )
@@ -118,8 +121,14 @@ async function runRivs( names )
 				out = { error: String( err ) };
 			}
 			await page.close();
-			console.log( `RIV round=${r} name=${name} load=${load} ${out.result ?? 'NO RESULT ' + ( out.error ?? '' ) + ' ' +
-				( out.lines ?? [] ).slice( -5 ).join( ' / ' )}` );
+			const scene = name.split( '__' )[0];
+			const refPath = join( root, 'verify', 'scenes', 'out', `${scene}_scalar_w1.bin` );
+			const ref = existsSync( refPath ) ? recordingHashes( readFileSync( refPath ) ) : [];
+			const result = out.result ? parseBench( out.result, name, ref )
+				: { impl: name, scene, error: `${out.error ?? ''} ${( out.lines ?? [] ).slice( -5 ).join( ' / ' )}` };
+			appendFileSync( log, JSON.stringify( { round: r, load, ...result } ) + '\n' );
+			console.log( `round ${r} ${name} load ${load} median ${result.median} ` +
+				`${result.error ?? ( result.mismatch === -1 ? 'hash ok' : 'HASH MISMATCH' )}` );
 		}
 	}
 	await browser.close();

@@ -5,7 +5,9 @@
 // interleaved over rounds. Appends to a jsonl that bench.mjs --table= reads.
 //   HARNESS_NODE=<web_scripting_harness.mjs> ROUNDS=3 node bench/web/threads.mjs
 //   BAKE=1 also bakes every scene and config first.
-// AS runs report bench/threads' median over steps 1 on, from one run of the bake; the C runs run.mjs's.
+//   node bench/web/threads.mjs --table=a.jsonl[,b.jsonl] prints ms per step by worker or lane count
+// Every run reports the median over steps 1 on, which is what bench/threads times; the C runs take run.mjs's
+// untimed pass first, the AS bakes run once, as a page would.
 
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -14,6 +16,12 @@ import { fileURLToPath } from 'node:url';
 import { parseBench, recordingHashes } from './core.mjs';
 
 const here = dirname( fileURLToPath( import.meta.url ) );
+const tableArg = process.argv.find( ( a ) => a.startsWith( '--table=' ) );
+if ( tableArg )
+{
+	table( tableArg.slice( 8 ).split( ',' ) );
+	process.exit( 0 );
+}
 const rounds = Number( process.env.ROUNDS ?? 3 );
 const counts = ( process.env.COUNTS ?? '1 2 4 8' ).split( /\s+/ ).filter( Boolean ).map( Number );
 // scene:steps:bench/threads SCENE
@@ -70,7 +78,7 @@ for ( let round = 0; round < rounds; ++round )
 			for ( const n of counts )
 			{
 				jobs.push( () => JSON.parse( execFileSync( process.execPath, [ join( here, 'run.mjs' ), impl, scene, steps,
-					`--workers=${n}` ], { maxBuffer: 1 << 26 } ).toString().trim().split( '\n' ).pop() ) );
+					`--workers=${n}`, '--warmup=1' ], { maxBuffer: 1 << 26 } ).toString().trim().split( '\n' ).pop() ) );
 			}
 		}
 		for ( const r of rivs.filter( ( r ) => r.name.startsWith( `${scene}__` ) ) )
@@ -100,5 +108,49 @@ for ( let round = 0; round < rounds; ++round )
 			console.log( `round ${round} ${scene} ${result.impl} n${result.workers} load ${load} median ` +
 				`${result.median?.toFixed( 3 )} ${result.error ? 'ERROR' : result.mismatch === -1 ? 'hash ok' : 'HASH MISMATCH'}` );
 		}
+	}
+}
+
+// Per scene, the min over rounds of each run's median ms per step, by worker or lane count, with the speed up
+// over the same implementation at 1; logs from several sessions (node, Chrome) join as separate rows
+function table( paths )
+{
+	const runs = [];
+	for ( const path of paths )
+	{
+		const lines = readFileSync( path, 'utf8' ).trim().split( '\n' ).map( ( l ) => JSON.parse( l ) );
+		const host = lines[0].v8 === 'chrome' ? lines[0].node : `node ${lines[0].node}`;
+		runs.push( ...lines.slice( 1 ).filter( ( r ) => !r.error ).map( ( r ) => ( { ...r, host } ) ) );
+	}
+	const best = new Map();
+	for ( const r of runs )
+	{
+		const key = `${r.scene}|${r.host}|${r.impl}|${r.workers}`;
+		const b = best.get( key ) ?? { median: Infinity, n: 0, ok: 0 };
+		b.median = Math.min( b.median, r.median );
+		b.n += 1;
+		b.ok += r.mismatch === -1 && r.compared > 0 ? 1 : 0;
+		best.set( key, b );
+	}
+	const counts = [ 1, 2, 4, 8 ];
+	const loads = runs.map( ( r ) => r.load );
+	console.log( `${runs.length} runs, load ${Math.min( ...loads )} to ${Math.max( ...loads )}, hashes ok ` +
+		`${[ ...best.values() ].reduce( ( a, b ) => a + b.ok, 0 )} of ${runs.length}` );
+	console.log( '| scene | host | impl | 1 | 2 | 4 | 8 |' );
+	console.log( '|---|---|---|---|---|---|---|' );
+	const rows = [ ...new Set( runs.map( ( r ) => `${r.scene}|${r.host}|${r.impl}` ) ) ];
+	for ( const row of rows )
+	{
+		const one = best.get( `${row}|1` )?.median;
+		const cells = counts.map( ( n ) =>
+		{
+			const b = best.get( `${row}|${n}` );
+			if ( !b )
+			{
+				return '';
+			}
+			return n === 1 || !one ? b.median.toFixed( 3 ) : `${b.median.toFixed( 3 )} (x${( one / b.median ).toFixed( 2 )})`;
+		} );
+		console.log( `| ${row.split( '|' ).join( ' | ' )} | ${cells.join( ' | ' )} |` );
 	}
 }
