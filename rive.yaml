@@ -10,6 +10,7 @@ artboard:
 exclude:
   - verify
   - bench
+  - examples
   - notes
   - demo/fonts/OFL-Inter.txt
   - CONVENTIONS.md
