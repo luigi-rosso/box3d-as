@@ -242,7 +242,7 @@ export class b3TaskContext {
 	// B3_CONTACT_MANIFOLD_COUNT_BUCKETS; a FixedArray length must be a literal
 	manifoldCounts: FixedArray<i32, 8>;
 
-	// Awake contact slots a parallel part leaves to the main lane: compound contacts and those that would allocate
+	// Awake contact slots a parallel part leaves to the main lane, those whose update would allocate
 	deferredContacts: StaticArray<i32> = new StaticArray<i32>(0);
 	deferredCount: i32 = 0;
 
@@ -951,15 +951,16 @@ export function b3CollideTask<M>(startIndex: i32, endIndex: i32, workerIndex: i3
 			}
 		}
 
-		// A part leaves to the main lane the contacts whose update would allocate or share scratch, before it changes them
+		// A part leaves to the main lane the contacts whose update would allocate, before it changes them
 		if (isBoolean<M>()) {
 			let fits: bool;
-			if (shapeA.type == b3_compoundShape) {
-				fits = false;
-			} else if ((contact.flags & b3_simMeshContact) != 0) {
+			if ((contact.flags & b3_simMeshContact) != 0) {
 				fits = b3MeshContactFitsPart(contact, shapeB.aabb, workerIndex);
 			} else {
 				fits = contact.manifolds.length > 0;
+			}
+			if (shapeA.type == b3_compoundShape && shapeA.compoundChildData != shapeA.compound) {
+				fits = false;
 			}
 			if (fits == false) {
 				taskContext.deferredContacts[taskContext.deferredCount] = i;

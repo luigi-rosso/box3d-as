@@ -22,6 +22,7 @@ import {
 	b3WarmStartJoints_Overflow,
 	b3SolveJoints_Overflow,
 } from "./joint";
+import { b3PrepareCompoundContacts } from "./contact";
 import { b3ReserveMeshScratchForWorkers } from "./mesh_contact";
 import {
 	b3ExecuteBlock,
@@ -47,6 +48,18 @@ import { b3EnqueueTaskCallback, b3FinishTaskCallback, b3TaskCallback, b3WorldId 
 
 export const b3_parallelCollide: i32 = 1;
 export const b3_parallelSolve: i32 = 2;
+
+// Per step totals of the work the parts leave to the main lane
+export class b3ParallelStats {
+	collides: i32 = 0;
+	contacts: i64 = 0;
+	deferredContacts: i64 = 0;
+	finalizes: i32 = 0;
+	deferredBodies: i64 = 0;
+	solves: i32 = 0;
+}
+
+export const b3_parallelStats = new b3ParallelStats();
 
 // Runs one stage's blocks on whichever parts claim them, then waits for every part, as C's main thread waits for
 // the stage's completion count.
@@ -193,6 +206,7 @@ function b3ParallelSolve(context: b3StepContext): bool {
 	}
 
 	Parallel.run(b3ParallelSolverTask, context);
+	b3_parallelStats.solves += 1;
 	return true;
 }
 
@@ -240,6 +254,7 @@ function b3ParallelCollide(context: b3StepContext, contactCount: i32): bool {
 		taskContext.deferredCount = 0;
 	}
 	b3ReserveMeshScratchForWorkers(world.workerCount);
+	b3PrepareCompoundContacts(world);
 
 	let rebuildTrees = s_treesPending;
 	if (rebuildTrees) {
@@ -259,9 +274,13 @@ function b3ParallelCollide(context: b3StepContext, contactCount: i32): bool {
 		b3FinishTreesTask(world);
 	}
 
+	let stats = b3_parallelStats;
+	stats.collides += 1;
+	stats.contacts += contactCount;
 	for (let i = 0; i < world.workerCount; ++i) {
 		let taskContext = world.taskContexts[i];
 		let deferred = taskContext.deferredContacts;
+		stats.deferredContacts += taskContext.deferredCount;
 		for (let k = 0; k < taskContext.deferredCount; ++k) {
 			let index = deferred[k];
 			b3CollideTask<b3OnMain>(index, index + 1, i, context);
@@ -295,6 +314,12 @@ unsafe function b3ParallelFinalize(context: b3StepContext, bodyCount: i32): bool
 
 	Parallel.run(b3ParallelFinalizeTask, context, bodyCount, b3ParallelForBlockSize(bodyCount, 8, world.workerCount));
 	b3FinishParallelFinalize(world, context);
+
+	let stats = b3_parallelStats;
+	stats.finalizes += 1;
+	for (let i = 0; i < world.workerCount; ++i) {
+		stats.deferredBodies += world.taskContexts[i].deferredBodyCount;
+	}
 	return true;
 }
 

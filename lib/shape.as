@@ -261,6 +261,12 @@ export class b3Shape {
 	mesh: b3Mesh? = null;
 	heightField: b3HeightFieldData? = null;
 	compound: b3CompoundData? = null;
+
+	// A compound's children as shapes for parallel parts, built for compoundChildData, b3PrepareCompoundContacts
+	compoundChildData: b3CompoundData? = null;
+	compoundChildren: StaticArray<b3ChildShape>? = null;
+	compoundChildShapes: StaticArray<b3Shape>? = null;
+	compoundChildMaterials: StaticArray<StaticArray<b3SurfaceMaterial>>? = null;
 }
 
 // C copies a b3Shape by value into a temporary; this is that memcpy. Arrays and geometry alias.

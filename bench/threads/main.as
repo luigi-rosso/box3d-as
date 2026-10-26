@@ -15,6 +15,7 @@ import { Layout, Context } from "rive/host";
 import { clock } from "rive/os";
 import { formatFixed } from "rive/format";
 import { Parallel } from "rive/parallel";
+import { b3_parallelStats } from "./lib/parallel_step";
 import {
 	b3BodyId,
 	b3CreateBody,
@@ -455,6 +456,11 @@ export class Main extends Layout {
 		}
 		line += " hash=" + stateHash(this.hashBodies()).toString();
 		line += " parts=" + Parallel.size().toString();
+		let ps = b3_parallelStats;
+		line += " parSolves=" + ps.solves.toString() + " parCollides=" + ps.collides.toString() + " parFinalizes=" + ps.finalizes.toString();
+		line += " parContacts=" + formatFixed(<f64>ps.contacts / <f64>max(1, ps.collides), 1);
+		line += " parDeferredContacts=" + formatFixed(<f64>ps.deferredContacts / <f64>max(1, ps.collides), 1);
+		line += " parDeferredBodies=" + formatFixed(<f64>ps.deferredBodies / <f64>max(1, ps.finalizes), 1);
 		line += " lanes=" + laneCount().toString() + " backend=" + laneBackend().toString() + " tasks=" + laneTasks().toString();
 		let lanes = this.lanes;
 		if (lanes != null) {
