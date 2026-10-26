@@ -9,7 +9,7 @@ import { Worker } from "rive/workers";
 import { Blob, SharedRegion, Signal } from "rive/shared";
 import { Lanes } from "rive/lanes";
 
-import { b3GetTicks, b3GetLengthUnitsPerMeter, b3SetLengthUnitsPerMeter } from "./core";
+import { b3GetTicks, b3GetLengthUnitsPerMeter, b3OnMain, b3SetLengthUnitsPerMeter } from "./core";
 import {
 	B3_MAX_LANES,
 	b3_laneBackendJobs,
@@ -1596,7 +1596,7 @@ unsafe function b3LaneCollide(t: b3LaneTasks, context: b3StepContext, contactCou
 	}
 
 	let ticks = b3LaneNow();
-	b3CollideTask(m.ranges[0], m.ranges[1], 0, context);
+	b3CollideTask<b3OnMain>(m.ranges[0], m.ranges[1], 0, context);
 	m.partition0 += b3LaneNow() - ticks;
 
 	for (let p = 1; p < lanes; ++p) {

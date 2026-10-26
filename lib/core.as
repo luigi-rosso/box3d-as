@@ -16,6 +16,11 @@ export const UINT16_MAX: i32 = 65535;
 export const UINT32_MAX: u32 = 0xFFFFFFFF;
 export const UINT64_MAX: u64 = 0xFFFFFFFFFFFFFFFF;
 
+// Type arguments of the functions parallel parts also run. isBoolean<M>() is a compile time constant, so a branch on
+// it leaves what parts may not do, such as allocating or calling a callback, out of the b3InParallel instantiation.
+export type b3InParallel = bool;
+export type b3OnMain = i32;
+
 // base.h
 
 export const B3_ENABLE_VALIDATION: bool = false;

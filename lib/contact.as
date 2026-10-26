@@ -3,7 +3,7 @@
 // AnimaScript port of src/contact.c
 
 import { B3_ASSERT, B3_ASSERT_ENABLED, B3_NULL_INDEX, UINT32_MAX } from "./core";
-import { B3_MAX_MANIFOLD_POINTS } from "./constants";
+import { B3_MAX_MANIFOLD_POINTS, B3_MAX_WORKERS } from "./constants";
 import {
 	b3AABB,
 	b3Add,
@@ -60,6 +60,8 @@ import { b3StoreRow } from "./simd";
 import { b3ComputeMeshManifolds } from "./mesh_contact";
 import {
 	b3AllocateManifolds,
+	b3DefaultFrictionCallback,
+	b3DefaultRestitutionCallback,
 	b3FreeManifolds,
 	b3GetWorld,
 	b3World,
@@ -483,6 +485,11 @@ export function b3CreateContact(world: b3World, shapeA: b3Shape, shapeB: b3Shape
 		}
 	}
 
+	// A convex contact keeps its one manifold for life, so a parallel part never allocates one
+	if ((contact.flags & b3_simMeshContact) == 0) {
+		contact.manifolds = b3AllocateManifolds(world, 1);
+	}
+
 	// todo impose these restrictions to make life easier
 	B3_ASSERT(shapeB.type == b3_sphereShape || shapeB.type == b3_capsuleShape || shapeB.type == b3_hullShape);
 	// B3_ASSERT( bodyB->type != b3_staticBody );
@@ -705,16 +712,33 @@ export function b3DestroyContact(world: b3World, contact: b3Contact, wakeBodies:
 	}
 }
 
-// C's stack buffers for b3ComputeConvexManifold and the compound child of b3UpdateContact. Neither
-// call nests in itself, so each has one.
-const s_convexPoints = new StaticArray<b3LocalManifoldPoint>(B3_MAX_MANIFOLD_POINTS);
-const s_convexManifold = new b3LocalManifold();
+// C's stack buffers for b3ComputeConvexManifold, one per worker since parallel parts collide at once, and for the
+// compound child of b3UpdateContact, which only the main lane updates. Neither call nests in itself.
+class b3ConvexContactScratch {
+	points: StaticArray<b3LocalManifoldPoint> = new StaticArray<b3LocalManifoldPoint>(B3_MAX_MANIFOLD_POINTS);
+	manifold: b3LocalManifold = new b3LocalManifold();
+
+	constructor() {
+		this.manifold.points = this.points;
+	}
+}
+
+function b3MakeConvexContactScratch(): StaticArray<b3ConvexContactScratch> {
+	let scratch = new StaticArray<b3ConvexContactScratch>(B3_MAX_WORKERS);
+	for (let i = 0; i < B3_MAX_WORKERS; ++i) {
+		scratch[i] = new b3ConvexContactScratch();
+	}
+	return scratch;
+}
+
+const s_convexContactScratch = b3MakeConvexContactScratch();
 const s_contactChild = new b3ChildShape();
 const s_contactChildMaterial = new Uint16Array(1);
 const s_contactChildShape = new b3Shape();
 const s_contactChildMaterials = new StaticArray<b3SurfaceMaterial>(1);
 
-unsafe function b3ComputeConvexManifold(
+// M is b3InParallel for the instantiation parallel parts run, b3OnMain otherwise
+unsafe function b3ComputeConvexManifold<M>(
 	world: b3World,
 	workerIndex: i32,
 	contact: b3Contact,
@@ -729,11 +753,9 @@ unsafe function b3ComputeConvexManifold(
 	// cache is contact.convexContact.cache
 
 	let pointCapacity = B3_MAX_MANIFOLD_POINTS;
-	let pointBuffer = s_convexPoints;
 
-	let geomManifold = s_convexManifold;
+	let geomManifold = s_convexContactScratch[workerIndex].manifold;
 	b3ZeroLocalManifold(geomManifold);
-	geomManifold.points = pointBuffer;
 
 	let transformBtoA = b3InvMulWorldTransforms(xfA, xfB);
 
@@ -745,7 +767,7 @@ unsafe function b3ComputeConvexManifold(
 			b3CollideCapsuleAndSphere(geomManifold, pointCapacity, shapeA.capsule, shapeB.sphere, transformBtoA);
 		} else {
 			if (B3_ASSERT_ENABLED) B3_ASSERT(typeB == b3_capsuleShape);
-			b3CollideCapsules(geomManifold, pointCapacity, shapeA.capsule, shapeB.capsule, transformBtoA);
+			b3CollideCapsules(geomManifold, pointCapacity, shapeA.capsule, shapeB.capsule, transformBtoA, workerIndex);
 		}
 	} else {
 		if (B3_ASSERT_ENABLED) B3_ASSERT(typeA == b3_hullShape);
@@ -758,6 +780,7 @@ unsafe function b3ComputeConvexManifold(
 				shapeB.sphere,
 				transformBtoA,
 				contact.convexContact.cache.simplexCache,
+				workerIndex,
 			);
 		} else if (typeB == b3_capsuleShape) {
 			b3CollideHullAndCapsule(
@@ -767,6 +790,7 @@ unsafe function b3ComputeConvexManifold(
 				shapeB.capsule,
 				transformBtoA,
 				contact.convexContact.cache.simplexCache,
+				workerIndex,
 			);
 		} else {
 			if (B3_ASSERT_ENABLED) B3_ASSERT(typeB == b3_hullShape);
@@ -778,6 +802,7 @@ unsafe function b3ComputeConvexManifold(
 				transformBtoA,
 				contact.convexContact.cache.satCache,
 				world.simdWidth,
+				workerIndex,
 			);
 			let taskContext = world.taskContexts[workerIndex];
 			taskContext.satCallCount += 1;
@@ -785,13 +810,9 @@ unsafe function b3ComputeConvexManifold(
 		}
 	}
 
+	// The contact keeps its manifold storage, which b3CreateContact allocated, and clears it as C allocates it
 	if (geomManifold.pointCount == 0) {
-		if (contact.manifoldCount > 0) {
-			b3FreeManifolds(world, contact.manifolds, contact.manifoldCount);
-			contact.manifolds = b3_emptyManifolds;
-			contact.manifoldCount = 0;
-		}
-
+		contact.manifoldCount = 0;
 		return false;
 	}
 
@@ -799,7 +820,12 @@ unsafe function b3ComputeConvexManifold(
 	let oldCount = 0;
 
 	if (contact.manifoldCount == 0) {
-		contact.manifolds = b3AllocateManifolds(world, 1);
+		if (!isBoolean<M>()) {
+			if (contact.manifolds.length == 0) {
+				contact.manifolds = b3AllocateManifolds(world, 1);
+			}
+		}
+		memory.fill(changetype<usize>(contact.manifolds), 0, sizeof<b3Manifold>());
 		contact.manifoldCount = 1;
 	} else {
 		oldCount = contact.manifolds[0].pointCount;
@@ -849,7 +875,7 @@ unsafe function b3ComputeConvexManifold(
 	return true;
 }
 
-unsafe function b3UpdateConvexContact(
+unsafe function b3UpdateConvexContact<M>(
 	world: b3World,
 	workerIndex: i32,
 	contact: b3Contact,
@@ -860,10 +886,10 @@ unsafe function b3UpdateConvexContact(
 	flip: bool,
 ): bool {
 	// Compute new manifold
-	let touching = b3ComputeConvexManifold(world, workerIndex, contact, shapeA, xfA, shapeB, xfB);
+	let touching = b3ComputeConvexManifold<M>(world, workerIndex, contact, shapeA, xfA, shapeB, xfB);
 
 	if (touching == false) {
-		if (B3_ASSERT_ENABLED) B3_ASSERT(contact.manifolds.length == 0 && contact.manifoldCount == 0);
+		if (B3_ASSERT_ENABLED) B3_ASSERT(contact.manifoldCount == 0);
 		return false;
 	}
 
@@ -885,19 +911,35 @@ unsafe function b3UpdateConvexContact(
 	let materialA = b3GetShapeMaterials(shapeA)[0];
 	let materialB = b3GetShapeMaterials(shapeB)[0];
 
-	// Keep these updated in case the values on the shapes are modified
-	contact.friction = world.frictionCallback!(
-		materialA.friction,
-		materialA.userMaterialId,
-		materialB.friction,
-		materialB.userMaterialId,
-	);
-	contact.restitution = world.restitutionCallback!(
-		materialA.restitution,
-		materialA.userMaterialId,
-		materialB.restitution,
-		materialB.userMaterialId,
-	);
+	// Keep these updated in case the values on the shapes are modified. Parallel parts run only with the default
+	// callbacks.
+	if (isBoolean<M>()) {
+		contact.friction = b3DefaultFrictionCallback(
+			materialA.friction,
+			materialA.userMaterialId,
+			materialB.friction,
+			materialB.userMaterialId,
+		);
+		contact.restitution = b3DefaultRestitutionCallback(
+			materialA.restitution,
+			materialA.userMaterialId,
+			materialB.restitution,
+			materialB.userMaterialId,
+		);
+	} else {
+		contact.friction = world.frictionCallback!(
+			materialA.friction,
+			materialA.userMaterialId,
+			materialB.friction,
+			materialB.userMaterialId,
+		);
+		contact.restitution = world.restitutionCallback!(
+			materialA.restitution,
+			materialA.userMaterialId,
+			materialB.restitution,
+			materialB.userMaterialId,
+		);
+	}
 
 	if (materialA.rollingResistance > 0.0 || materialB.rollingResistance > 0.0) {
 		let typeA = shapeA.type;
@@ -931,24 +973,25 @@ unsafe function b3UpdateConvexContact(
 	let tangentVelocityB = b3RotateVector(xfB.q, materialB.tangentVelocity);
 	contact.tangentVelocity = b3Sub(tangentVelocityA, tangentVelocityB);
 
-	let preSolveFcn = world.preSolveFcn;
-	if (preSolveFcn != null && (contact.flags & b3_simEnablePreSolveEvents) != 0) {
-		let shapeIdA = b3MakeShapeIdInternal(shapeA.id + 1, world.worldId, shapeA.generation);
-		let shapeIdB = b3MakeShapeIdInternal(shapeB.id + 1, world.worldId, shapeB.generation);
+	// Parallel parts run only without a pre-solve callback
+	if (!isBoolean<M>()) {
+		let preSolveFcn = world.preSolveFcn;
+		if (preSolveFcn != null && (contact.flags & b3_simEnablePreSolveEvents) != 0) {
+			let shapeIdA = b3MakeShapeIdInternal(shapeA.id + 1, world.worldId, shapeA.generation);
+			let shapeIdB = b3MakeShapeIdInternal(shapeB.id + 1, world.worldId, shapeB.generation);
 
-		// this call assumes thread safety
-		let point = b3OffsetPos(xfA.p, contact.manifolds[0].points[0].anchorA);
-		let normal = contact.manifolds[0].normal;
-		touching = preSolveFcn(shapeIdA, shapeIdB, point, normal);
-		if (touching == false) {
-			// disable contact
-			b3FreeManifolds(world, contact.manifolds, contact.manifoldCount);
-			contact.manifolds = b3_emptyManifolds;
-			contact.manifoldCount = 0;
+			// this call assumes thread safety
+			let point = b3OffsetPos(xfA.p, contact.manifolds[0].points[0].anchorA);
+			let normal = contact.manifolds[0].normal;
+			touching = preSolveFcn(shapeIdA, shapeIdB, point, normal);
+			if (touching == false) {
+				// disable contact
+				contact.manifoldCount = 0;
 
-			// Invalidate recycling cache.
-			contact.flags &= ~b3_relativeTransformValid;
-			return false;
+				// Invalidate recycling cache.
+				contact.flags &= ~b3_relativeTransformValid;
+				return false;
+			}
 		}
 	}
 
@@ -963,7 +1006,7 @@ unsafe function b3UpdateConvexContact(
 
 // Update the contact manifold and touching status.
 // Note: do not assume the shape AABBs are overlapping or are valid.
-export unsafe function b3UpdateContact(
+export unsafe function b3UpdateContact<M>(
 	world: b3World,
 	workerIndex: i32,
 	contact: b3Contact,
@@ -979,7 +1022,10 @@ export unsafe function b3UpdateContact(
 
 	if (B3_ASSERT_ENABLED) B3_ASSERT(shapeB.type != b3_compoundShape);
 
-	if (shapeA.type == b3_compoundShape) {
+	if (isBoolean<M>()) {
+		// Parallel parts take only convex pairs; b3CollideTask leaves the rest to the main lane
+		touching = b3UpdateConvexContact<M>(world, workerIndex, contact, shapeA, xfA, shapeB, xfB, false);
+	} else if (shapeA.type == b3_compoundShape) {
 		let childIndex = contact.childIndex;
 		let child = s_contactChild;
 		b3GetCompoundChildInto(shapeA.compound!, childIndex, child, s_contactChildMaterial);
@@ -1011,16 +1057,16 @@ export unsafe function b3UpdateContact(
 			if (shapeB.type == b3_hullShape) {
 				// Flip
 				let flip = true;
-				touching = b3UpdateConvexContact(world, workerIndex, contact, shapeB, xfB, childShapeA, xfA, flip);
+				touching = b3UpdateConvexContact<M>(world, workerIndex, contact, shapeB, xfB, childShapeA, xfA, flip);
 			} else {
 				let flip = false;
-				touching = b3UpdateConvexContact(world, workerIndex, contact, childShapeA, xfA, shapeB, xfB, flip);
+				touching = b3UpdateConvexContact<M>(world, workerIndex, contact, childShapeA, xfA, shapeB, xfB, flip);
 			}
 		} else if (child.type == b3_hullShape) {
 			childShapeA.hull = child.hull;
 			let xfChild = b3MulWorldTransforms(xfA, child.transform);
 			let flip = false;
-			touching = b3UpdateConvexContact(world, workerIndex, contact, childShapeA, xfChild, shapeB, xfB, flip);
+			touching = b3UpdateConvexContact<M>(world, workerIndex, contact, childShapeA, xfChild, shapeB, xfB, flip);
 		} else if (child.type == b3_meshShape) {
 			childShapeA.mesh = child.mesh;
 			let xfChild = b3MulWorldTransforms(xfA, child.transform);
@@ -1051,10 +1097,10 @@ export unsafe function b3UpdateContact(
 			if (shapeB.type == b3_capsuleShape || shapeB.type == b3_hullShape) {
 				// Flip
 				let flip = true;
-				touching = b3UpdateConvexContact(world, workerIndex, contact, shapeB, xfB, childShapeA, xfA, flip);
+				touching = b3UpdateConvexContact<M>(world, workerIndex, contact, shapeB, xfB, childShapeA, xfA, flip);
 			} else {
 				let flip = false;
-				touching = b3UpdateConvexContact(world, workerIndex, contact, childShapeA, xfA, shapeB, xfB, flip);
+				touching = b3UpdateConvexContact<M>(world, workerIndex, contact, childShapeA, xfA, shapeB, xfB, flip);
 			}
 		}
 
@@ -1086,7 +1132,7 @@ export unsafe function b3UpdateContact(
 	} else {
 		// Convex-vs-convex
 		let flip = false;
-		touching = b3UpdateConvexContact(world, workerIndex, contact, shapeA, xfA, shapeB, xfB, flip);
+		touching = b3UpdateConvexContact<M>(world, workerIndex, contact, shapeA, xfA, shapeB, xfB, flip);
 	}
 
 	if (touching) {

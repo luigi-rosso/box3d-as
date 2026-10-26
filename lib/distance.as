@@ -5,7 +5,7 @@
 // Dirk Gregorius contributed portions of this code
 
 import { B3_ASSERT, B3_ASSERT_ENABLED, FLT_EPSILON, FLT_MAX, FLT_MIN, B3_NULL_INDEX, b3Log } from "./core";
-import { B3_LINEAR_SLOP } from "./constants";
+import { B3_LINEAR_SLOP, B3_MAX_WORKERS } from "./constants";
 import {
 	b3AbsFloat,
 	b3Add,
@@ -727,14 +727,15 @@ function b3SolveSimplex4(simplex: ref b3Simplex): bool {
 	}
 }
 
-// C's simplex and backup locals of b3ShapeDistance, which never nests. Holding both here makes the
-// per iteration backup one memory copy instead of a load and store per field.
+// C's simplex and backup locals of b3ShapeDistance, which never nests within a worker. Holding both here makes the
+// per iteration backup one memory copy instead of a load and store per field. Each worker has its own pair, as
+// parallel parts run it at once.
 const B3_GJK_SIMPLEX: i32 = 0;
 const B3_GJK_BACKUP: i32 = 1;
-const s_gjkSimplexes = new StaticArray<b3Simplex>(2);
+const s_gjkSimplexes = new StaticArray<b3Simplex>(2 * B3_MAX_WORKERS);
 
-unsafe function b3ZeroGJKSimplexes(): void {
-	memory.fill(changetype<usize>(s_gjkSimplexes), 0, 2 * sizeof<b3Simplex>());
+unsafe function b3ZeroGJKSimplexes(base: i32): void {
+	memory.fill(changetype<usize>(s_gjkSimplexes) + <usize>base * sizeof<b3Simplex>(), 0, 2 * sizeof<b3Simplex>());
 }
 
 unsafe function b3CopyGJKSimplex(dst: i32, src: i32): void {
@@ -763,6 +764,7 @@ export function b3ShapeDistance(
 	cache: ref b3SimplexCache,
 	simplexes: StaticArray<b3Simplex>? = null,
 	simplexCapacity: i32 = 0,
+	workerIndex: i32 = 0,
 ): b3DistanceOutput {
 	// The query runs in frame A using the relative pose of B in A.
 	let xf = input.transform;
@@ -777,8 +779,9 @@ export function b3ShapeDistance(
 	// Compute initial simplex from cache
 	if (B3_ASSERT_ENABLED) B3_ASSERT(cache.count <= <u16>B3_MAX_SIMPLEX_VERTICES);
 
-	b3ZeroGJKSimplexes();
-	ref simplex = s_gjkSimplexes[B3_GJK_SIMPLEX];
+	let gjkBase = 2 * workerIndex;
+	b3ZeroGJKSimplexes(gjkBase);
+	ref simplex = s_gjkSimplexes[gjkBase + B3_GJK_SIMPLEX];
 
 	simplex.count = <i32>cache.count;
 	for (let i = 0; i < <i32>cache.count; ++i) {
@@ -826,7 +829,7 @@ export function b3ShapeDistance(
 		simplex.vertices[0].a = 0.0;
 	}
 
-	ref backup = s_gjkSimplexes[B3_GJK_BACKUP];
+	ref backup = s_gjkSimplexes[gjkBase + B3_GJK_BACKUP];
 
 	let simplexIndex = 0;
 	if (simplexes != null && simplexIndex < simplexCapacity) {
@@ -872,7 +875,7 @@ export function b3ShapeDistance(
 		if (solved == false) {
 			// No progress - reconstruct last simplex
 			if (B3_ASSERT_ENABLED) B3_ASSERT(backup.count != 0);
-			b3CopyGJKSimplex(B3_GJK_SIMPLEX, B3_GJK_BACKUP);
+			b3CopyGJKSimplex(gjkBase + B3_GJK_SIMPLEX, gjkBase + B3_GJK_BACKUP);
 			break;
 		}
 
@@ -942,7 +945,7 @@ export function b3ShapeDistance(
 		if (distanceSq >= oldDistanceSq) {
 			// No progress - reconstruct last simplex
 			if (B3_ASSERT_ENABLED) B3_ASSERT(backup.count != 0);
-			b3CopyGJKSimplex(B3_GJK_SIMPLEX, B3_GJK_BACKUP);
+			b3CopyGJKSimplex(gjkBase + B3_GJK_SIMPLEX, gjkBase + B3_GJK_BACKUP);
 			break;
 		}
 
@@ -1013,7 +1016,7 @@ export function b3ShapeDistance(
 		let supportB = b3Add(b3MulMV(m, proxyB.points[indexB]), xf.p);
 
 		// Save current simplex and add new vertex - this can fail if we detect cycling
-		b3CopyGJKSimplex(B3_GJK_BACKUP, B3_GJK_SIMPLEX);
+		b3CopyGJKSimplex(gjkBase + B3_GJK_BACKUP, gjkBase + B3_GJK_SIMPLEX);
 
 		// Check for duplicate support points. This is the main termination criteria.
 		let duplicate = false;

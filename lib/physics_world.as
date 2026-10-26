@@ -12,6 +12,7 @@ import {
 	b3GetMilliseconds,
 	b3GetTicks,
 	b3Log,
+	b3OnMain,
 } from "./core";
 import {
 	B3_CONTACT_MANIFOLD_COUNT_BUCKETS,
@@ -129,6 +130,7 @@ import {
 	b3_dynamicBody,
 	b3_kinematicBody,
 	b3_staticBody,
+	b3_compoundShape,
 } from "./types";
 import {
 	b3DynamicTree_BoxCast,
@@ -238,6 +240,10 @@ export class b3TaskContext {
 
 	// B3_CONTACT_MANIFOLD_COUNT_BUCKETS; a FixedArray length must be a literal
 	manifoldCounts: FixedArray<i32, 8>;
+
+	// Awake contact slots a parallel part leaves to the main lane: mesh, height field and compound contacts
+	deferredContacts: StaticArray<i32> = new StaticArray<i32>(0);
+	deferredCount: i32 = 0;
 }
 
 // The world struct manages all physics entities, dynamic simulation,  and asynchronous queries.
@@ -774,7 +780,7 @@ export function b3SetLaneCollide(fcn: b3LaneCollideFcn?): void {
 	b3_laneCollide = fcn;
 }
 
-export function b3CollideTask(startIndex: i32, endIndex: i32, workerIndex: i32, stepContext: b3StepContext): void {
+export function b3CollideTask<M>(startIndex: i32, endIndex: i32, workerIndex: i32, stepContext: b3StepContext): void {
 	let world = stepContext.world;
 	let graph = world.constraintGraph;
 	let taskContext = world.taskContexts[workerIndex];
@@ -812,6 +818,15 @@ export function b3CollideTask(startIndex: i32, endIndex: i32, workerIndex: i32, 
 
 		let shapeA = shapes[shapeIdA];
 		let shapeB = shapes[shapeIdB];
+
+		// Mesh and compound contacts can allocate and share scratch, so the main lane updates them after the parts
+		if (isBoolean<M>()) {
+			if ((contact.flags & b3_simMeshContact) != 0 || shapeA.type == b3_compoundShape || contact.manifolds.length == 0) {
+				taskContext.deferredContacts[taskContext.deferredCount] = i;
+				taskContext.deferredCount += 1;
+				continue;
+			}
+		}
 
 		// Update contact respecting shape/body order (A,B)
 		let encodedA = contact.encodedBodySimA;
@@ -930,7 +945,7 @@ export function b3CollideTask(startIndex: i32, endIndex: i32, workerIndex: i32, 
 		contact.flags |= b3_relativeTransformValid;
 
 		// This updates solid contacts
-		let touching = b3UpdateContact(
+		let touching = b3UpdateContact<M>(
 			world,
 			workerIndex,
 			contact,
@@ -1084,7 +1099,7 @@ function b3Collide(context: b3StepContext): void {
 		b3ParallelFor(
 			world,
 			(startIndex: i32, endIndex: i32, workerIndex: i32): void =>
-				b3CollideTask(startIndex, endIndex, workerIndex, context),
+				b3CollideTask<b3OnMain>(startIndex, endIndex, workerIndex, context),
 			contactCount,
 			minRange,
 			"collide",

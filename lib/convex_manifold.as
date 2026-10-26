@@ -8,6 +8,7 @@ import {
 	B3_MAX_HULL_EDGES,
 	B3_MAX_HULL_FACES,
 	B3_MAX_HULL_VERTICES,
+	B3_MAX_WORKERS,
 	B3_MIN_CAPSULE_LENGTH,
 	B3_PARALLEL_EDGE_TOL,
 	B3_SPECULATIVE_DISTANCE,
@@ -127,17 +128,82 @@ import {
 
 const FLT_INF: f32 = reinterpret<f32>(0x7f800000);
 
-// Scratch for the C stack buffers. No function here holds one across a call that uses it again.
-const s_segment = new StaticArray<b3ClipVertex>(2);
-const s_capsulePoints = new StaticArray<b3Vec3>(2);
-// Twice the C size, since clipping a 64 vertex incident face can overflow the C buffer
-const s_clipBuffer1 = new StaticArray<b3ClipVertex>(2 * B3_MAX_CLIP_POINTS);
-const s_clipBuffer2 = new StaticArray<b3ClipVertex>(2 * B3_MAX_CLIP_POINTS);
-const s_clipPoints = new StaticArray<b3LocalManifoldPoint>(B3_MAX_CLIP_POINTS);
-const s_edgeManifold = new b3LocalManifold();
-const s_edgePoint = new StaticArray<b3LocalManifoldPoint>(1);
-const s_distanceInput = new b3DistanceInput();
-const s_distancePointsB = new StaticArray<b3Vec3>(2);
+// Temporary abbreviations for convenience.
+const NE: i32 = B3_MAX_HULL_EDGES + B3_SIMD_WIDTH;
+const NF: i32 = B3_MAX_HULL_FACES + B3_SIMD_WIDTH;
+const NV: i32 = B3_MAX_HULL_VERTICES + B3_SIMD_WIDTH;
+
+// Scratch for the C stack buffers, one set per worker since parallel parts collide at once. No function here holds
+// one across a call that uses it again.
+class b3ConvexScratch {
+	segment: StaticArray<b3ClipVertex> = new StaticArray<b3ClipVertex>(2);
+	capsulePoints: StaticArray<b3Vec3> = new StaticArray<b3Vec3>(2);
+	// Twice the C size, since clipping a 64 vertex incident face can overflow the C buffer
+	clipBuffer1: StaticArray<b3ClipVertex> = new StaticArray<b3ClipVertex>(2 * B3_MAX_CLIP_POINTS);
+	clipBuffer2: StaticArray<b3ClipVertex> = new StaticArray<b3ClipVertex>(2 * B3_MAX_CLIP_POINTS);
+	clipPoints: StaticArray<b3LocalManifoldPoint> = new StaticArray<b3LocalManifoldPoint>(B3_MAX_CLIP_POINTS);
+	edgeManifold: b3LocalManifold = new b3LocalManifold();
+	edgePoint: StaticArray<b3LocalManifoldPoint> = new StaticArray<b3LocalManifoldPoint>(1);
+	distanceInput: b3DistanceInput = new b3DistanceInput();
+	// The proxies own their points, since parallel code may not point a proxy at a hull's
+	distancePointsA: StaticArray<b3Vec3> = new StaticArray<b3Vec3>(B3_MAX_HULL_VERTICES);
+	distancePointsB: StaticArray<b3Vec3> = new StaticArray<b3Vec3>(2);
+
+	// The C stack arrays of the separating axis test
+	dotA: StaticArray<f32> = new StaticArray<f32>(NF);
+	dotB: StaticArray<f32> = new StaticArray<f32>(NF);
+	planeDotA: StaticArray<f32> = new StaticArray<f32>(NF);
+	planeDotB: StaticArray<f32> = new StaticArray<f32>(NF);
+	edgeIndicesA: StaticArray<i32> = new StaticArray<i32>(NE);
+	edgeIndicesB: StaticArray<i32> = new StaticArray<i32>(B3_MAX_HULL_EDGES);
+	bFNx: StaticArray<f32> = new StaticArray<f32>(NF);
+	bFNy: StaticArray<f32> = new StaticArray<f32>(NF);
+	bFNz: StaticArray<f32> = new StaticArray<f32>(NF);
+	bWx: StaticArray<f32> = new StaticArray<f32>(NV);
+	bWy: StaticArray<f32> = new StaticArray<f32>(NV);
+	bWz: StaticArray<f32> = new StaticArray<f32>(NV);
+	aN0x: StaticArray<f32> = new StaticArray<f32>(NE);
+	aN0y: StaticArray<f32> = new StaticArray<f32>(NE);
+	aN0z: StaticArray<f32> = new StaticArray<f32>(NE);
+	aN1x: StaticArray<f32> = new StaticArray<f32>(NE);
+	aN1y: StaticArray<f32> = new StaticArray<f32>(NE);
+	aN1z: StaticArray<f32> = new StaticArray<f32>(NE);
+	aDx: StaticArray<f32> = new StaticArray<f32>(NE);
+	aDy: StaticArray<f32> = new StaticArray<f32>(NE);
+	aDz: StaticArray<f32> = new StaticArray<f32>(NE);
+	aV0x: StaticArray<f32> = new StaticArray<f32>(NE);
+	aV0y: StaticArray<f32> = new StaticArray<f32>(NE);
+	aV0z: StaticArray<f32> = new StaticArray<f32>(NE);
+	aTol: StaticArray<f32> = new StaticArray<f32>(NE);
+	sA: StaticArray<f32> = new StaticArray<f32>(B3_SIMD_WIDTH);
+	nxA: StaticArray<f32> = new StaticArray<f32>(B3_SIMD_WIDTH);
+	nyA: StaticArray<f32> = new StaticArray<f32>(B3_SIMD_WIDTH);
+	nzA: StaticArray<f32> = new StaticArray<f32>(B3_SIMD_WIDTH);
+
+	constructor() {
+		this.edgeManifold.points = this.edgePoint;
+		this.distanceInput.proxyA.points = this.distancePointsA;
+		this.distanceInput.proxyB.points = this.distancePointsB;
+	}
+}
+
+function b3MakeConvexScratch(): StaticArray<b3ConvexScratch> {
+	let scratch = new StaticArray<b3ConvexScratch>(B3_MAX_WORKERS);
+	for (let i = 0; i < B3_MAX_WORKERS; ++i) {
+		scratch[i] = new b3ConvexScratch();
+	}
+	return scratch;
+}
+
+const s_convexScratch = b3MakeConvexScratch();
+
+function b3CopyHullPoints(dst: StaticArray<b3Vec3>, hull: b3HullData): void {
+	let points = b3GetHullPoints(hull);
+	let count = hull.vertexCount;
+	for (let i = 0; i < count; ++i) {
+		dst[i] = points[i];
+	}
+}
 
 function b3ClipSegment(segment: StaticArray<b3ClipVertex>, plane: b3Plane): i32 {
 	let vertexCount = 0;
@@ -204,13 +270,15 @@ function b3QueryFaceDirectionHullAndCapsule(
 	hull: b3HullData,
 	capsule: b3Capsule,
 	capsuleTransform: b3Transform,
+	workerIndex: i32,
 ): b3SeparatingAxis {
+	let scratch = s_convexScratch[workerIndex];
 	let maxFaceIndex = -1;
 	let maxVertexIndex = -1;
 	let maxFaceSeparation = -FLT_MAX;
 	let planes = b3GetHullPlanes(hull);
 
-	let capsulePoints = s_capsulePoints;
+	let capsulePoints = scratch.capsulePoints;
 	capsulePoints[0] = b3TransformPoint(capsuleTransform, capsule.center1);
 	capsulePoints[1] = b3TransformPoint(capsuleTransform, capsule.center2);
 
@@ -425,7 +493,9 @@ export function b3CollideHullAndSphere(
 	sphereB: b3Sphere,
 	transformBtoA: b3Transform,
 	cache: ref b3SimplexCache,
+	workerIndex: i32 = 0,
 ): void {
+	let scratch = s_convexScratch[workerIndex];
 	manifold.pointCount = 0;
 
 	if (capacity == 0) {
@@ -438,12 +508,11 @@ export function b3CollideHullAndSphere(
 
 	// Work in shapeA coordinates
 
-	let distanceInput = s_distanceInput;
-	distanceInput.proxyA.points = b3GetHullPoints(hullA);
+	let distanceInput = scratch.distanceInput;
+	b3CopyHullPoints(scratch.distancePointsA, hullA);
 	distanceInput.proxyA.count = hullA.vertexCount;
 	distanceInput.proxyA.radius = 0.0;
-	s_distancePointsB[0] = center;
-	distanceInput.proxyB.points = s_distancePointsB;
+	scratch.distancePointsB[0] = center;
 	distanceInput.proxyB.count = 1;
 	distanceInput.proxyB.radius = 0.0;
 	distanceInput.transform = b3Transform_identity;
@@ -453,7 +522,7 @@ export function b3CollideHullAndSphere(
 	let radiusB = sphereB.radius;
 	let radius = radiusA + radiusB;
 
-	let distanceOutput = b3ShapeDistance(distanceInput, cache, null, 0);
+	let distanceOutput = b3ShapeDistance(distanceInput, cache, null, 0, workerIndex);
 
 	if (distanceOutput.distance > radius + speculativeDistance) {
 		// We found a separating axis
@@ -525,7 +594,9 @@ export function b3CollideCapsules(
 	capsuleA: b3Capsule,
 	capsuleB: b3Capsule,
 	transformBtoA: b3Transform,
+	workerIndex: i32 = 0,
 ): void {
+	let scratch = s_convexScratch[workerIndex];
 	manifold.pointCount = 0;
 
 	if (capacity < 2) {
@@ -585,7 +656,7 @@ export function b3CollideCapsules(
 		planeA1.offset = b3Dot(edgeA, capsuleA.center2);
 
 		// Clip points for B
-		let verticesB = s_segment;
+		let verticesB = scratch.segment;
 		verticesB[0].position = centerB1;
 		verticesB[0].separation = 0.0;
 		verticesB[0].pair = b3MakeFeaturePair(b3_featureShapeA, 0, b3_featureShapeA, 0);
@@ -671,7 +742,9 @@ function b3BuildHullFaceAndCapsuleContact(
 	capsuleB: b3Capsule,
 	transformBtoA: b3Transform,
 	query: b3SeparatingAxis,
+	workerIndex: i32,
 ): bool {
+	let scratch = s_convexScratch[workerIndex];
 	// Work in shapeA coordinates
 	let planes = b3GetHullPlanes(hullA);
 
@@ -679,7 +752,7 @@ function b3BuildHullFaceAndCapsuleContact(
 	let refFace = query.indexA;
 	let refPlane = planes[refFace];
 
-	let segmentB = s_segment;
+	let segmentB = scratch.segment;
 	segmentB[0].position = b3TransformPoint(transformBtoA, capsuleB.center1);
 	segmentB[0].separation = 0.0;
 	segmentB[0].pair = b3MakeFeaturePair(b3_featureShapeA, 0, b3_featureShapeA, 0);
@@ -779,7 +852,9 @@ export function b3CollideHullAndCapsule(
 	capsuleB: b3Capsule,
 	transformBtoA: b3Transform,
 	cache: ref b3SimplexCache,
+	workerIndex: i32 = 0,
 ): void {
+	let scratch = s_convexScratch[workerIndex];
 	manifold.pointCount = 0;
 
 	if (capacity < 2) {
@@ -787,19 +862,18 @@ export function b3CollideHullAndCapsule(
 	}
 
 	// Work in shapeA coordinates
-	let distanceInput = s_distanceInput;
-	distanceInput.proxyA.points = b3GetHullPoints(hullA);
+	let distanceInput = scratch.distanceInput;
+	b3CopyHullPoints(scratch.distancePointsA, hullA);
 	distanceInput.proxyA.count = hullA.vertexCount;
 	distanceInput.proxyA.radius = 0.0;
-	s_distancePointsB[0] = capsuleB.center1;
-	s_distancePointsB[1] = capsuleB.center2;
-	distanceInput.proxyB.points = s_distancePointsB;
+	scratch.distancePointsB[0] = capsuleB.center1;
+	scratch.distancePointsB[1] = capsuleB.center2;
 	distanceInput.proxyB.count = 2;
 	distanceInput.proxyB.radius = 0.0;
 	distanceInput.transform = transformBtoA;
 	distanceInput.useRadii = false;
 
-	let distanceOutput = b3ShapeDistance(distanceInput, cache, null, 0);
+	let distanceOutput = b3ShapeDistance(distanceInput, cache, null, 0, workerIndex);
 	let speculativeDistance = B3_SPECULATIVE_DISTANCE();
 
 	if (distanceOutput.distance > capsuleB.radius + speculativeDistance) {
@@ -821,7 +895,7 @@ export function b3CollideHullAndCapsule(
 		let kTolerance: f32 = 0.998;
 		if (b3AbsFloat(b3Dot(refPlane.normal, delta)) > kTolerance) {
 			// Clip capsule segment against side planes of reference face
-			let verticesB = s_segment;
+			let verticesB = scratch.segment;
 			verticesB[0].position = b3TransformPoint(transformBtoA, capsuleB.center1);
 			verticesB[0].separation = 0.0;
 			verticesB[0].pair = b3MakeFeaturePair(b3_featureShapeA, 0, b3_featureShapeA, 0);
@@ -878,7 +952,7 @@ export function b3CollideHullAndCapsule(
 
 	// Deep penetration
 
-	let faceQuery = b3QueryFaceDirectionHullAndCapsule(hullA, capsuleB, transformBtoA);
+	let faceQuery = b3QueryFaceDirectionHullAndCapsule(hullA, capsuleB, transformBtoA, workerIndex);
 	if (faceQuery.separation > capsuleB.radius) {
 		// We found a separating axis
 		return;
@@ -892,7 +966,7 @@ export function b3CollideHullAndCapsule(
 
 	// Create face contact
 	let faceSeparation = faceQuery.separation - capsuleB.radius;
-	b3BuildHullFaceAndCapsuleContact(manifold, hullA, capsuleB, transformBtoA, faceQuery);
+	b3BuildHullFaceAndCapsuleContact(manifold, hullA, capsuleB, transformBtoA, faceQuery, workerIndex);
 	if (manifold.pointCount == 2) {
 		// This becomes the clipped separation.
 		let base = manifold.pointOffset;
@@ -1115,7 +1189,9 @@ function b3BuildFaceAContact(
 	transformBtoA: b3Transform,
 	query: b3SeparatingAxis,
 	cache: ref b3SATCache,
+	workerIndex: i32,
 ): bool {
+	let scratch = s_convexScratch[workerIndex];
 	if (B3_ASSERT_ENABLED) B3_ASSERT(capacity > 0);
 
 	let facesA = b3GetHullFaces(hullA);
@@ -1132,11 +1208,11 @@ function b3BuildFaceAContact(
 	let incFace = b3FindIncidentFace(hullB, refNormalInB, query.indexB);
 
 	// Build clip polygon from incident face in frame A
-	let pointCount = b3BuildPolygon(s_clipBuffer1, transformBtoA, hullB, incFace, refPlane);
+	let pointCount = b3BuildPolygon(scratch.clipBuffer1, transformBtoA, hullB, incFace, refPlane);
 
 	// Clip incident face against side planes of reference face
-	let input = s_clipBuffer1;
-	let output = s_clipBuffer2;
+	let input = scratch.clipBuffer1;
+	let output = scratch.clipBuffer2;
 
 	let faceEdge = <i32>facesA[refFace].edge;
 	let edgeIndex = faceEdge;
@@ -1169,7 +1245,7 @@ function b3BuildFaceAContact(
 
 	pointCount = b3MinInt(pointCount, B3_MAX_CLIP_POINTS);
 
-	let points = s_clipPoints;
+	let points = scratch.clipPoints;
 	let minSeparation = FLT_MAX;
 
 	manifold.normal = refPlane.normal;
@@ -1216,6 +1292,7 @@ function b3BuildFaceBContact(
 	transformBtoA: b3Transform,
 	query: b3SeparatingAxis,
 	cache: ref b3SATCache,
+	workerIndex: i32,
 ): bool {
 	let transformAtoB = b3InvertTransform(transformBtoA);
 	let flippedQuery: b3SeparatingAxis;
@@ -1225,7 +1302,7 @@ function b3BuildFaceBContact(
 	flippedQuery.indexB = query.indexA;
 	flippedQuery.type = b3_faceAxisA;
 
-	let touching = b3BuildFaceAContact(manifold, capacity, hullB, hullA, transformAtoB, flippedQuery, cache);
+	let touching = b3BuildFaceAContact(manifold, capacity, hullB, hullA, transformAtoB, flippedQuery, cache, workerIndex);
 	if (touching == false) {
 		cache = b3SATCache();
 		return false;
@@ -1318,9 +1395,10 @@ export function b3ComputeSeparatingAxisAtWidth(
 	xfB: b3Transform,
 	earlyReturn: bool,
 	simdWidth: i32,
+	workerIndex: i32 = 0,
 ): b3AxisQuery {
 	// No width 8 path is ported
-	return b3ComputeSeparatingAxisW4(hullA, hullB, xfB, earlyReturn);
+	return b3ComputeSeparatingAxisW4(hullA, hullB, xfB, earlyReturn, workerIndex);
 }
 
 export function b3ComputeSeparatingAxis(
@@ -1340,7 +1418,9 @@ export function b3CollideHullsAtWidth(
 	transformBtoA: b3Transform,
 	cache: ref b3SATCache,
 	simdWidth: i32,
+	workerIndex: i32 = 0,
 ): void {
+	let scratch = s_convexScratch[workerIndex];
 	manifold.pointCount = 0;
 
 	if (capacity < 4) {
@@ -1392,7 +1472,7 @@ export function b3CollideHullsAtWidth(
 			faceQuery.type = b3_faceAxisA;
 
 			let localCache = b3SATCache();
-			let touching = b3BuildFaceAContact(manifold, capacity, hullA, hullB, transformBtoA, faceQuery, localCache);
+			let touching = b3BuildFaceAContact(manifold, capacity, hullA, hullB, transformBtoA, faceQuery, localCache, workerIndex);
 			if (touching == true && b3AbsFloat(cache.separation - localCache.separation) < linearSlop) {
 				// Cache hit, contact points generated
 				cache.hit = 1;
@@ -1428,7 +1508,7 @@ export function b3CollideHullsAtWidth(
 			faceQuery.type = b3_faceAxisB;
 
 			let localCache = b3SATCache();
-			let touching = b3BuildFaceBContact(manifold, capacity, hullA, hullB, transformBtoA, faceQuery, localCache);
+			let touching = b3BuildFaceBContact(manifold, capacity, hullA, hullB, transformBtoA, faceQuery, localCache, workerIndex);
 			if (touching == true && b3AbsFloat(cache.separation - localCache.separation) < linearSlop) {
 				// Cache hit, contact points generated
 				cache.hit = 1;
@@ -1511,23 +1591,23 @@ export function b3CollideHullsAtWidth(
 
 		// This case is for testing
 		case b3_manualFaceAxisA: {
-			let axisQuery = b3ComputeSeparatingAxisAtWidth(hullA, hullB, transformBtoA, false, simdWidth);
+			let axisQuery = b3ComputeSeparatingAxisAtWidth(hullA, hullB, transformBtoA, false, simdWidth, workerIndex);
 			let faceQuery = axisQuery.faceA;
-			b3BuildFaceAContact(manifold, capacity, hullA, hullB, transformBtoA, faceQuery, cache);
+			b3BuildFaceAContact(manifold, capacity, hullA, hullB, transformBtoA, faceQuery, cache, workerIndex);
 			return;
 		}
 
 		// This case is for testing
 		case b3_manualFaceAxisB: {
-			let axisQuery = b3ComputeSeparatingAxisAtWidth(hullA, hullB, transformBtoA, false, simdWidth);
+			let axisQuery = b3ComputeSeparatingAxisAtWidth(hullA, hullB, transformBtoA, false, simdWidth, workerIndex);
 			let faceQuery = axisQuery.faceB;
-			b3BuildFaceBContact(manifold, capacity, hullA, hullB, transformBtoA, faceQuery, cache);
+			b3BuildFaceBContact(manifold, capacity, hullA, hullB, transformBtoA, faceQuery, cache, workerIndex);
 			return;
 		}
 
 		// This case is for testing
 		case b3_manualEdgePairAxis: {
-			let axisQuery = b3ComputeSeparatingAxisAtWidth(hullA, hullB, transformBtoA, false, simdWidth);
+			let axisQuery = b3ComputeSeparatingAxisAtWidth(hullA, hullB, transformBtoA, false, simdWidth, workerIndex);
 			let edgeQuery = axisQuery.edge;
 			if (edgeQuery.indexA != B3_NULL_INDEX) {
 				b3BuildEdgeContact(manifold, hullA, hullB, transformBtoA, edgeQuery, cache);
@@ -1543,7 +1623,7 @@ export function b3CollideHullsAtWidth(
 	manifold.pointCount = 0;
 	cache = b3SATCache();
 
-	let axisQuery = b3ComputeSeparatingAxisAtWidth(hullA, hullB, transformBtoA, true, simdWidth);
+	let axisQuery = b3ComputeSeparatingAxisAtWidth(hullA, hullB, transformBtoA, true, simdWidth, workerIndex);
 
 	if (axisQuery.separatedFeature != b3_invalidAxis) {
 		// We found a separating axis
@@ -1570,12 +1650,12 @@ export function b3CollideHullsAtWidth(
 		let faceQuery = axisQuery.faceA;
 
 		// Face contact A
-		b3BuildFaceAContact(manifold, capacity, hullA, hullB, transformBtoA, faceQuery, cache);
+		b3BuildFaceAContact(manifold, capacity, hullA, hullB, transformBtoA, faceQuery, cache, workerIndex);
 	} else {
 		let faceQuery = axisQuery.faceB;
 
 		// Face contact B
-		b3BuildFaceBContact(manifold, capacity, hullA, hullB, transformBtoA, faceQuery, cache);
+		b3BuildFaceBContact(manifold, capacity, hullA, hullB, transformBtoA, faceQuery, cache, workerIndex);
 	}
 
 	let edgeQuery = axisQuery.edge;
@@ -1601,10 +1681,9 @@ export function b3CollideHullsAtWidth(
 		if (B3_ASSERT_ENABLED) B3_ASSERT(0 <= edgeQuery.indexB && edgeQuery.indexB < hullB.edgeCount);
 
 		// Edge contact
-		let edgeManifold = s_edgeManifold;
+		let edgeManifold = scratch.edgeManifold;
 		b3ZeroLocalManifold(edgeManifold);
-		s_edgePoint[0] = b3LocalManifoldPoint();
-		edgeManifold.points = s_edgePoint;
+		scratch.edgePoint[0] = b3LocalManifoldPoint();
 
 		let edgeCache = b3SATCache();
 		b3BuildEdgeContact(edgeManifold, hullA, hullB, transformBtoA, edgeQuery, edgeCache);
@@ -1614,7 +1693,7 @@ export function b3CollideHullsAtWidth(
 		if (edgeManifold.pointCount == 1) {
 			// Copy edge manifold out, being careful to preserve manifold point buffer.
 			b3CopyLocalManifoldFields(manifold, edgeManifold);
-			manifold.points[manifold.pointOffset + 0] = s_edgePoint[0];
+			manifold.points[manifold.pointOffset + 0] = scratch.edgePoint[0];
 			cache = edgeCache;
 		}
 	}
@@ -1927,41 +2006,6 @@ function b3FilterEdgeCandidates(
 	return keptCount;
 }
 
-// Temporary abbreviations for convenience.
-const NE: i32 = B3_MAX_HULL_EDGES + B3_SIMD_WIDTH;
-const NF: i32 = B3_MAX_HULL_FACES + B3_SIMD_WIDTH;
-const NV: i32 = B3_MAX_HULL_VERTICES + B3_SIMD_WIDTH;
-
-// The C stack arrays of the separating axis test
-const s_dotA = new StaticArray<f32>(NF);
-const s_dotB = new StaticArray<f32>(NF);
-const s_planeDotA = new StaticArray<f32>(NF);
-const s_planeDotB = new StaticArray<f32>(NF);
-const s_edgeIndicesA = new StaticArray<i32>(NE);
-const s_edgeIndicesB = new StaticArray<i32>(B3_MAX_HULL_EDGES);
-const s_bFNx = new StaticArray<f32>(NF);
-const s_bFNy = new StaticArray<f32>(NF);
-const s_bFNz = new StaticArray<f32>(NF);
-const s_bWx = new StaticArray<f32>(NV);
-const s_bWy = new StaticArray<f32>(NV);
-const s_bWz = new StaticArray<f32>(NV);
-const s_aN0x = new StaticArray<f32>(NE);
-const s_aN0y = new StaticArray<f32>(NE);
-const s_aN0z = new StaticArray<f32>(NE);
-const s_aN1x = new StaticArray<f32>(NE);
-const s_aN1y = new StaticArray<f32>(NE);
-const s_aN1z = new StaticArray<f32>(NE);
-const s_aDx = new StaticArray<f32>(NE);
-const s_aDy = new StaticArray<f32>(NE);
-const s_aDz = new StaticArray<f32>(NE);
-const s_aV0x = new StaticArray<f32>(NE);
-const s_aV0y = new StaticArray<f32>(NE);
-const s_aV0z = new StaticArray<f32>(NE);
-const s_aTol = new StaticArray<f32>(NE);
-const s_sA = new StaticArray<f32>(B3_SIMD_WIDTH);
-const s_nxA = new StaticArray<f32>(B3_SIMD_WIDTH);
-const s_nyA = new StaticArray<f32>(B3_SIMD_WIDTH);
-const s_nzA = new StaticArray<f32>(B3_SIMD_WIDTH);
 
 function b3MakeAxis(type: i32): b3SeparatingAxis {
 	let axis: b3SeparatingAxis;
@@ -1980,7 +2024,9 @@ export function b3ComputeSeparatingAxisW4(
 	hullB: b3HullData,
 	xfB: b3Transform,
 	earlyReturn: bool,
+	workerIndex: i32 = 0,
 ): b3AxisQuery {
+	let scratch = s_convexScratch[workerIndex];
 	let R = b3MakeMatrixFromQuat(xfB.q);
 	let invR = b3Transpose(R);
 
@@ -2021,7 +2067,7 @@ export function b3ComputeSeparatingAxisW4(
 	let radiusBound = radius - (B3_LINEAR_SLOP() + 0.001 * (centerDistance + radius));
 
 	// Compute dot(normalA, centerDelta) for all face normals of hullA.
-	let dotA = s_dotA;
+	let dotA = scratch.dotA;
 	b3GetFaceDots(hullA, deltaCenter, dotA);
 
 	// Find the face of hullA that most aligns with centerDelta.
@@ -2094,7 +2140,7 @@ export function b3ComputeSeparatingAxisW4(
 	let hA = b3AABB_Extents(hullA.aabb);
 
 	// Similarly, find the face of hullB that most aligns with the vector pointing from centerB to centerA.
-	let dotB = s_dotB;
+	let dotB = scratch.dotB;
 	b3GetFaceDots(hullB, b3Neg(b3MulMV(invR, deltaCenter)), dotB);
 
 	let seedIndexB = 0;
@@ -2157,12 +2203,12 @@ export function b3ComputeSeparatingAxisW4(
 	// Gather edges of A that can feasibly create a separating axis that beats the maximum face separation.
 	let halfEdgeCountA = hullA.edgeCount;
 	let halfEdgesA = b3GetHullEdges(hullA);
-	let edgeIndicesA = s_edgeIndicesA;
+	let edgeIndicesA = scratch.edgeIndicesA;
 	let na = 0;
 
 	let halfEdgeCountB = hullB.edgeCount;
 	let halfEdgesB = b3GetHullEdges(hullB);
-	let edgeIndicesB = s_edgeIndicesB;
+	let edgeIndicesB = scratch.edgeIndicesB;
 	let nb = 0;
 
 	let maxFaceSeparation = b3MaxFloat(res.faceA.separation, res.faceB.separation);
@@ -2173,8 +2219,8 @@ export function b3ComputeSeparatingAxisW4(
 	let centerBinA = b3Add(b3MulMV(R, hullB.center), xfB.p);
 	let centerAinB = b3MulMV(invR, b3Sub(hullA.center, xfB.p));
 
-	let planeDotA = s_planeDotA;
-	let planeDotB = s_planeDotB;
+	let planeDotA = scratch.planeDotA;
+	let planeDotB = scratch.planeDotB;
 	b3GetFacePlaneSeparations(hullA, centerBinA, planeDotA);
 	b3GetFacePlaneSeparations(hullB, centerAinB, planeDotB);
 
@@ -2221,14 +2267,14 @@ export function b3ComputeSeparatingAxisW4(
 	}
 
 	// B face normals in A space, negated.
-	let bFNx = s_bFNx;
-	let bFNy = s_bFNy;
-	let bFNz = s_bFNz;
+	let bFNx = scratch.bFNx;
+	let bFNy = scratch.bFNy;
+	let bFNz = scratch.bFNz;
 
 	// B vertices in A space, negated.
-	let bWx = s_bWx;
-	let bWy = s_bWy;
-	let bWz = s_bWz;
+	let bWx = scratch.bWx;
+	let bWy = scratch.bWy;
+	let bWz = scratch.bWz;
 
 	let faceStrideB = b3GetHullSoaStride(faceCountB);
 	let soaNB = b3GetHullSoaNormals(hullB);
@@ -2243,20 +2289,20 @@ export function b3ComputeSeparatingAxisW4(
 	// Per A edge data, already in A's space so just gathered. n0 and n1 are the two face
 	// normals, d the edge vector av1-av0, v0 the first vertex. Tol is the
 	// parallel edge tolerance, scaled by the edge length.
-	let aN0x = s_aN0x;
-	let aN0y = s_aN0y;
-	let aN0z = s_aN0z;
-	let aN1x = s_aN1x;
-	let aN1y = s_aN1y;
-	let aN1z = s_aN1z;
+	let aN0x = scratch.aN0x;
+	let aN0y = scratch.aN0y;
+	let aN0z = scratch.aN0z;
+	let aN1x = scratch.aN1x;
+	let aN1y = scratch.aN1y;
+	let aN1z = scratch.aN1z;
 	// dir = av1 - av0
-	let aDx = s_aDx;
-	let aDy = s_aDy;
-	let aDz = s_aDz;
-	let aV0x = s_aV0x;
-	let aV0y = s_aV0y;
-	let aV0z = s_aV0z;
-	let aTol = s_aTol;
+	let aDx = scratch.aDx;
+	let aDy = scratch.aDy;
+	let aDz = scratch.aDz;
+	let aV0x = scratch.aV0x;
+	let aV0y = scratch.aV0y;
+	let aV0z = scratch.aV0z;
+	let aTol = scratch.aTol;
 
 	let squaredTol = B3_PARALLEL_EDGE_TOL * B3_PARALLEL_EDGE_TOL;
 	for (let k = 0; k < na; ++k) {
@@ -2380,10 +2426,10 @@ export function b3ComputeSeparatingAxisW4(
 		let EPS = b3SplatW(-linearSlop * linearSlop);
 		let INF = b3SplatW(FLT_INF);
 
-		let sA = s_sA;
-		let nxA = s_nxA;
-		let nyA = s_nyA;
-		let nzA = s_nzA;
+		let sA = scratch.sA;
+		let nxA = scratch.nxA;
+		let nyA = scratch.nyA;
+		let nzA = scratch.nzA;
 
 		for (let j = 0; j < nb; ++j) {
 			let edgeIndex = edgeIndicesB[j];
