@@ -3,7 +3,7 @@
 // Driver for lib/dynamic_tree.as, mirrors verify/cref/tree.c
 
 import { vtag, vi32, vu32, vu64, vbool, vf32, vend, vseed, vrand64, vrandint, vrandf } from "./common";
-import { FLT_MAX } from "../../lib/core";
+import { FLT_MAX, b3OnMain } from "../../lib/core";
 import { b3AABB, b3AABB_Center, b3Add, b3DistanceSquared, b3MulSV, b3Sub, b3Vec3, b3Vec3_zero } from "../../lib/math_functions";
 import {
 	b3BoxCastInput,
@@ -762,7 +762,7 @@ function doEnlarge(proxyId: i32): void {
 
 function doMarkMoved(proxyId: i32): void {
 	let box = enlarged(b3DynamicTree_GetAABB(tree, proxyId));
-	b3DynamicTree_MarkProxyMoved(tree, proxyId, box);
+	b3DynamicTree_MarkProxyMoved<b3OnMain>(tree, proxyId, box);
 	emitOp("mark", proxyId, 0);
 }
 

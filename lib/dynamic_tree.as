@@ -2078,9 +2078,9 @@ export function b3DynamicTree_MarkProxyMovedSerial(tree: b3DynamicTree, proxyId:
 	}
 }
 
-// Update a proxy AABB and flag the ancestors as moved. C uses atomics here; the port is single threaded.
-// Update a proxy AABB and flag the ancestors as moved. Thread-safe using atomics, as parallel parts finalize bodies.
-export unsafe function b3DynamicTree_MarkProxyMoved(tree: b3DynamicTree, proxyId: i32, aabb: b3AABB): void {
+// Update a proxy AABB and flag the ancestors as moved. Thread-safe using atomics in the b3InParallel instantiation,
+// which parallel parts run as they finalize bodies.
+export unsafe function b3DynamicTree_MarkProxyMoved<M>(tree: b3DynamicTree, proxyId: i32, aabb: b3AABB): void {
 	let nodes = tree.nodes;
 	let parents = tree.parents;
 
@@ -2101,7 +2101,13 @@ export unsafe function b3DynamicTree_MarkProxyMoved(tree: b3DynamicTree, proxyId
 			break;
 		}
 
-		let previousFlags = atomic.or<u32>(flagIndex, B3_MOVED_NODE);
+		let previousFlags: u32;
+		if (isBoolean<M>()) {
+			previousFlags = atomic.or<u32>(flagIndex, B3_MOVED_NODE);
+		} else {
+			previousFlags = load<u32>(flagIndex);
+			store<u32>(flagIndex, previousFlags | B3_MOVED_NODE);
+		}
 		if ((previousFlags & B3_MOVED_NODE) != 0) {
 			// Ancestor already visited.
 			break;

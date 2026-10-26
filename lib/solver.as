@@ -1160,7 +1160,7 @@ unsafe function b3SolveContinuous<M>(world: b3World, bodySimIndex: i32, taskCont
 				// Regular bodies mark the hierarchy as moved using atomic operations.
 				// Bullets are handled separately at a later stage.
 				if (isBullet == false) {
-					b3BroadPhase_MarkProxyMoved(world.broadPhase, shape.proxyKey, world.fatAABBs[shapeId]);
+					b3BroadPhase_MarkProxyMoved<M>(world.broadPhase, shape.proxyKey, world.fatAABBs[shapeId]);
 				} else {
 					store<u32>(fastBodySim + FSIM_FLAGS, load<u32>(fastBodySim + FSIM_FLAGS) | b3_enlargeBulletBounds);
 				}
@@ -1186,7 +1186,7 @@ unsafe function b3SolveContinuous<M>(world: b3World, bodySimIndex: i32, taskCont
 				world.fatAABBs[shapeId] = b3AABB_Inflate(shape.aabb, shape.aabbMargin);
 
 				if (isBullet == false) {
-					b3BroadPhase_MarkProxyMoved(world.broadPhase, shape.proxyKey, world.fatAABBs[shapeId]);
+					b3BroadPhase_MarkProxyMoved<M>(world.broadPhase, shape.proxyKey, world.fatAABBs[shapeId]);
 				} else {
 					store<u32>(fastBodySim + FSIM_FLAGS, load<u32>(fastBodySim + FSIM_FLAGS) | b3_enlargeBulletBounds);
 				}
@@ -1483,7 +1483,7 @@ export unsafe function b3FinalizeBodiesTask<M>(startIndex: i32, endIndex: i32, w
 					world.fatAABBs[shapeId] = b3AABB_Inflate(aabb, shape.aabbMargin);
 
 					// Mark the hierarchy as moved using atomic operations.
-					b3BroadPhase_MarkProxyMoved(world.broadPhase, shape.proxyKey, world.fatAABBs[shapeId]);
+					b3BroadPhase_MarkProxyMoved<M>(world.broadPhase, shape.proxyKey, world.fatAABBs[shapeId]);
 				}
 
 				shapeId = shape.nextShapeId;
