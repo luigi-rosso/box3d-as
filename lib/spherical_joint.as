@@ -268,6 +268,7 @@ export function b3GetSphericalJointTorque(world: b3World, base: b3JointSim): b3V
 // r_skew * invI * r_skew = R * skew(r_local) * RT * R * invI_local * RT * R * r_skew * RT
 //                        = R * ( skew(r_local) * invI_local * skew(r_local) ) * RT
 
+@noinline
 export function b3PrepareSphericalJoint(base: b3JointSim, context: b3StepContext): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(base.type == b3_sphericalJoint);
 
@@ -351,6 +352,7 @@ export function b3PrepareSphericalJoint(base: b3JointSim, context: b3StepContext
 	}
 }
 
+@noinline
 export unsafe function b3WarmStartSphericalJoint(base: b3JointSim, context: b3StepContext): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(base.type == b3_sphericalJoint);
 
@@ -393,6 +395,7 @@ export unsafe function b3WarmStartSphericalJoint(base: b3JointSim, context: b3St
 	}
 }
 
+@noinline
 export unsafe function b3SolveSphericalJoint(base: b3JointSim, context: b3StepContext, useBias: bool): void {
 	let mA = base.invMassA;
 	let mB = base.invMassB;

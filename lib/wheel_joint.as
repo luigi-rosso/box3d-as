@@ -347,6 +347,7 @@ export function b3GetWheelJointTorque(world: b3World, base: b3JointSim): b3Vec3 
 
 // See constraints.pdf
 
+@noinline
 export function b3PrepareWheelJoint(base: b3JointSim, context: b3StepContext): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(base.type == b3_wheelJoint);
 
@@ -444,6 +445,7 @@ export function b3PrepareWheelJoint(base: b3JointSim, context: b3StepContext): v
 	}
 }
 
+@noinline
 export unsafe function b3WarmStartWheelJoint(base: b3JointSim, context: b3StepContext): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(base.type == b3_wheelJoint);
 
@@ -527,6 +529,7 @@ export unsafe function b3WarmStartWheelJoint(base: b3JointSim, context: b3StepCo
 	}
 }
 
+@noinline
 export unsafe function b3SolveWheelJoint(base: b3JointSim, context: b3StepContext, useBias: bool): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(base.type == b3_wheelJoint);
 

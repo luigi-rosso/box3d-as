@@ -236,6 +236,7 @@ export function b3GetRevoluteJointTorque(world: b3World, base: b3JointSim): b3Ve
 	return torque;
 }
 
+@noinline
 export function b3PrepareRevoluteJoint(base: b3JointSim, context: b3StepContext): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(base.type == b3_revoluteJoint);
 
@@ -306,6 +307,7 @@ export function b3PrepareRevoluteJoint(base: b3JointSim, context: b3StepContext)
 	}
 }
 
+@noinline
 export unsafe function b3WarmStartRevoluteJoint(base: b3JointSim, context: b3StepContext): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(base.type == b3_revoluteJoint);
 
@@ -348,6 +350,7 @@ export unsafe function b3WarmStartRevoluteJoint(base: b3JointSim, context: b3Ste
 	}
 }
 
+@noinline
 export unsafe function b3SolveRevoluteJoint(base: b3JointSim, context: b3StepContext, useBias: bool): void {
 	let mA = base.invMassA;
 	let mB = base.invMassB;

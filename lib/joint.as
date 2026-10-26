@@ -465,6 +465,7 @@ export class b3JointSim {
 }
 
 // K = [(1/m1 + 1/m2) * eye(2) - skew(r1) * invI1 * skew(r1) - skew(r2) * invI2 * skew(r2)]
+@inline
 export function b3SolvePointConstraint(
 	mA: f32,
 	mB: f32,

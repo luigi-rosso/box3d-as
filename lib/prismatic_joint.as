@@ -279,6 +279,7 @@ export function b3GetPrismaticJointTorque(world: b3World, base: b3JointSim): b3V
 	return torque;
 }
 
+@noinline
 export function b3PreparePrismaticJoint(base: b3JointSim, context: b3StepContext): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(base.type == b3_prismaticJoint);
 
@@ -336,6 +337,7 @@ export function b3PreparePrismaticJoint(base: b3JointSim, context: b3StepContext
 	}
 }
 
+@noinline
 export unsafe function b3WarmStartPrismaticJoint(base: b3JointSim, context: b3StepContext): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(base.type == b3_prismaticJoint);
 
@@ -392,6 +394,7 @@ export unsafe function b3WarmStartPrismaticJoint(base: b3JointSim, context: b3St
 	}
 }
 
+@noinline
 export unsafe function b3SolvePrismaticJoint(base: b3JointSim, context: b3StepContext, useBias: bool): void {
 	let mA = base.invMassA;
 	let mB = base.invMassB;

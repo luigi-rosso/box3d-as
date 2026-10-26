@@ -76,6 +76,7 @@ export function b3GetParallelJointTorque(world: b3World, base: b3JointSim): b3Ve
 	return torque;
 }
 
+@noinline
 export function b3PrepareParallelJoint(base: b3JointSim, context: b3StepContext): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(base.type == b3_parallelJoint);
 
@@ -125,6 +126,7 @@ export function b3PrepareParallelJoint(base: b3JointSim, context: b3StepContext)
 	}
 }
 
+@noinline
 export unsafe function b3WarmStartParallelJoint(base: b3JointSim, context: b3StepContext): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(base.type == b3_parallelJoint);
 
@@ -155,6 +157,7 @@ export unsafe function b3WarmStartParallelJoint(base: b3JointSim, context: b3Ste
 	}
 }
 
+@noinline
 export unsafe function b3SolveParallelJoint(base: b3JointSim, context: b3StepContext): void {
 	let iA = base.invIA;
 	let iB = base.invIB;

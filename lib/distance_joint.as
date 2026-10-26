@@ -214,6 +214,7 @@ export function b3GetDistanceJointForce(world: b3World, base: b3JointSim): b3Vec
 // K = J * invM * JT
 //   = invMass1 + invI1 * cross(r1, u)^2 + invMass2 + invI2 * cross(r2, u)^2
 
+@noinline
 export function b3PrepareDistanceJoint(base: b3JointSim, context: b3StepContext): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(base.type == b3_distanceJoint);
 
@@ -277,6 +278,7 @@ export function b3PrepareDistanceJoint(base: b3JointSim, context: b3StepContext)
 	}
 }
 
+@noinline
 export unsafe function b3WarmStartDistanceJoint(base: b3JointSim, context: b3StepContext): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(base.type == b3_distanceJoint);
 
@@ -313,6 +315,7 @@ export unsafe function b3WarmStartDistanceJoint(base: b3JointSim, context: b3Ste
 	}
 }
 
+@noinline
 export unsafe function b3SolveDistanceJoint(base: b3JointSim, context: b3StepContext, useBias: bool): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(base.type == b3_distanceJoint);
 
