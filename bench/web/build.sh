@@ -41,12 +41,13 @@ if [ "${PROFILE:-0}" = "1" ]; then
 	c_build c_scalar_prof -DBOX3D_DISABLE_SIMD=ON -DCMAKE_EXE_LINKER_FLAGS=--profiling-funcs
 fi
 
-# Release bake flags: optimized, no fuel (dangerouslyFast), throws stripped, frame collector
+# Release bake flags, as rive-cli's --bench: optimized, no fuel (dangerouslyFast), throws stripped, release checks,
+# frame collector
 as_build() {
 	local name=$1
 	shift
 	RASC_WASM_OPT="$WASM_OPT" "$RASC" "$here/as/web.as" --path "$AS_STD" --lib "$AS_STD/assembly" \
-		--runtime frame -O2 --dangerously-fast --no-throw-messages "$@" -o "$out/$name.wasm"
+		--runtime frame -O2 --dangerously-fast --no-throw-messages --release "$@" -o "$out/$name.wasm"
 }
 
 as_build as_scalar
