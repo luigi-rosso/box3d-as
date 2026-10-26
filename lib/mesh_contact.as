@@ -945,7 +945,22 @@ function b3PrefilterTriangles(
 }
 
 @unchecked
-export unsafe function b3ComputeMeshManifolds<M>(
+export unsafe function b3ComputeMeshManifolds(
+	world: b3World,
+	workerIndex: i32,
+	contact: b3Contact,
+	shapeA: b3Shape,
+	materialMap: Uint16Array?,
+	xfA: b3WorldTransform,
+	shapeB: b3Shape,
+	xfB: b3WorldTransform,
+	isFast: bool,
+): bool {
+	return b3ComputeMeshManifoldsAt<b3OnMain>(world, workerIndex, contact, shapeA, materialMap, xfA, shapeB, xfB, isFast);
+}
+
+// M is b3InParallel for the instantiation parallel parts run
+export unsafe function b3ComputeMeshManifoldsAt<M>(
 	world: b3World,
 	workerIndex: i32,
 	contact: b3Contact,

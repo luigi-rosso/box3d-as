@@ -57,7 +57,7 @@ import {
 import { b3UnlinkContact } from "./island";
 import { b3MakeFeatureId } from "./manifold";
 import { b3StoreRow } from "./simd";
-import { b3ComputeMeshManifolds } from "./mesh_contact";
+import { b3ComputeMeshManifoldsAt } from "./mesh_contact";
 import {
 	b3AllocateManifolds,
 	b3FreeManifolds,
@@ -1111,7 +1111,7 @@ export unsafe function b3UpdateContact<M>(
 		} else if (child.type == b3_meshShape) {
 			let xfChild = b3MulWorldTransforms(xfA, child.transform);
 
-			touching = b3ComputeMeshManifolds<M>(
+			touching = b3ComputeMeshManifoldsAt<M>(
 				world,
 				workerIndex,
 				contact,
@@ -1159,7 +1159,7 @@ export unsafe function b3UpdateContact<M>(
 		// Does this contact touch a mesh or height-field?
 
 		// Compute mesh manifolds
-		touching = b3ComputeMeshManifolds<M>(world, workerIndex, contact, shapeA, null, xfA, shapeB, xfB, isFast);
+		touching = b3ComputeMeshManifoldsAt<M>(world, workerIndex, contact, shapeA, null, xfA, shapeB, xfB, isFast);
 
 		if (touching && ((shapeA.flags & b3_enableHitEvents) != 0 || (shapeB.flags & b3_enableHitEvents) != 0)) {
 			contact.flags |= b3_simEnableHitEvent;
