@@ -78,7 +78,8 @@ function table( path )
 	const best = new Map();
 	for ( const r of runs )
 	{
-		const b = best.get( key( r ) ) ?? { runs: [], median: Infinity, min: Infinity, mean1: Infinity, stages: null };
+		const b = best.get( key( r ) ) ?? { runs: [], median: Infinity, min: Infinity, mean: Infinity, mean1: Infinity,
+			stages: null };
 		b.runs.push( r );
 		if ( r.median < b.median )
 		{
@@ -87,6 +88,7 @@ function table( path )
 			b.queryMs = r.queryMs;
 		}
 		b.min = Math.min( b.min, r.min );
+		b.mean = Math.min( b.mean, r.mean );
 		b.mean1 = Math.min( b.mean1, r.mean1 );
 		best.set( key( r ), b );
 	}
@@ -110,6 +112,16 @@ function table( path )
 		const all = impls.flatMap( ( i ) => ref( s, i )?.runs ?? [] );
 		const ok = all.filter( ( r ) => r.mismatch === -1 && r.compared > 0 ).length;
 		console.log( `| ${scene} | ${w} | ${cells.join( ' | ' )} | ${ratio( 'as_simd', 'c_simd' )} | ${ratio( 'as_scalar', 'c_scalar' )} | ${ok}/${all.length} |` );
+	}
+	console.log( '\nms per step, min over rounds of the run mean over steps after warmup (resolves steps below a coarse timer)' );
+	console.log( `| scene | workers | ${impls.join( ' | ' )} | as_simd / c_simd | as_scalar / c_scalar |` );
+	console.log( `|---|---|${impls.map( () => '---|' ).join( '' )}---|---|` );
+	for ( const s of scenes )
+	{
+		const [ scene, w ] = s.split( '|' );
+		const ratio = ( a, b ) => ( ref( s, a ) && ref( s, b ) ? ( ref( s, a ).mean / ref( s, b ).mean ).toFixed( 2 ) : '-' );
+		console.log( `| ${scene} | ${w} | ${impls.map( ( i ) => ( ref( s, i ) ? fmt( ref( s, i ).mean ) : '-' ) ).join( ' | ' )} | ` +
+			`${ratio( 'as_simd', 'c_simd' )} | ${ratio( 'as_scalar', 'c_scalar' )} |` );
 	}
 	const STAGES = [ 'step', 'pairs', 'collide', 'solve', 'solverSetup', 'prepareConstraints', 'integrateVelocities',
 		'warmStart', 'solveImpulses', 'integratePositions', 'relaxImpulses', 'storeImpulses', 'splitIslands', 'transforms',

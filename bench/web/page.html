@@ -1,0 +1,28 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Box3D web bench</title>
+<script type="module">
+import { load, run, summarize, recordingHashes, firstMismatch } from './core.mjs';
+
+// One timed run as run.mjs does it in node: an untimed pass so V8 tiers up, then the timed one, checked
+// against the native scalar recording step by step
+window.runOne = async ( impl, scene, steps, workers, warmup ) =>
+{
+	const m = await load( impl, {
+		fetchBytes: async ( name ) => new Uint8Array( await ( await fetch( `out/${name}.wasm` ) ).arrayBuffer() ),
+		importGlue: async ( name ) => ( await import( `./out/${name}.mjs` ) ).default,
+	} );
+	run( m, scene, steps, workers );
+	const raw = run( m, scene, steps, workers );
+	const response = await fetch( `../../verify/scenes/out/${scene}_scalar_w1.bin` );
+	const reference = response.ok ? recordingHashes( new Uint8Array( await response.arrayBuffer() ) ) : [];
+	const mismatch = firstMismatch( raw.hashes, reference );
+	return {
+		impl, scene, steps, workers, warmup, prewarm: true, compared: Math.min( raw.hashes.length, reference.length ),
+		mismatch, ...summarize( raw, warmup ), queryMs: raw.queryMs.map( ( x ) => x / steps ),
+		queryHash: raw.queryHash.map( ( h ) => h.toString( 16 ).padStart( 8, '0' ) ), finalHash: raw.hashes[steps - 1],
+		crossOriginIsolated: self.crossOriginIsolated, userAgent: navigator.userAgent,
+	};
+};
+window.ready = true;
+</script>
