@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Erin Catto
 // SPDX-License-Identifier: MIT
 // One timed run in node, checked against the native scalar recording step by step:
-//   node bench/web/run.mjs <impl> <scene> <steps> [--workers=1] [--warmup=n]
+//   node bench/web/run.mjs <impl> <scene> <steps> [--workers=1] [--warmup=n] [--prewarm=0]
+// The scene first runs once untimed in the same instance, so V8 has tiered every hot function up; --prewarm=0
+// skips that pass.
 // impl: c_simd, c_scalar, as_simd, as_scalar (bench/web/out), native_simd, native_scalar (bench/web/out/bin).
 // Prints one JSON line.
 
@@ -20,12 +22,14 @@ const [ impl, scene ] = args;
 const steps = Number( args[2] );
 const workers = Number( flags.workers ?? 1 );
 const warmup = Number( flags.warmup ?? Math.floor( steps / 10 ) );
+const prewarm = flags.prewarm !== '0';
 
 let raw;
 if ( impl.startsWith( 'native_' ) )
 {
 	const bin = join( out, 'bin', impl );
-	raw = JSON.parse( execFileSync( bin, [ String( SCENES.indexOf( scene ) ), String( steps ), String( workers ) ],
+	raw = JSON.parse( execFileSync( bin, [ String( SCENES.indexOf( scene ) ), String( steps ), String( workers ),
+		prewarm ? '1' : '0' ],
 		{ maxBuffer: 1 << 28 } ).toString() );
 }
 else
@@ -34,6 +38,10 @@ else
 		fetchBytes: async ( name ) => readFileSync( join( out, `${name}.wasm` ) ),
 		importGlue: async ( name ) => ( await import( pathToFileURL( join( out, `${name}.mjs` ) ) ) ).default,
 	} );
+	if ( prewarm )
+	{
+		run( m, scene, steps, workers );
+	}
 	raw = run( m, scene, steps, workers );
 }
 
@@ -42,7 +50,7 @@ const reference = existsSync( refPath ) ? recordingHashes( readFileSync( refPath
 const mismatch = firstMismatch( raw.hashes, reference );
 const compared = Math.min( raw.hashes.length, reference.length );
 console.log( JSON.stringify( {
-	impl, scene, steps, workers, warmup, compared, mismatch, ...summarize( raw, warmup ),
+	impl, scene, steps, workers, warmup, prewarm, compared, mismatch, ...summarize( raw, warmup ),
 	queryMs: raw.queryMs.map( ( x ) => x / steps ), queryHash: raw.queryHash.map( ( h ) => h.toString( 16 ).padStart( 8, '0' ) ),
 	finalHash: raw.hashes[steps - 1],
 } ) );
