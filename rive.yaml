@@ -1,13 +1,10 @@
 name: box3d_demo
-main: main
+main: Box3D
 scripting: wasm
 # Physics steps outrun the 200 ms script budget of the fueled debug bake the live window plays.
 dangerouslyFast: true
-artboard:
-  width: 1280
-  height: 800
-  background: "#151412"
 exclude:
+  - demo/gen
   # The parallel calls backend, opt in: it needs the parallel-calls toolchain
   - lib/parallel
   - verify
