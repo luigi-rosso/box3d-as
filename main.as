@@ -131,7 +131,9 @@ export class Main extends Layout {
             return;
         }
         shell.scene.value = <f64>this.current;
+        shell.sceneTitle.value = this.scenes[this.current].name();
         shell.description.value = this.scenes[this.current].hint();
+        shell.fit(this.width, this.height);
         shell.paused.value = this.paused;
         shell.tool.value = <f64>this.tool;
     }
@@ -186,6 +188,7 @@ export class Main extends Layout {
         this.width = <f32>width;
         this.height = <f32>height;
         this.camera.setViewport(this.width, this.height);
+        this.syncShell();
         let stops = new Array<GradientStop>();
         stops.push(GradientStop(0, 0xFF1D1C19));
         stops.push(GradientStop(1, INK_BACKGROUND));
@@ -204,6 +207,10 @@ export class Main extends Layout {
         let shell = this.shell;
         if (shell != null) {
             this.followShell(shell);
+            // The bound position is in artboard points, the size in the overlay's unscaled units.
+            let c = shell.clear;
+            let k = shell.uiScale.value;
+            this.camera.frame(<f32>c[0].value, <f32>c[1].value, <f32>(c[2].value * k), <f32>(c[3].value * k));
         }
         let dt = <f32>Math.min(seconds, 0.1);
         let scene = this.scenes[this.current];

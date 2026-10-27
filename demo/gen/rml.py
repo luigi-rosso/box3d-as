@@ -180,7 +180,7 @@ def cond(kind, path, op, value):
 
 def key_anim(name, keys):
     """A one frame LinearAnimation holding {(object, property): value}; 8 hex
-    digit strings key colors, numbers key doubles."""
+    digit strings key colors, ("uint", n) keys enums, numbers key doubles."""
     anim = E("LinearAnimation", name=name, duration=1)
     by_obj = {}
     for (obj, prop), value in keys.items():
@@ -190,6 +190,8 @@ def key_anim(name, keys):
         for prop, value in props:
             if isinstance(value, str):
                 kf = E("KeyFrameColor", value=value, frame=0, interpolationType="linear")
+            elif isinstance(value, tuple):
+                kf = E("KeyFrameUint", value=value[1], frame=0, interpolationType="hold")
             else:
                 kf = E("KeyFrameDouble", value=float(value), frame=0, interpolationType="linear")
             ko.add(E("KeyedProperty", kf, property=prop))

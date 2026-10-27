@@ -8,17 +8,25 @@ const PITCH_MAX: f32 = 1.52;
 const PITCH_MIN: f32 = -0.12;
 const MIN_DISTANCE: f32 = 1.5;
 const MAX_DISTANCE: f32 = 400;
+// Half tangents of the view every scene's home must show: the part of a
+// 1280 by 800 frame at a 0.75 radian vertical field the home views were tuned to.
+const FIT_X: f32 = 0.4;
+const FIT_Y: f32 = 0.34;
 
 export class OrbitCamera {
     yaw: f32 = 0.6;
     pitch: f32 = 0.45;
     distance: f32 = 18;
     target: Vec3 = Vec3(0, 1.5, 0);
-    fovY: f32 = 0.75;
     near: f32 = 0.1;
 
     width: f32 = 1;
     height: f32 = 1;
+    // The area the scene is framed in, the whole viewport until frame() narrows it.
+    frameX: f32 = 0;
+    frameY: f32 = 0;
+    frameWidth: f32 = 0;
+    frameHeight: f32 = 0;
 
     // Derived by update().
     eye: Vec3 = Vec3(0, 0, 0);
@@ -46,6 +54,19 @@ export class OrbitCamera {
     setViewport(width: f32, height: f32): void {
         this.width = width > 1 ? width : 1;
         this.height = height > 1 ? height : 1;
+        this.update();
+    }
+
+    // Centers the projection on an area of the viewport and fits the home
+    // view in it, so orbit still pivots on the target.
+    frame(x: f32, y: f32, width: f32, height: f32): void {
+        if (x == this.frameX && y == this.frameY && width == this.frameWidth && height == this.frameHeight) {
+            return;
+        }
+        this.frameX = x;
+        this.frameY = y;
+        this.frameWidth = width;
+        this.frameHeight = height;
         this.update();
     }
 
@@ -145,9 +166,12 @@ export class OrbitCamera {
         this.forward = scale(offset, -1);
         this.right = normalize(cross(this.forward, v3(0, 1, 0)));
         this.up = cross(this.right, this.forward);
-        this.focal = 0.5 * this.height / Mathf.tan(0.5 * this.fovY);
-        this.cx = 0.5 * this.width;
-        this.cy = 0.5 * this.height;
+        let framed = this.frameWidth > 1 && this.frameHeight > 1;
+        let w = framed ? this.frameWidth : this.width;
+        let h = framed ? this.frameHeight : this.height;
+        this.focal = Mathf.min(0.5 * w / FIT_X, 0.5 * h / FIT_Y);
+        this.cx = (framed ? this.frameX : 0) + 0.5 * w;
+        this.cy = (framed ? this.frameY : 0) + 0.5 * h;
     }
 
     // Camera space: x right, y up, z depth along the view.
