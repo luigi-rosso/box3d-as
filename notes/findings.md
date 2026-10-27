@@ -441,10 +441,11 @@ picks 6, and in Chrome 7 parts was slower than 8 on three of four scenes.
 
 rive master CLI, `demo/shell.rml`. A `ScriptedLayout` filling the artboard sits behind panels whose controls are
 `LayoutComponent`s with `down` listeners. A press on a control fires its listener and then the script's
-`pointerDown`, because a scripted object sees every pointer event and a plain listener target is not opaque. The
-opaque flag (`opaque="true"` on the control) stops the press, but the runtime then hands the script `pointerExit`
-for every move and release over the control (`HitScriptedDrawable::processEvent` with `canHit` false), so an orbit
-dragged across a panel ends there and a release over it never arrives. `PointerEvent` says neither.
+`pointerDown`, because a scripted object sees every pointer event and a plain listener target is not opaque. From
+reading the runtime rather than trying it: the opaque flag (`opaque="true"` on the control) would stop the press,
+but the script is then handed `pointerExit` for every move and release over the control
+(`HitScriptedDrawable::processEvent` with `canHit` false), so an orbit dragged across a panel would end there and a
+release over it would never arrive. `PointerEvent` says neither.
 
 Workaround: each control's `down` listener also writes `_uiPress = true`; the hit walk runs front to back, so the
 script reads it in the same `pointerDown`, clears it and drops the press (`Shell.takeUiPress`).
