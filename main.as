@@ -576,13 +576,13 @@ export class Main extends Layout {
             path.moveTo(Vector.xy(cx + 5, cy - 5.5));
             path.lineTo(Vector.xy(cx + 5, cy + 5.5));
         } else {
-            // A clockwise turn open at the top, its head on the arc's end pointing along it.
-            let r: f32 = 5.5;
-            let a0: f32 = -1.07;
-            let sweep: f32 = 4.9;
-            let steps = 18;
+            // From the top round the left and bottom, up to an open corner head at the upper right.
+            let r: f32 = 6.0;
+            let a0: f32 = -1.5708;
+            let sweep: f32 = 5.63;
+            let steps = 24;
             for (let k = 0; k <= steps; k++) {
-                let a: f32 = a0 + sweep * <f32>k / <f32>steps;
+                let a: f32 = a0 - sweep * <f32>k / <f32>steps;
                 let p = Vector.xy(cx + Mathf.cos(a) * r, cy + Mathf.sin(a) * r);
                 if (k == 0) {
                     path.moveTo(p);
@@ -590,16 +590,17 @@ export class Main extends Layout {
                     path.lineTo(p);
                 }
             }
-            let a1 = a0 + sweep;
-            let nx = Mathf.cos(a1);
-            let ny = Mathf.sin(a1);
-            let ex = cx + nx * r;
-            let ey = cy + ny * r;
-            let back: f32 = 3.0;
-            let wing: f32 = 2.6;
-            path.moveTo(Vector.xy(ex + ny * back + nx * wing, ey - nx * back + ny * wing));
-            path.lineTo(Vector.xy(ex, ey));
-            path.lineTo(Vector.xy(ex + ny * back - nx * wing, ey - nx * back - ny * wing));
+            let a1 = a0 - sweep;
+            let tipX = cx + Mathf.cos(a1) * r;
+            let tipY = cy + Mathf.sin(a1) * r;
+            // The arms run back along the arc, each 45 degrees off it.
+            let bx = -Mathf.sin(a1);
+            let by = Mathf.cos(a1);
+            let arm: f32 = 0.45 * r;
+            let c45: f32 = 0.7071;
+            path.moveTo(Vector.xy(tipX + (bx - by) * c45 * arm, tipY + (bx + by) * c45 * arm));
+            path.lineTo(Vector.xy(tipX, tipY));
+            path.lineTo(Vector.xy(tipX + (bx + by) * c45 * arm, tipY + (by - bx) * c45 * arm));
         }
         this.icon.color = ink;
         renderer.drawPath(path, this.icon);
