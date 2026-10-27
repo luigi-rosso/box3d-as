@@ -1,7 +1,8 @@
 // Debug draw for the physics demo: 3D shapes flattened to 2D paths through an
 // orbit camera. Shapes are recorded between begin() and end(), then painted
 // back to front: static shapes first, then their shadows, then everything else
-// sorted per face, then lines, points and labels on top.
+// sorted per face, then lines, points and labels on top. Box and hull faces that
+// overlap on screen are then ordered by which side of each other's plane they lie.
 
 import { Renderer } from "rive/renderer";
 import { Paint, PaintStyle, StrokeJoin, StrokeCap } from "rive/paint";
@@ -59,6 +60,9 @@ const MAX_LINES: i32 = 8192;
 const MAX_POINTS: i32 = 2048;
 const MAX_LABELS: i32 = 64;
 const MAX_CLIP: i32 = 64;
+const MAX_VFLOATS: i32 = 16384 * 18;
+// Meters a vertex may sit past a plane and still count as on its side, for faces that touch.
+const PLANE_SLOP: f32 = 0.005;
 
 // Faces one mesh or height field may add per frame.
 export const MESH_FACE_CAP: i32 = 6000;
@@ -270,6 +274,18 @@ export class DebugDraw {
     private prims: i32 = 0;
     private used: i32 = 0;
 
+    // Box and hull faces: camera space plane facing the eye, screen bounds and camera space vertices.
+    private solid: StaticArray<bool> = new StaticArray<bool>(MAX_PRIMS);
+    private plane: StaticArray<f32> = new StaticArray<f32>(4 * MAX_PRIMS);
+    private screenBounds: StaticArray<f32> = new StaticArray<f32>(4 * MAX_PRIMS);
+    private vstart: StaticArray<i32> = new StaticArray<i32>(MAX_PRIMS);
+    private vfloats: StaticArray<f32> = new StaticArray<f32>(MAX_VFLOATS);
+    private vused: i32 = 0;
+    private slots: StaticArray<i32> = new StaticArray<i32>(MAX_PRIMS);
+    private solids: StaticArray<i32> = new StaticArray<i32>(MAX_PRIMS);
+    private moved: StaticArray<i32> = new StaticArray<i32>(MAX_PRIMS);
+    private pass: i32 = 0;
+
     private lineA: StaticArray<Vec3> = new StaticArray<Vec3>(MAX_LINES);
     private lineB: StaticArray<Vec3> = new StaticArray<Vec3>(MAX_LINES);
     private lineColor: StaticArray<u32> = new StaticArray<u32>(MAX_LINES);
@@ -326,6 +342,7 @@ export class DebugDraw {
         this.camera = camera;
         this.prims = 0;
         this.used = 0;
+        this.vused = 0;
         this.lines = 0;
         this.points = 0;
         this.labels = 0;
@@ -357,7 +374,7 @@ export class DebugDraw {
                 this.wv[3] = c[fixed | bitC];
                 let sign: f32 = side == 1 ? 1.0 : -1.0;
                 let n = rotate(xf.q, Vec3(axis == 0 ? sign : 0, axis == 1 ? sign : 0, axis == 2 ? sign : 0));
-                this.face(4, n, base, state, layer, false);
+                this.face(4, n, base, state, layer, false, true);
             }
         }
         if (this.shadows && layer == LAYER_MAIN && (state & 15) != STATE_STATIC) {
@@ -379,7 +396,7 @@ export class DebugDraw {
             for (let i = 0; i < n; i++) {
                 this.wv[i] = xfPoint(xf, hull.points[hull.faceIndex[s + i]]);
             }
-            this.face(n, rotate(xf.q, hull.normals[f]), base, state, layer, false);
+            this.face(n, rotate(xf.q, hull.normals[f]), base, state, layer, false, true);
         }
         if (this.shadows && layer == LAYER_MAIN && (state & 15) != STATE_STATIC) {
             this.shadow(xf.p, hull.radius * 0.8, this.shadowY);
@@ -474,7 +491,7 @@ export class DebugDraw {
             this.wv[0] = xfPoint(xf, mesh.vertices[mesh.indices[3 * t]]);
             this.wv[1] = xfPoint(xf, mesh.vertices[mesh.indices[3 * t + 1]]);
             this.wv[2] = xfPoint(xf, mesh.vertices[mesh.indices[3 * t + 2]]);
-            this.face(3, rotate(xf.q, mesh.normals[t]), base, state, layer, false);
+            this.face(3, rotate(xf.q, mesh.normals[t]), base, state, layer, false, false);
         }
     }
 
@@ -499,11 +516,11 @@ export class DebugDraw {
                 this.wv[0] = a;
                 this.wv[1] = d;
                 this.wv[2] = c;
-                this.face(3, normalize(cross(sub(d, a), sub(c, a))), base, state, layer, false);
+                this.face(3, normalize(cross(sub(d, a), sub(c, a))), base, state, layer, false, false);
                 this.wv[0] = a;
                 this.wv[1] = c;
                 this.wv[2] = b;
-                this.face(3, normalize(cross(sub(c, a), sub(b, a))), base, state, layer, false);
+                this.face(3, normalize(cross(sub(c, a), sub(b, a))), base, state, layer, false, false);
             }
         }
     }
@@ -688,6 +705,7 @@ export class DebugDraw {
         this.fill[i] = fill;
         this.edge[i] = edge;
         this.layer[i] = layer;
+        this.solid[i] = false;
         this.used += floats;
         return i;
     }
@@ -697,11 +715,14 @@ export class DebugDraw {
         if (i == this.prims - 1) {
             this.prims--;
             this.used = this.start[i];
+            if (this.solid[i]) {
+                this.vused = this.vstart[i];
+            }
         }
     }
 
-    // Records the face in wv[0..n), normal n in world space.
-    private face(n: i32, normal: Vec3, base: Color, state: i32, layer: i32, twoSided: bool): void {
+    // Records the face in wv[0..n), normal n in world space. A solid face belongs to a convex body.
+    private face(n: i32, normal: Vec3, base: Color, state: i32, layer: i32, twoSided: bool, solid: bool): void {
         let cam = this.camera;
         let toEye = sub(cam.eye, this.wv[0]);
         let facing = dot(normal, toEye);
@@ -752,7 +773,56 @@ export class DebugDraw {
         }
         if (maxX < 0 || minX > cam.width || maxY < 0 || minY > cam.height) {
             this.drop(i);
+            return;
         }
+        if (solid && this.vused + 3 * m <= MAX_VFLOATS) {
+            this.recordSolid(i, src, m, minX, minY, maxX, maxY);
+        }
+    }
+
+    private recordSolid(i: i32, src: StaticArray<Vec3>, m: i32, minX: f32, minY: f32, maxX: f32, maxY: f32): void {
+        let vf = this.vfloats;
+        let v = this.vused;
+        let nx: f32 = 0;
+        let ny: f32 = 0;
+        let nz: f32 = 0;
+        let cx: f32 = 0;
+        let cy: f32 = 0;
+        let cz: f32 = 0;
+        for (let k = 0; k < m; k++) {
+            let a = src[k];
+            let b = src[k + 1 < m ? k + 1 : 0];
+            nx += (a.y - b.y) * (a.z + b.z);
+            ny += (a.z - b.z) * (a.x + b.x);
+            nz += (a.x - b.x) * (a.y + b.y);
+            cx += a.x;
+            cy += a.y;
+            cz += a.z;
+            vf[v + 3 * k] = a.x;
+            vf[v + 3 * k + 1] = a.y;
+            vf[v + 3 * k + 2] = a.z;
+        }
+        let l = Mathf.sqrt(nx * nx + ny * ny + nz * nz);
+        if (l < 1e-12) {
+            return;
+        }
+        let inv: f32 = 1.0 / l;
+        let mf: f32 = <f32>m;
+        let d = -(nx * cx + ny * cy + nz * cz) * inv / mf;
+        // The eye is the camera space origin; orient each plane so it lies on the positive side.
+        let s: f32 = d < 0 ? -inv : inv;
+        let p = 4 * i;
+        this.plane[p] = nx * s;
+        this.plane[p + 1] = ny * s;
+        this.plane[p + 2] = nz * s;
+        this.plane[p + 3] = d < 0 ? -d : d;
+        this.screenBounds[p] = minX;
+        this.screenBounds[p + 1] = minY;
+        this.screenBounds[p + 2] = maxX;
+        this.screenBounds[p + 3] = maxY;
+        this.vstart[i] = v;
+        this.vused = v + 3 * m;
+        this.solid[i] = true;
     }
 
     // Clips cv[0..n) to z >= near into clipA, returning the new count.
@@ -877,8 +947,87 @@ export class DebugDraw {
         return n;
     }
 
+    // Whether every vertex of face a lies on one side of face b's plane: 1 toward the eye, -1 away.
+    private allOnSide(a: i32, b: i32, side: f32): bool {
+        let p = 4 * b;
+        let nx = this.plane[p];
+        let ny = this.plane[p + 1];
+        let nz = this.plane[p + 2];
+        let d = this.plane[p + 3];
+        let vf = this.vfloats;
+        let o = this.vstart[a];
+        let m = this.count[a] / 2;
+        for (let k = 0; k < m; k++) {
+            let f = nx * vf[o + 3 * k] + ny * vf[o + 3 * k + 1] + nz * vf[o + 3 * k + 2] + d;
+            if (f * side < -PLANE_SLOP) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Face a may be painted before face b when it cannot cover any of b.
+    private paintsBefore(a: i32, b: i32): bool {
+        return this.allOnSide(a, b, -1) || this.allOnSide(b, a, 1);
+    }
+
+    private overlapOnScreen(a: i32, b: i32): bool {
+        let bo = this.screenBounds;
+        let p = 4 * a;
+        let q = 4 * b;
+        // Half a pixel of slack so faces that only share an edge do not count.
+        return bo[p] < bo[q + 2] - 0.5 && bo[q] < bo[p + 2] - 0.5 && bo[p + 1] < bo[q + 3] - 0.5 &&
+            bo[q + 1] < bo[p + 3] - 0.5;
+    }
+
+    // Newell's reordering over the solid faces of the depth sorted order[0..n), leaving other prims in place.
+    // Centroid depth misorders large faces that touch, such as a ramp resting against a ledge.
+    private orderSolids(n: i32): void {
+        let order = this.order;
+        let slots = this.slots;
+        let list = this.solids;
+        let k = 0;
+        for (let j = 0; j < n; j++) {
+            if (this.solid[order[j]]) {
+                slots[k] = j;
+                list[k] = order[j];
+                k++;
+            }
+        }
+        let pass = ++this.pass;
+        let i = 0;
+        while (i < k) {
+            let p = list[i];
+            let advance = true;
+            for (let j = i + 1; j < k; j++) {
+                let q = list[j];
+                if (!this.overlapOnScreen(p, q) || this.paintsBefore(p, q) || !this.paintsBefore(q, p)) {
+                    continue;
+                }
+                // A face moves once per pass, which breaks cycles of mutually overlapping faces.
+                if (this.moved[q] == pass) {
+                    continue;
+                }
+                this.moved[q] = pass;
+                for (let t = j; t > i; t--) {
+                    list[t] = list[t - 1];
+                }
+                list[i] = q;
+                advance = false;
+                break;
+            }
+            if (advance) {
+                i++;
+            }
+        }
+        for (let j = 0; j < k; j++) {
+            order[slots[j]] = list[j];
+        }
+    }
+
     private paintLayer(renderer: Renderer, which: i32): void {
         let n = this.sortLayer(which);
+        this.orderSolids(n);
         for (let j = 0; j < n; j++) {
             this.paintPrim(renderer, this.order[j]);
         }
