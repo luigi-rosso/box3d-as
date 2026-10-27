@@ -7,42 +7,20 @@
 // RIVS="name ..." runs those out/lanes bakes instead on librive's page harness, HARNESS naming the directory of
 // web_scripting_page.mjs; each logs the bake's BENCH RESULT line.
 
-import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { dirname, join, normalize, extname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readFileSync, existsSync } from 'node:fs';
 import { parseBench, recordingHashes } from './core.mjs';
+import { serve } from './serve.mjs';
 
 const here = dirname( fileURLToPath( import.meta.url ) );
 const root = join( here, '..', '..' );
 const { chromium } = await import( pathToFileURL( join( process.env.PLAYWRIGHT, 'node_modules', 'playwright-core', 'index.mjs' ) ) );
 
-const types = { '.html': 'text/html', '.mjs': 'text/javascript', '.js': 'text/javascript', '.wasm': 'application/wasm' };
-const server = createServer( async ( req, res ) =>
-{
-	const pathname = decodeURIComponent( new URL( req.url, 'http://x' ).pathname );
-	const path = pathname.startsWith( '/harness/' ) && process.env.HARNESS
-		? normalize( join( process.env.HARNESS, pathname.slice( 9 ) ) )
-		: normalize( join( root, pathname ) );
-	try
-	{
-		const body = await readFile( path );
-		res.writeHead( 200, { 'Content-Type': types[extname( path )] ?? 'application/octet-stream',
-			'Cross-Origin-Opener-Policy': 'same-origin', 'Cross-Origin-Embedder-Policy': 'require-corp',
-			'Cache-Control': 'no-store' } );
-		res.end( body );
-	}
-	catch
-	{
-		res.writeHead( 404 );
-		res.end();
-	}
-} );
-await new Promise( ( resolve ) => server.listen( 0, '127.0.0.1', resolve ) );
-const url = `http://127.0.0.1:${server.address().port}/bench/web/page.html`;
+const server = await serve( root, { harness: process.env.HARNESS } );
+const url = `${server.origin}/bench/web/page.html`;
 
 const browser = await chromium.launch( { channel: 'chrome', headless: true } );
 
