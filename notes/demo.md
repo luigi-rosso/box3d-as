@@ -16,7 +16,7 @@ model the script writes.
 | `demo/gen/rml.py` | the RML DSL it uses: elements with explicit ids, view models, binds, listeners, layers |
 | `demo/shell.as` | `Shell`, the script's handle on the `Demo` view model |
 | `demo/vec.as` | `Vec3`, `Quat`, `Xf` (p + q), `Ray`, f32 helpers |
-| `demo/camera.as` | `OrbitCamera`: yaw, pitch, distance, target, perspective, rays, `shiftTarget` for following |
+| `demo/camera.as` | `OrbitCamera`: yaw, pitch, distance, target, perspective framed in the clear area, rays, `shiftTarget` for following |
 | `demo/debug_draw.as` | `DebugDraw` plus `DebugHull`, `DebugMesh`, `DebugHeightField` |
 | `demo/scene.as` | `DemoScene` and `SceneStats`, the contract for scenes |
 | `demo/b3view.as` | Box3D to DebugDraw: transform conversion, `ShapeCache`, `BodyView`, `fieldHeight` |
@@ -118,11 +118,15 @@ front to back (in RML an earlier sibling draws on top):
 
 | Element | What it is |
 |---|---|
-| `Overlay` | absolute, inset 28 (18 on the left, where the rows reach past the margin): a column of `Top` and `Bottom` |
-| `Top` / `Left` | title block, the seven scene rows (196 by 26, 4 apart), a 24 point rule and the wrapped description |
+| `Overlay` | absolute at 0, 0, sized `uiWidth` by `uiHeight` and scaled by `uiScale`, so it is laid out in UI units and drawn at the window size; holds `Panels` and the scrims |
+| `Panels` | absolute, inset 28 (18 on the left, where the rows reach past the margin): a column of `Top`, `Touch Help` and `Bottom` |
+| `Top` / `Left` | title block, then the seven scene rows (196 by 26, 4 apart) or, compact, the `Chips` (seven 34 by 26 chips and the open scene's name), then a 24 point rule and the wrapped description |
+| `Top` / `Stat Line` | compact only: STEP, DRAW, BODIES, AWAKE as runs of one text |
+| `Top` / `Clear` | a fill box between the panels; its computed bounds are bound back into `clearX`.. `clearHeight` |
 | `Top` / `Right` | 168 wide: STEP and DRAW, a rule, the six counts, a rule, B3 PROFILE with its stacked bar and one row per part |
-| `Bottom` | pause, step, reset (34 square), the Pick and Shoot pair in one outline, the PAUSED tag, and the key help, right aligned, filling the rest and wrapping upward when narrow |
-| `Scrim Left`, `Scrim Right` | gradients that keep the panels legible over the scene |
+| `Touch Help` | compact only: drag to orbit, pinch to zoom, tap a body to pick |
+| `Bottom` | pause, step, reset (34 square), the Pick and Shoot pair in one outline, the PAUSED tag, and the key help, right aligned, filling the rest and wrapping upward when narrow (each hint holds together with no break spaces) |
+| `Scrim Left`, `Scrim Right`, `Scrim Top`, `Scrim Bottom` | gradients that keep the panels legible over the scene; the side pair outside compact, the top and bottom pair in it; they scale with the overlay |
 | `Stage` / `Demo` | a fill box holding the `ScriptedLayout` running `main.as`, with the `FocusData` that keys need |
 
 The icons are `PointsPath`s in a `Node` at the button center, so they keep
@@ -137,7 +141,47 @@ state machine layer with idle, hover and, where it has one, active states,
 crossfading over 120 ms; a state keys the colors of its fill, hairline and ink
 (and for pause, which icon and whether PAUSED shows). Three listeners each:
 `enter` and `exit` write its `_hover<Name>` boolean, `down` performs its action
-and raises `_uiPress`.
+and raises `_uiPress`. The chips are controls of their own beside the rows,
+sharing `scene`.
+
+### Size classes
+
+On `resize` the script picks a class and a scale (`sizeClass` and `uiScale`
+in `demo/shell.as`, window size in points):
+
+| Class | `layoutClass` | When | Shows |
+|---|---|---|---|
+| wide | 0 | width at least 1100 and at least 1.2 times the height | everything, as above |
+| medium | 1 | otherwise | the rows; STEP, DRAW, BODIES and AWAKE, floating in the top right corner (absolute, so the view takes the width under it); no description, profile or the other counts |
+| compact | 2 | width under 720, or portrait | chips and the open scene's name across the top, the stat line, touch hints over the transport and tools; no rows, right panel or key help |
+
+The UI scale is the window's smaller side over 800, clamped to 0.85 to 1.3.
+The overlay is laid out at the window size divided by it and scaled back up,
+so text stays vector sharp; the class is picked from the unscaled size.
+
+One state machine layer, `Size`, has a state per class, entered with no
+crossfade when `layoutClass` changes. Its states key what `per_class` and
+`shown_in` gathered in the generator: `displayValue` to show and hide boxes
+(a hidden box is out of hit testing too), `Top`'s `flexDirectionValue` (row,
+or column in compact) and `Right`'s `positionTypeValue` (absolute in medium).
+
+### Camera fit
+
+The home views were tuned for a 1280 by 800 window at a vertical field of 0.75
+radians. The camera now fits a fixed cone, half tangents 0.40 across and 0.34
+up (`FIT_X`, `FIT_Y` in `demo/camera.as`), into the `Clear` box: the focal
+length is the smaller of half its width over `FIT_X` and half its height over
+`FIT_Y`, so a narrow or portrait area holds the horizontal field and a wide one
+the vertical, and the principal point is the box's center. That is an off
+center projection, so orbit still pivots on the target and rays, pan and the
+Space shot all go through the same center. At 1280 by 800 the focal length is
+976, against 1018 before.
+
+The script reads the bounds every `advance` and calls `camera.frame()`. The
+bound `computedRootX/Y` already include the overlay's scale, but
+`computedWidth/Height` are in its unscaled units, so the script multiplies
+those by `uiScale`. Until the layout first runs the camera frames the whole
+viewport.
 
 ### The view model contract
 
@@ -151,10 +195,14 @@ handles; the generator and it name the same properties.
 | `tool` | number | Pick, Shoot, Tab | 0 Pick, 1 Shoot |
 | `stepOnce`, `reset` | trigger | step and reset buttons | the script listens with `addListenerWith`; O and R call the same handlers |
 | `sceneName0`..`sceneName6` | string | script, once | row titles from `DemoScene.name()` |
+| `sceneTitle` | string | script | the open scene's name, under the chips |
 | `description` | string | script | the open scene's `hint()` |
 | `stepMs`, `drawMs`, `profileMs` | string | script | formatted with `formatMs` (3 decimals under 0.1 ms) |
 | `bodies`, `awake`, `contacts`, `joints`, `islands`, `faces` | number | script | shown through `DataConverterToString` |
 | `profilePairs` .. `profileOther` | number | script | ms per part, shown to 2 decimals and weighting the bar |
+| `layoutClass` | number | script, on resize | 0 wide, 1 medium, 2 compact |
+| `uiScale`, `uiWidth`, `uiHeight` | number | script, on resize | the overlay's scale and its size in UI units |
+| `clearX`, `clearY`, `clearWidth`, `clearHeight` | number | the layout | `Clear`'s computed bounds, written back by binds with `direction` |
 | `_uiPress` | boolean | every control's `down` | a press a control took; the script clears it and ignores the press |
 | `_hover<Name>` | boolean | `enter` / `exit` | drives the hover state of one control |
 

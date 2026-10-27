@@ -467,3 +467,11 @@ weights are normalised.
 on the next advance, after which nothing is drawn before the capture. So a figure measured while drawing (the
 demo's DRAW time and FACES count) always reads 0 in a headless capture, whichever hook writes it. Done looks like:
 a flag that draws every advanced frame, or one more advance and draw before the capture.
+
+## A computed root position includes an ancestor's scale, the computed size does not
+
+`demo/shell.rml` binds `computedRootX`, `computedRootY`, `computedWidth` and `computedHeight` of a fill box back into
+the view model (`direction="true"`). Inside a `LayoutComponent` scaled by 0.96, the position comes back in artboard
+points (279 laid out reads 267.8) while the size stays in the box's own units (567.7, not 545). The script multiplies
+the size by the scale it set. Done looks like: a computed root size beside the root position, or the schema saying
+which space each computed value is in.
