@@ -11,7 +11,7 @@ native at any lane count, and measures what it costs.
 
 Parallel calls (rive draft PR #15105, branch `parallel-calls`) run one `@parallel` function on several threads at once
 over the main module's own memory. The threaded step now runs on them as a third backend, `b3_laneBackendParallel`
-(`BACKEND=3`), beside workers and jobs: `lib/parallel_step.as`, `b3World_EnableParallel(worldId, tasks)`.
+(`BACKEND=3`), beside workers and jobs: `lib/parallel/parallel_step.as` (opt in: a project includes `lib/parallel/`), `b3World_EnableParallel(worldId, tasks)`.
 
 ### Results
 
@@ -660,6 +660,6 @@ change the outcome of this port.
 | lib/lanes.as | the solver partitions, workers, jobs, the hooks, `b3World_EnableLanes(worldId, lanes, backend, tasks)` |
 | lib/lane_collide.as | the shape snapshot, the collide replica, packing and applying |
 | lib/lane_tree.as | the tree rebuild job |
-| lib/parallel_step.as | the parallel calls backend: solver stages, narrow phase with the tree rebuild, finalize, pair finding, `b3World_EnableParallel(worldId, tasks)` |
+| lib/parallel/parallel_step.as | the parallel calls backend, opt in: solver stages, narrow phase with the tree rebuild, finalize, pair finding, `b3World_EnableParallel(worldId, tasks)` |
 | bench/threads/ | the bench project (`main.as`, `run.sh`, `run1.sh`, `table.py`) and `micro/`, the lane primitive costs |
 | verify/threads.sh, threads.mjs | the threaded parity gate |

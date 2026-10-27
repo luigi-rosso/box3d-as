@@ -84,10 +84,18 @@ async function onPage( origin, page, fn, arg, seconds = 240 )
 		await tab.waitForFunction( () => window.ready === true );
 		const timeout = new Promise( ( settle ) =>
 		{
-			timer = setTimeout( () => settle( { error: `no answer in ${seconds} s`, lines: consoleLines.slice( -6 ) } ),
-				seconds * 1000 );
+			timer = setTimeout( () => settle( null ), seconds * 1000 );
 		} );
-		return await Promise.race( [ tab.evaluate( fn, arg ), timeout ] );
+		const out = await Promise.race( [ tab.evaluate( fn, arg ), timeout ] );
+		if ( out !== null )
+		{
+			return out;
+		}
+		// The page's thread may be stuck, so its state gets a few seconds to answer
+		const state = await Promise.race( [ tab.evaluate( () => window.runState && { phase: window.runState.phase,
+			frames: window.runState.frames, steps: window.runState.steps, lines: window.runState.lines.slice( -4 ) } ),
+		new Promise( ( settle ) => setTimeout( () => settle( 'page thread unresponsive' ), 5000 ) ) ] );
+		return { error: `no answer in ${seconds} s, page state ${JSON.stringify( state )}`, lines: consoleLines.slice( -6 ) };
 	}
 	catch ( err )
 	{
