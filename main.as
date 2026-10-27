@@ -593,14 +593,17 @@ export class Main extends Layout {
             let a1 = a0 - sweep;
             let tipX = cx + Mathf.cos(a1) * r;
             let tipY = cy + Mathf.sin(a1) * r;
-            // The arms run back along the arc, each 45 degrees off it.
+            // The arms run back along the arc 45 degrees off it, turned clockwise so the inner one clears the curve.
             let bx = -Mathf.sin(a1);
             let by = Mathf.cos(a1);
             let arm: f32 = 0.45 * r;
-            let c45: f32 = 0.7071;
-            path.moveTo(Vector.xy(tipX + (bx - by) * c45 * arm, tipY + (bx + by) * c45 * arm));
+            let inner: f32 = 0.785 + 0.35;
+            let outer: f32 = -0.785 + 0.35;
+            path.moveTo(Vector.xy(tipX + (bx * Mathf.cos(inner) - by * Mathf.sin(inner)) * arm,
+                tipY + (bx * Mathf.sin(inner) + by * Mathf.cos(inner)) * arm));
             path.lineTo(Vector.xy(tipX, tipY));
-            path.lineTo(Vector.xy(tipX + (bx + by) * c45 * arm, tipY + (by - bx) * c45 * arm));
+            path.lineTo(Vector.xy(tipX + (bx * Mathf.cos(outer) - by * Mathf.sin(outer)) * arm,
+                tipY + (bx * Mathf.sin(outer) + by * Mathf.cos(outer)) * arm));
         }
         this.icon.color = ink;
         renderer.drawPath(path, this.icon);
