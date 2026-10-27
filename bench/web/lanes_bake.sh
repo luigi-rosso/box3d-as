@@ -6,6 +6,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 RIVE=${RIVE:-$HOME/Projects/rive-parallel-calls/packages/rive-cli/out/release/rive}
 name=$1
 shift
+case " $* " in *" BACKEND=3 "*) export PARALLEL=1 ;; esac
 project="$here/../threads"
 "$project/sync.sh"
 printf '%s\n' "$*" > "$project/options.txt"

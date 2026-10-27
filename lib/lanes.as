@@ -15,6 +15,7 @@ import {
 	b3_laneBackendJobs,
 	b3_laneBackendParallel,
 	b3_laneBackendWorkers,
+	b3GetParallelBackend,
 	b3GrowI32,
 	b3GrowU32,
 	b3GrowU8,
@@ -1687,7 +1688,13 @@ export function b3World_EnableLanes(worldId: b3WorldId, lanes: i32, backend: i32
 		return null;
 	}
 	if (backend == b3_laneBackendParallel) {
-		console.log("b3World_EnableLanes: parallel calls need the parallel branch and the parallel-calls toolchain");
+		let parallel = b3GetParallelBackend();
+		if (parallel == null) {
+			console.log("b3World_EnableLanes: parallel calls need lib/parallel/ in the project and the parallel-calls " +
+				"toolchain");
+		} else {
+			parallel.enable(worldId, tasks & (b3_laneCollide | b3_laneSolve));
+		}
 		return null;
 	}
 	b3SetLaneClock((): f64 => <f64>b3GetTicks() * 1e-6);

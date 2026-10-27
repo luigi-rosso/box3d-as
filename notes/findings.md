@@ -408,3 +408,31 @@ Not a bug, a dependency: rive master's rasc has no `atomic.*` builtins (std decl
 `unknown function 'or' in namespace`); they arrive with #15105. The parallel backend's finalize marks tree ancestors
 with `atomic.or`, so `b3DynamicTree_MarkProxyMoved` takes the mode type argument and only its `b3InParallel`
 instantiation uses the atomic, which keeps main building on master.
+
+## In WebKit a parallel call can hang the page
+
+rive `parallel-calls` at b9685d0884, librive's threads build, Playwright's WebKit 27.2 on an isolated page
+(`BROWSER=webkit MODE=parity node bench/web/parallel.mjs`, notes/web.md). Every 1 part run finishes and matches
+native. At 2 or more parts 9 of 24 runs never finished over two sessions, the second at load 5 to 10, and the stuck
+page did not answer at all: its thread was still in the call's join, which spins
+(`while (Atomics.load(words, done) !== generation) {}` in rive_parallel.mjs) with no bound until every team thread
+reports its part. The runs that finished got slower past 2 parts (large_pyramid 4.60, 3.14, 9.98 and 8.14 ms at 1,
+2, 4 and 8 parts; Chrome 4.17, 2.35, 1.40, 1.22). Team threads park in `Atomics.waitAsync`, so a late or lost wake
+in WebKit would explain both. Chrome and Firefox showed neither (40 and 20 runs). Not reduced further: a page can
+choose timed waits only through `RIVE_PARALLEL_TIMED_WAITS`, which only node reads.
+
+## librive's threads build never finishes loading on a page without isolation
+
+The emscripten factory of `web_scripting_page.mjs` built with `--web_threads` waits on "loading-workers" forever when
+the page is not cross origin isolated: the browser refuses to post the memory to a worker (Chrome: "SharedArrayBuffer
+transfer requires self.crossOriginIsolated"; Firefox: "The WebAssembly.Memory object cannot be serialized"; WebKit:
+"DataCloneError"), and the promise neither resolves nor rejects. A host has to pick the build without threads from
+`self.crossOriginIsolated` itself; that build runs parallel calls serially and bit exact, as the docs say.
+
+## A web host cannot size the team or turn parallel calls off
+
+The page's team takes the job pool's size, `ScriptingLimits::jobThreads`, else `min(cores - 1, 6)`, and
+`parallelSafeMode` runs every call as one part. Both are C++ limits; on the web only the test harness exports
+setters (`harness_job_threads`, `harness_parallel_safe`), and neither the JS runtime nor rive_native's web build has a
+way to set them. A browser does not say which cores are fast, so the default on the M5 Max is 7 parts, where native
+picks 6, and in Chrome 7 parts was slower than 8 on three of four scenes.

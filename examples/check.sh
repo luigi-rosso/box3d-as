@@ -3,14 +3,17 @@
 # examples/, since rive-cli resolves imports only inside the project.
 #   examples/check.sh          interpreted
 #   examples/check.sh --aot    compiled ahead of time, with RIVE_WAMRC
-# RIVE picks the CLI; any other arguments go to it.
+# RIVE picks the CLI; any other arguments go to it. PARALLEL=1 also copies lib/parallel/, which needs the
+# parallel-calls toolchain.
 here="$(cd "$(dirname "$0")" && pwd)"
 RIVE=${RIVE:-$HOME/Projects/rive-master/packages/rive-cli/out/release/rive}
 project=$(mktemp -d)
 trap 'rm -rf "$project"' EXIT
 
 mkdir -p "$project/examples"
-rsync -a "$here/../lib/" "$project/lib/"
+skip="--exclude /parallel/"
+[ "${PARALLEL:-0}" = 1 ] && skip=
+rsync -a $skip "$here/../lib/" "$project/lib/"
 cp "$here"/*.as "$project/examples/"
 cat > "$project/rive.yaml" << 'EOF'
 name: box3d_examples

@@ -8,6 +8,8 @@ artboard:
   height: 800
   background: "#151412"
 exclude:
+  # The parallel calls backend, opt in: it needs the parallel-calls toolchain
+  - lib/parallel
   - verify
   - bench
   - examples

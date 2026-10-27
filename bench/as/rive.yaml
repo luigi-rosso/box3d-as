@@ -2,6 +2,8 @@ name: box3d_bench
 main: main
 scripting: wasm
 dangerouslyFast: true
+exclude:
+  - lib/parallel
 artboard:
   width: 64
   height: 64
