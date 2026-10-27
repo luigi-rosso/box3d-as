@@ -9,7 +9,7 @@
 # LANES="1 2 4 8" BACKENDS="2 1" (2 workers, 1 jobs, 3 parallel calls) TASKS=3 (1 collide, 2 solve, 3 both) pick the
 # runs; LANES=1 also runs the main lane's partition through the serialized replica path. Parallel calls take their
 # part count from the job pool, so backend 3 runs PARTS="1 2 4 8" instead, 1 being --parallel-safe, plus the default
-# pool. WASM_SIMD=off takes the scalar artifact.
+# pool, and needs the parallel-calls toolchain, as it brings in lib/parallel/. WASM_SIMD=off takes the scalar artifact.
 here="$(cd "$(dirname "$0")" && pwd)"
 project="$here/../bench/threads"
 lanes=${LANES:-1 2 4 8}
@@ -35,6 +35,7 @@ scene_define() {
 	esac
 }
 
+case " $backends " in *" 3 "*) export PARALLEL=1 ;; esac
 "$project/sync.sh"
 run_dir="$project"
 if [ "${WASM_SIMD:-on}" = off ]; then

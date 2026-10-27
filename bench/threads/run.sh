@@ -12,7 +12,11 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 ROUNDS=${ROUNDS:-3}
 NATIVE_REPEATS=${NATIVE_REPEATS:-3}
 LANE_COUNTS=${LANE_COUNTS:-1 2 4 8}
-CONFIGS=${CONFIGS:-parallel:3:3 solve:2:2 solve-jobs:2:1}
+# PARALLEL=1 adds parallel calls, which need the parallel-calls toolchain
+DEFAULT_CONFIGS="solve:2:2 solve-jobs:2:1"
+[ "${PARALLEL:-0}" = 1 ] && DEFAULT_CONFIGS="parallel:3:3 $DEFAULT_CONFIGS"
+CONFIGS=${CONFIGS:-$DEFAULT_CONFIGS}
+case " $CONFIGS" in *:3\ *|*:3) export PARALLEL=1 ;; esac
 # scene:steps:define, the define numbering in main.as
 SCENES=${SCENES:-large_pyramid:200:1 many_bodies:100:2 mesh_drop:170:5 village:200:6}
 NATIVE=$HERE/../native/bin/bench_simd

@@ -15,6 +15,7 @@ import {
 	b3_laneBackendJobs,
 	b3_laneBackendParallel,
 	b3_laneBackendWorkers,
+	b3GetParallelBackend,
 	b3GrowI32,
 	b3GrowU32,
 	b3GrowU8,
@@ -39,7 +40,6 @@ import {
 	b3LaneCollideReplica,
 	b3LaneCollideSupported,
 } from "./lane_collide";
-import { b3World_EnableParallel } from "./parallel_step";
 import { b3LaneTreeApply, b3LaneTreeJob, b3LaneTreeMain, b3LaneTreePack } from "./lane_tree";
 import { b3EnqueueTaskCallback, b3FinishTaskCallback, b3TaskCallback } from "./types";
 import { B3_GRAPH_COLOR_COUNT } from "./constants";
@@ -1688,7 +1688,13 @@ export function b3World_EnableLanes(worldId: b3WorldId, lanes: i32, backend: i32
 		return null;
 	}
 	if (backend == b3_laneBackendParallel) {
-		b3World_EnableParallel(worldId, tasks & (b3_laneCollide | b3_laneSolve));
+		let parallel = b3GetParallelBackend();
+		if (parallel == null) {
+			console.log("b3World_EnableLanes: parallel calls need lib/parallel/ in the project and the parallel-calls " +
+				"toolchain");
+		} else {
+			parallel.enable(worldId, tasks & (b3_laneCollide | b3_laneSolve));
+		}
 		return null;
 	}
 	b3SetLaneClock((): f64 => <f64>b3GetTicks() * 1e-6);
