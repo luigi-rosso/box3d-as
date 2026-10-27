@@ -576,11 +576,13 @@ export class Main extends Layout {
             path.moveTo(Vector.xy(cx + 5, cy - 5.5));
             path.lineTo(Vector.xy(cx + 5, cy + 5.5));
         } else {
-            // A three quarter turn with an arrow head.
+            // A clockwise turn open at the top, its head on the arc's end pointing along it.
             let r: f32 = 5.5;
+            let a0: f32 = -1.07;
+            let sweep: f32 = 4.9;
             let steps = 18;
             for (let k = 0; k <= steps; k++) {
-                let a: f32 = -1.2 + 4.9 * <f32>k / <f32>steps;
+                let a: f32 = a0 + sweep * <f32>k / <f32>steps;
                 let p = Vector.xy(cx + Mathf.cos(a) * r, cy + Mathf.sin(a) * r);
                 if (k == 0) {
                     path.moveTo(p);
@@ -588,11 +590,16 @@ export class Main extends Layout {
                     path.lineTo(p);
                 }
             }
-            let ax = cx + Mathf.cos(-1.2) * r;
-            let ay = cy + Mathf.sin(-1.2) * r;
-            path.moveTo(Vector.xy(ax - 3.2, ay - 2.2));
-            path.lineTo(Vector.xy(ax, ay));
-            path.lineTo(Vector.xy(ax - 0.6, ay + 3.6));
+            let a1 = a0 + sweep;
+            let nx = Mathf.cos(a1);
+            let ny = Mathf.sin(a1);
+            let ex = cx + nx * r;
+            let ey = cy + ny * r;
+            let back: f32 = 3.0;
+            let wing: f32 = 2.6;
+            path.moveTo(Vector.xy(ex + ny * back + nx * wing, ey - nx * back + ny * wing));
+            path.lineTo(Vector.xy(ex, ey));
+            path.lineTo(Vector.xy(ex + ny * back - nx * wing, ey - nx * back - ny * wing));
         }
         this.icon.color = ink;
         renderer.drawPath(path, this.icon);
