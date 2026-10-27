@@ -436,3 +436,33 @@ The page's team takes the job pool's size, `ScriptingLimits::jobThreads`, else `
 setters (`harness_job_threads`, `harness_parallel_safe`), and neither the JS runtime nor rive_native's web build has a
 way to set them. A browser does not say which cores are fast, so the default on the M5 Max is 7 parts, where native
 picks 6, and in Chrome 7 parts was slower than 8 on three of four scenes.
+
+## A press on a listener also reaches the scripted layout behind it
+
+rive master CLI, `demo/shell.rml`. A `ScriptedLayout` filling the artboard sits behind panels whose controls are
+`LayoutComponent`s with `down` listeners. A press on a control fires its listener and then the script's
+`pointerDown`, because a scripted object sees every pointer event and a plain listener target is not opaque. The
+opaque flag (`opaque="true"` on the control) stops the press, but the runtime then hands the script `pointerExit`
+for every move and release over the control (`HitScriptedDrawable::processEvent` with `canHit` false), so an orbit
+dragged across a panel ends there and a release over it never arrives. `PointerEvent` says neither.
+
+Workaround: each control's `down` listener also writes `_uiPress = true`; the hit walk runs front to back, so the
+script reads it in the same `pointerDown`, clears it and drops the press (`Shell.takeUiPress`).
+
+Done looks like: the event tells the script that a listener in front already took the press (or an opaque target
+blocks only the press that lands on it, not later moves of a gesture the script owns).
+
+## Fill weights that sum below 1 leave part of the row empty
+
+A row of `fill` boxes whose `fractionalWidth`s sum below 1 shares out only that fraction of the free space (Yoga's
+flex grow), so a stacked bar bound to millisecond times 0.02, 0.11 and 0.29 filled 42% of its track. layout.md
+says `fill` is a weight, which reads as though only ratios matter. Workaround: a `DataConverterOperationValue`
+multiplying by 1e6 on each bind (`WEIGHT` in `demo/gen/shell.py`). Done looks like: the layout doc says so, or the
+weights are normalised.
+
+## A capture cannot show what a script measures in draw
+
+`--advance` advances without drawing the frames it skips, and a view model value a script writes in `draw` binds
+on the next advance, after which nothing is drawn before the capture. So a figure measured while drawing (the
+demo's DRAW time and FACES count) always reads 0 in a headless capture, whichever hook writes it. Done looks like:
+a flag that draws every advanced frame, or one more advance and draw before the capture.
