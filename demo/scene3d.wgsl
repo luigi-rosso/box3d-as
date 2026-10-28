@@ -27,7 +27,8 @@ struct View {
     shadow: vec4f,
     // Light shadowed surfaces keep, 1 in w to tint each cascade.
     shadowTint: vec4f,
-    // View depth shadows start fading at, blend share between cascades, the sun's angular radius as a tangent.
+    // View depth shadows start fading at, blend share between cascades, the sun's angular radius as a
+    // tangent, and the view depth the first cascade starts at.
     shadowFade: vec4f,
     // The light's axes across the sun.
     lightRight: vec4f,
@@ -240,7 +241,7 @@ fn sunAt(world: vec3f, n: vec3f) -> f32 {
     var sun = cascadeSun(c, world, n);
     if (c < 3) {
         let end = splits[c];
-        let begin = select(splits[max(c - 1, 0)], 0.0, c == 0);
+        let begin = select(splits[max(c - 1, 0)], view.shadowFade.w, c == 0);
         let blend = smoothstep(end - (end - begin) * view.shadowFade.y, end, depth);
         if (blend > 0.0) {
             sun = mix(sun, cascadeSun(c + 1, world, n), blend);

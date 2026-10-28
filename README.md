@@ -74,7 +74,8 @@ as `f32` (`<f32>(1.0 / 60.0)`; a constant expression of float literals is `f64`)
   for contacts, joints and the profile (`notes/demo.md`). The solids draw instanced on the GPU with a depth buffer,
   through AnimaScript's GPU API and WGSL (`demo/gpu_draw.as`, `demo/scene3d.wgsl`), one draw per geometry: the
   script's draw takes 0.01 to 0.1 ms where the 2D painter took 0.6 to 1.8 ms, and `--define=VECTOR_DRAW` keeps the
-  painter. The threads scene stirs 2048 balls and capsules and draws each step's tasks on each thread as it runs, with
+  painter. A sun casts cascaded shadow maps from every solid (`demo/shadows.as`); `H` steps through high, soft, low
+  and off. The threads scene stirs 2048 balls and capsules and draws each step's tasks on each thread as it runs, with
   the step time over the last five seconds: serial or lanes on master's toolchain, parallel calls too on the
   `parallel-calls` toolchain with `lib/parallel/` included, and serial in a browser runtime without threads, such as
   the live demo's. It needs AOT for interactive rates:

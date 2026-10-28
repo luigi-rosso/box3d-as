@@ -22,7 +22,8 @@ bound to a view model the script writes.
 | `demo/camera.as` | `OrbitCamera`: yaw, pitch, distance, target, perspective framed in the clear area, rays, `shiftTarget` for following |
 | `demo/debug_draw.as` | `DebugDraw` plus `DebugHull`, `DebugMesh`, `DebugHeightField`; the vector painter and overlays |
 | `demo/gpu_draw.as` | `GpuDraw`, the instanced GPU renderer, plus `GpuMesh` and `MeshWriter` |
-| `demo/scene3d.wgsl` | its shaders: faceted solids, spheres and capsules, blob shadows (asset name `demo/scene3d`) |
+| `demo/scene3d.wgsl` | its shaders: faceted solids, spheres and capsules, their shadow casters, the shadow filters, blob shadows (asset name `demo/scene3d`) |
+| `demo/shadows.as` | `ShadowCascades`, the sun's cascade fit, and `ViewSpan`, the view depths a frame's solids span |
 | `demo/scene.as` | `DemoScene` and `SceneStats`, the contract for scenes |
 | `demo/b3view.as` | Box3D to DebugDraw: transform conversion, `ShapeCache`, `BodyView`, `fieldHeight` |
 | `demo/physics.as` | `PhysicsScene`, the Box3D base every scene extends |
@@ -56,7 +57,9 @@ Run the live window on AOT. The WAMR interpreter is 30 to 40 times slower here
 for captures but not for play. The AOT compile takes about a minute.
 
 `START_SCENE` (1 based) picks the scene at launch. `VECTOR_DRAW` draws with
-the 2D painter instead of the GPU. `DRAW_LOG` logs the mean and max script
+the 2D painter instead of the GPU. `NO_SHADOWS` starts the GPU renderer with
+its shadow maps off and blob shadows in their place, and `CSM_DEBUG` tints
+each shadow cascade (red, green, blue, yellow, near to far). `DRAW_LOG` logs the mean and max script
 draw time per 120 frames with the triangle (or, painted, face) count; use it
 with `--bench`, which draws every frame where captures draw only the last. `STEP_LOG` logs the mean
 and max step time once per simulated second (`console :0 step <scene> s<n>
@@ -101,6 +104,7 @@ mover's queries).
 | 1-8 | open a scene; the list on the left does the same |
 | F | ease back to the scene's home view |
 | G | grid on or off |
+| H | shadow quality: high, soft, low, off (blob shadows); logs the one picked |
 | C | contact points and normals on or off (off by default) |
 | J | joints on or off (on by default) |
 | WASD, arrows | walk the character, relative to the camera |
@@ -443,7 +447,9 @@ dd.label(p, text, color)   dd.shadow(p, radius, groundY)
 
 `STATE_STANDING` (32) can be or'ed into `STATE_STATIC`: the shape keeps the
 static look but sorts with the dynamic layer, for walls, ramps and stairs that
-bodies pass in front of. Static shapes never cast automatic shadows.
+bodies pass in front of. Static shapes never cast automatic blob shadows.
+On the GPU renderer with its shadow maps on, every solid casts and `shadow`
+records nothing.
 
 Options a scene sets in `draw()`: `showGrid`, `gridY`, `gridExtent`,
 `shadows` with `shadowY` (automatic contact shadows under awake and
@@ -507,27 +513,110 @@ and the solids then go to it instead of the painter. Scenes call the same
   tone without shimmer. Round shapes draw their rings (a sphere's two great
   circles, a capsule's two cap seams) from signed distances to those planes,
   and their outline from the facing ratio's own gradient.
-- **Shading.** The painter's Lambert per face (`0.42 + 0.5 n.l + 0.12 sky`)
-  in the vertex shader, flat, with the normal flipped toward the eye for one
-  sided meshes; per pixel with interpolated normals on spheres and capsules.
-  State tints (sleeping, kinematic, selected) and edge inks are worked out on
-  the CPU as before.
+- **Shading.** The painter's Lambert (`0.42 + 0.5 n.l + 0.12 sky`), with
+  `n.l` scaled by how much sun the shadow maps let through, per pixel: with a
+  flat normal on faceted solids, flipped toward the eye for one sided meshes,
+  and an interpolated one on spheres and capsules. State tints (sleeping,
+  kinematic, selected) and edge inks are worked out on the CPU as before.
 - **Grid.** Drawn on the ground's upward faces in the faceted shader rather
   than as a plane of its own: a plane at y 0 cut through the rain scene's wave
   mesh. Ground is a static, not standing, shape; it arrives with a clear fill
   alpha, which the shader reads as the flag. Minor lines every meter and
   major every five, from `fract` distances in pixels, fading out from the
   grid center and where they crowd closer than a few points.
-- **Shadows.** The painter's blob shadows as instanced quads on the ground,
-  a radial smoothstep in the fragment shader. Over uneven ground (`shadows`
-  off, the scene passing heights) the disc is pulled toward the eye by 0.8 of
-  its spread, so it shows on slopes the flat disc would dip under; it can
-  then show through a thin static wall right in front of it.
+- **Shadows.** Cascaded sun shadow maps, below. With them off (`H` to off,
+  or `NO_SHADOWS`) the painter's blob shadows come back as instanced quads on
+  the ground, a radial smoothstep in the fragment shader. Over uneven ground
+  (`shadows` off, the scene passing heights) the disc is pulled toward the
+  eye by 0.8 of its spread, so it shows on slopes the flat disc would dip
+  under; it can then show through a thin static wall right in front of it.
 - **No per frame allocation.** The pass descriptor, its attachment, the pass
   object (`beginRenderPass(desc, into)`), the canvas image, the staging and
   upload arrays and the GPU buffers are all made once. Capacities: 8192
   faceted and 4096 round instances, 4096 shadows, 256 geometries a frame;
   past them `droppedCount` counts.
+
+### Sun shadows
+
+Ported from the Fields CSM by way of the town's moon (`~/Projects/town`,
+branch `dusk`: `main.as` `updateMoon`, `lighting.wgsl`), with the maps
+project's stand in and its rays through the view (`~/Projects/maps-rive`,
+`shadows.as`).
+
+- **Sun.** `DebugDraw.lightDir`, now `normalize(-0.42, 0.78, 0.62)`: about
+  46 degrees up, from the left of the home views and a little toward the
+  camera, so lit faces stay toward the viewer and shadows fall back and to
+  the right where they read. The painter shades with the same vector, so
+  `VECTOR_DRAW` moved with it.
+- **Atlas.** One `depth32float` texture holding four cascade tiles two by
+  two: 4096 square with 2048 tiles on high and soft, 2048 with 1024 tiles on
+  low, which is also the start when `maxTextureSize2D` is under 4096. It is
+  made on the first frame that wants it and again when the quality changes
+  its size. One depth only pass clears it and draws every tile, each under
+  its own `setViewport`.
+- **Splits.** `ViewSpan` gathers the view depths the frame's solids reach
+  while they are recorded: small ones by their bounding spheres when inside
+  the view's side planes, large ones (grounds, walls, the height field and
+  the rain mesh, wider than 8 m) by the band of heights they fill, which 25
+  rays across the view cross. Without the band the ground made every scene
+  start its first cascade at the near plane, where nothing is. The shadows
+  reach at most two camera distances plus 12 m. Between those depths the
+  splits are the practical scheme, 0.6 geometric and 0.4 even, the
+  geometric part starting no nearer than a twentieth of the camera
+  distance.
+- **Fit.** Each slice of the view is bound by a sphere, found in camera
+  space along the line through the centers of the slice's ends with a
+  ternary search over the eight corners (the projection is off center, so
+  the center is not on the forward axis). Working in camera space keeps the
+  radius the same however the camera turns; it is then rounded up to a
+  power of 1.08, so a zoom seldom changes the texel size. Each slice starts
+  12% of the previous one's depth early, so it covers the crossfade.
+- **Snapping.** The sphere's center is floored to whole texels along the
+  light's two axes across the sun; with the radius fixed, an orbit moves the
+  cascade by whole texels and shadow edges hold still. The light depth runs
+  from 40 m beyond the sphere toward the sun (casters outside the view, and
+  WebGPU has no depth clamp) to the sphere's far side.
+- **Casters.** Two depth only pipelines, `vs_flat_cast` and `vs_round_cast`,
+  over the same vertex and instance buffers and batches as the main pass;
+  their vertex code is the main pass's, split into `flatWorld` and
+  `roundPoint`. Every solid casts, static ones included. The first cascade
+  draws spheres and capsules at their screen level of detail; the others
+  draw them all coarse. Casters use `less` and a slope scaled bias of 1,
+  without culling, since meshes and height fields are one sided.
+- **Bindings.** One layout from the shader for group 0: the view uniforms,
+  a 64 byte caster block holding one cascade's matrix, the atlas as
+  `texture_depth_2d` (a `depthOnly` view) and a `less` comparison sampler.
+  The caster passes cannot bind the atlas they draw into, so their four
+  groups (one per cascade's caster block) bind a 1x1 depth texture there.
+- **Bias.** Three parts, all scaled by the cascade's own texel: the receiver
+  moves one texel along its normal, compares one texel of light depth
+  nearer the sun, and each filter tap follows the receiver's plane, whose
+  depth slope across the map comes from its normal (`n.r / n.l` and
+  `n.u / n.l`, clamped to 10 texels per texel). The plane term is what lets
+  the other two stay this small, so a box resting on the ground or on
+  another box shows a contact shadow right up to its edge and faces grazing
+  the sun do not darken.
+- **Filtering.** High is a 7 texel tent from 16 bilinear comparisons, low a
+  5 texel tent from 9 (Castano's optimized PCF, the Witness filter), each
+  tap clamped inside its tile. Soft is PCSS: 8 taps search 10 texels around
+  the receiver, each comparing at the receiver and at three depth gaps
+  nearer the sun (the gaps a sun 0.05 wide in tangent needs to spread a
+  penumbra 3, 7 and 14 texels), and the share of blockers past each gap
+  steps the width of a 16 tap Vogel disc. GLSL cannot read raw depth from a
+  depth texture (`textureLoad` on one fails the GLSL generation), so the
+  blocker depths are counted with comparisons instead of averaged.
+- **Selection.** By view depth, as the splits are made: the cascade a pixel
+  falls in, crossfading into the next over the last 12% of its depth, and
+  fading out over the last 15% of the reach. Branches on it are non
+  uniform, so the filters use only the `Level` sampling variants, and the
+  fragment shaders take their derivatives before calling them.
+- **Receivers.** Every solid and the ground. A shadowed surface keeps the
+  ambient and sky terms and its light leans warm (`1.05, 0.99, 0.9`, mixed
+  in as the direct light falls under 0.4), so shadows sit at about 60% of
+  the lit ground, never black. The grid is shaded with the ground it lies
+  on; edges and rings mix in after the light, so they stay crisp over
+  shadows. Blob shadows are not recorded while the maps are on, so the
+  vector painter alone keeps them.
 
 Draw cost against the painter, release AOT bake, `--bench=900` at 1280 by
 800, Apple M5 Max, two interleaved rounds after the merge of the Threads
@@ -546,7 +635,32 @@ this branch with `VECTOR_DRAW`.
 
 The Threads pit is two round draws on the GPU (coarse and fine detail) plus
 a few hull draws for the walls and paddle; it honors `crowd`, with no rings
-and no shadows, which would sit under the pile unseen.
+and no blob shadows, which would sit under the pile unseen. The shadow maps
+do shade it: the pile's balls shadow each other and the walls the pile.
+
+Shadow map cost, release AOT bake, `--bench=900` at 1280 by 800, Apple M5
+Max, `DRAW_LOG`. Before is bbf209d (blob shadows), maps the high quality
+default, off the same build with `NO_SHADOWS`. Each figure is the lowest of
+four interleaved rounds (the machine was shared and the spread between rounds
+was up to 3x, so the minimum is the comparable one): script is `DRAW_LOG`'s
+lowest window mean, frame the bench's render p50, CPU only.
+
+| Scene | Script, before | Script, maps | Script, off | Frame, before | Frame, maps | Frame, off |
+|---|---|---|---|---|---|---|
+| 1 Pyramid | 0.013 ms | 0.015 ms | 0.011 ms | 0.169 ms | 0.171 ms | 0.136 ms |
+| 4 Rain | 0.022 ms | 0.029 ms | 0.022 ms | 0.155 ms | 0.176 ms | 0.159 ms |
+| 5 Height field | 0.007 ms | 0.011 ms | 0.007 ms | 0.138 ms | 0.158 ms | 0.140 ms |
+| 8 Threads | 0.104 ms | 0.117 ms | 0.101 ms | 0.490 ms | 0.526 ms | 0.491 ms |
+
+The script pays for `ViewSpan` (a sphere test per solid) and the cascade fit;
+the frame for one more pass and its draws, four times the batches. The GPU
+side, which the API cannot time, was read from headless Chrome on the
+published `@rive-app/webgl2` 2.48.0 with vsync and the frame rate limit off
+(`webperf.mjs` below), the `requestAnimationFrame` interval's p50 over 120
+frames, two runs: Threads 1.5 to 3.0 ms on high, 4.7 to 4.8 on soft, 1.1 to
+1.4 on low, 1.1 to 1.2 off; the pyramid 0.7 to 1.1 ms on every quality. So
+the 2048 body pit's four cascades cost well under a millisecond on high,
+and soft, 48 comparisons a pixel over a screen of balls, about three.
 
 The script now spends its draw on reading body transforms and writing 12 or
 14 floats per body. In headless Chrome on the published `@rive-app/webgl2`
@@ -600,7 +714,10 @@ faces). The interpreter is roughly ten times slower.
   would remove that, but `lib/` is not this task's to edit.
 - The painter keeps its sort artifacts for large dynamic faces against each
   other; the GPU renderer has none.
-- Shadows over uneven ground are lifted discs, not draped on the terrain.
+- The painter's shadows over uneven ground are lifted discs, not draped on
+  the terrain; the GPU renderer's shadow maps have no such limit.
+- Static casters are drawn into every cascade every frame; their tiles could
+  be kept while the camera and the sun hold still.
 - The mover ignores `MoverShapeUserData` (no soft planes, no allies on
   category 2) and has no third person camera or mouse look.
 - `SceneStats.shapes` is gathered but not shown.
@@ -668,6 +785,27 @@ GPU renderer captures, 1280 by 800, interpreted, in
   `m2_vec_s1.png` .. `m2_vec_s8.png` (`VECTOR_DRAW`), side by side in
   `m2_vector_gpu_sheet.png`; `m2_gpu_collapse.png`; `m2web_*.png` and
   `m2webt_*.png` the page on webgl2 and webgl2-threads 2.48.0
+
+Sun shadow captures, 1280 by 800, interpreted, 150 frames unless noted, in
+`/private/tmp/claude-501/-Users-luigi-Projects-rive/65e4f28b-1249-4d28-8600-bb5fb40b325a/scratchpad/csm/` (the
+`cap.sh` there mirrors the project and, through `campatch.py`, adds `CAM_X`, `CAM_Y`, `CAM_Z` (centimeters
+added to the home target), `CAM_D` (centimeters), `CAM_YAW` (milliradians added) and `CAM_PITCH` (hundredths)
+defines to the mirror only):
+
+- `contact_sheet.png` all eight scenes before (bbf209d, blob shadows) and after (high); the frames are
+  `shots/before_s<n>.png` and `shots/final_s<n>.png`
+- `closeups_sheet.png` before and after close-ups: the card house, the pyramid's shadow side, the bullet
+  scene's stack at frame 25, the ragdolls (`shots/zb_*`, `shots/zf_*`)
+- `cmp_q.png` the card house close-up on high, soft, low and off (`shots/q_*`)
+- `dbg_grid.png` `CSM_DEBUG` on every scene, cascades tinted red, green, blue, yellow near to far
+- `orbit_strip.png` and `orbit.gif` the card house close-up over twelve yaw steps of 6 milliradians: the
+  shadow edges and the light let through between the cards move with the cards, without crawling
+- `web_grid.png` and `webt_grid.png` the published webgl2 and webgl2-threads 2.48.0 runtimes in headless
+  Chrome on a local COOP/COEP mirror (`serve.mjs`, `webcheck.mjs`), all eight scenes;
+  `web_vs_native_card.png` the card house close-up native above, webgl2 below (the tiles land the same);
+  `webperf.mjs` is `webcheck.mjs` with vsync and the frame rate limit off, for the GPU timings above
+- `perf.log`, `perf2.log` the bench rounds; `manifest_<quality>.json` the `--gpu-manifest` per quality,
+  which Dawn's null backend (`tools/webgpu_validate`) accepts: 1 shader, 5 pipelines, 6 bind groups (5 off)
 
 ## Host API notes
 

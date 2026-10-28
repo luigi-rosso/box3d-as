@@ -94,6 +94,8 @@ export class ShadowCascades {
     toSun: Vec3 = v3(0, 1, 0);
     right: Vec3 = v3(1, 0, 0);
     up: Vec3 = v3(0, 0, 1);
+    // The view depths the first cascade starts at and the last one ends at.
+    near: f32 = 0;
     far: f32 = 0;
 
     // Fits every cascade to the depths of the view `span` holds, with tiles `tile` texels wide.
@@ -136,6 +138,7 @@ export class ShadowCascades {
             near = camera.near;
             far = reach;
         }
+        this.near = near;
         this.far = far;
         // The geometric part needs a start well off the eye.
         let logStart = Mathf.max(near, camera.distance * 0.05);

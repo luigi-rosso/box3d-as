@@ -512,6 +512,35 @@ these blocked it.
   coverage, and a depth write from the fragment shader. Spheres and capsules
   are meshes instead.
 
+## Shadow maps: what the GPU API could not do
+
+From adding cascaded sun shadows to the GPU renderer (`demo/shadows.as`,
+`demo/scene3d.wgsl`). None of these blocked it.
+
+- **No raw depth reads in GLSL.** `textureLoad` on a `texture_depth_2d`
+  validates, then fails the GLSL generation for every entry that reaches it
+  (`WGSL textureLoad from depth textures is not supported in GLSL`), so the
+  shader has no WebGL2 path at all. PCSS needs the blockers' depths; the
+  soft filter counts blockers past a few depth gaps with comparisons
+  instead. Binding the atlas a second time as a float texture would be the
+  usual way, but on GL the texture's compare mode would then be undefined
+  for the plain sampler.
+- **No depth clamp.** Without `unclippedDepth` a caster nearer the sun than
+  the cascade's box is clipped away rather than flattened onto its near
+  plane, so each box reaches 40 m past its sphere toward the sun, spending
+  depth precision on empty space.
+- **No GPU timing** (as for the renderer above). Shadow cost was read from
+  headless Chrome with vsync and the frame rate limit off, where the
+  `requestAnimationFrame` interval follows the GPU.
+- **`setViewport` and GL.** The docs say the viewport origin is the bottom
+  left on GL. For an offscreen atlas that is also where row 0 of the texture
+  is, so tiles placed with top left origins sample back the same on WebGL2 as
+  on Metal; the docs could say the difference only shows on a target with a
+  flipped presentation.
+- **Every slot filled.** A depth only caster pipeline shares the main
+  layout, so its bind groups must still fill the atlas slot; they bind a 1x1
+  depth texture, since the atlas cannot be sampled while it is drawn into.
+
 ## The heap growth warning fires while a large world is first built
 
 rive master CLI, the demo's Threads scene (2048 bodies, about 11600 contacts once settled), `--aot --bench=3000`. In
