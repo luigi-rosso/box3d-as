@@ -23,13 +23,17 @@ STATS = ["bodies", "awake", "contacts", "joints", "islands", "faces"]
 BACKENDS = ["Serial", "Lanes", "Parallel"]
 THREAD_CHOICES = [1, 2, 4, 8]
 # Size classes the script writes to layoutClass; see demo/shell.as.
-WIDE, MEDIUM, COMPACT = 0, 1, 2
-CLASSES = [WIDE, MEDIUM, COMPACT]
+WIDE, MEDIUM, COMPACT, SHORT = 0, 1, 2, 3
+CLASSES = [WIDE, MEDIUM, COMPACT, SHORT]
+# Flex directions and scale types as keyed enums.
+COLUMN, ROW = ("uint", 0), ("uint", 2)
+FIXED, FILL = ("uint", 0), ("uint", 1)
 # No break space inside each hint, so a wrapped line keeps a key with its action.
 KEY_HELP = "   ".join(h.replace(" ", "\u00a0") for h in (
     "Drag orbit", "Shift drag pan", "Scroll zoom", "P pause", "O step", "R reset", "Tab tool", "C contacts", "J joints",
     "H shadows", "1-8 scene"))
-TOUCH_HELP = "   ".join(h.replace(" ", "\u00a0") for h in ("Drag to orbit", "Pinch to zoom", "Tap a body to pick"))
+TOUCH_HELP = "   ".join(h.replace(" ", "\u00a0") for h in ("Drag to orbit", "Pinch to zoom", "Tap a body to pick",
+                                                            "Tap with Shoot to fire"))
 
 INK = "FFEDE8E1"
 DIM = "FF8C867E"
@@ -65,6 +69,13 @@ def tag(name):
 def per_class(obj, prop, values):
     for c, v in zip(CLASSES, values):
         SIZE_KEYS[c][(obj, prop)] = v
+
+
+def touch_size(node, w, h, touch_w, touch_h):
+    """Larger in the phone classes, where a finger presses it."""
+    per_class(node, "width", [float(w), float(w), float(touch_w), float(touch_w)])
+    per_class(node, "height", [float(h), float(h), float(touch_h), float(touch_h)])
+    return node
 
 
 def shown_in(node, *classes):
@@ -329,13 +340,15 @@ def scene_row(controls, vm, i):
 
 def scene_chip(controls, vm, i):
     index = label(f"{i + 1:02d}", 9.5, DIM, REGULAR, 1.0, name="Index")
-    chip = box(f"Chip {i + 1}", index, w=34, h=26, dir="row", align="center", bg=CLEAR, line=CLEAR_HOT, radius=4)
+    chip = box(f"Chip {i + 1}", index, w=44, h=38, dir="row", align="center", bg=CLEAR, line=CLEAR_HOT, radius=4)
     return controls.picker(chip, [index.meta["color"]], vm.path("scene"), i, DIM)
 
 
 def icon_button(controls, name, shapes, actions, active=None, active_extra=None):
     art = E("Node", *shapes, x=17.0, y=17.0, name="Icon")
-    button = box(name, art, w=34, h=34, bg=CLEAR, line=HAIRLINE, radius=4)
+    per_class(art, "x", [17.0, 17.0, 20.0, 20.0])
+    per_class(art, "y", [17.0, 17.0, 20.0, 20.0])
+    button = touch_size(box(name, art, w=34, h=34, bg=CLEAR, line=HAIRLINE, radius=4), 34, 34, 40, 40)
     bg, line = button.meta["bg"].meta["color"], button.meta["line"].meta["color"]
     inks = [s.meta["ink"] for s in shapes]
 
@@ -351,10 +364,10 @@ def icon_button(controls, name, shapes, actions, active=None, active_extra=None)
     return button
 
 
-def segment(controls, name, text_, path, value, w=64, h=34, size=12):
-    """One choice of a segmented control writing value to a number property."""
+def segment(controls, name, text_, path, value, w=None, h=34, size=12):
+    """One choice of a segmented control writing value to a number property; with no width it shares its row."""
     t = label(text_, size, DIM, LIGHT, 0.3, name="Label")
-    button = box(name, t, w=w, h=h, dir="row", align="center", bg=CLEAR, radius=4)
+    button = box(name, t, w=w, ws=None if w else "fill", h=h, dir="row", align="center", bg=CLEAR, radius=4)
     bg, tc = button.meta["bg"].meta["color"], t.meta["color"]
     controls.add(button,
                  {"idle": {(bg, "colorValue"): CLEAR, (tc, "colorValue"): DIM},
@@ -365,7 +378,7 @@ def segment(controls, name, text_, path, value, w=64, h=34, size=12):
 
 
 def tool_button(controls, vm, name, value):
-    return segment(controls, name, name, vm.path("tool"), value)
+    return touch_size(segment(controls, name, name, vm.path("tool"), value, w=64), 64, 34, 56, 40)
 
 
 # ------------------------------------------------------------------ panels
@@ -377,9 +390,10 @@ def left_column(controls, vm):
                 gap=6, pad=(10, 0, 0, 0))
     rows = shown_in(box("Scenes", *[scene_row(controls, vm, i) for i in range(SCENES)], gap=4, margin=(0, 26, 0, 0)),
                     WIDE, MEDIUM)
-    chips = shown_in(box("Chips", box("Chip Row", *[scene_chip(controls, vm, i) for i in range(SCENES)], dir="row", gap=4),
-                         label("", 13, INK, LIGHT, 0.2, path=vm.path("sceneTitle"), name="Scene Title"),
-                         gap=12, pad=(10, 0, 0, 0), margin=(0, 20, 0, 0)), COMPACT)
+    chips = [scene_chip(controls, vm, i) for i in range(SCENES)]
+    grid = box("Chip Grid", *[box("Chip Row", *chips[i:i + 4], dir="row", gap=4) for i in (0, 4)], gap=4)
+    chips = shown_in(box("Chips", grid, label("", 13, INK, LIGHT, 0.2, path=vm.path("sceneTitle"), name="Scene Title"),
+                         stat_lines(vm), gap=12, pad=(10, 0, 0, 0), margin=(0, 20, 0, 0)), COMPACT, SHORT)
     about = shown_in(box("About", rule(24),
                          label("", 11.5, DIM, LIGHT, 0.1, path=vm.path("description"), width=220, line_height=17,
                                name="Description"),
@@ -416,15 +430,18 @@ def right_panel(vm):
                         absolute={"top": 0, "right": 0}), WIDE, MEDIUM)
 
 
-def stat_line(vm):
-    """The compact class's stats, one line of label and value runs."""
-    key = text_style(8.5, FAINT, REGULAR, 1.4)
-    value = text_style(11, DIM, LIGHT, 0.2)
-    runs = []
-    for name, path, converter in (("STEP", "stepMs", None), ("DRAW", "drawMs", None), ("BODIES", "bodies", WHOLE),
-                                  ("AWAKE", "awake", WHOLE)):
-        runs += [(key, ("     " if runs else "") + name + "  ", None, None), (value, "0", vm.path(path), converter)]
-    return shown_in(box("Stat Line", text("Stats", [key, value], runs), pad=(10, 0, 0, 0)), COMPACT)
+def stat_lines(vm):
+    """The phone classes' stats, two lines of label and value runs."""
+    lines = []
+    for pair in ((("STEP", "stepMs", None), ("DRAW", "drawMs", None)),
+                 (("BODIES", "bodies", WHOLE), ("AWAKE", "awake", WHOLE))):
+        key = text_style(8.5, FAINT, REGULAR, 1.4)
+        value = text_style(11, DIM, LIGHT, 0.2)
+        runs = []
+        for name, path, converter in pair:
+            runs += [(key, ("     " if runs else "") + name + "  ", None, None), (value, "0", vm.path(path), converter)]
+        lines.append(text("Stats", [key, value], runs))
+    return box("Stat Lines", *lines, gap=4)
 
 
 def clear_area(vm):
@@ -450,10 +467,11 @@ def bool_layer(machine, name, path, on_nodes, off_nodes=()):
     machine.layer(name, [("off", keys(False), [(1, 0, when)]), ("on", keys(True), [(0, 0, unless)])])
 
 
-def choice(controls, machine, vm, name, text_, path, value, ok, w, h=28):
-    """A segment, and a dim stand in for it while the ok boolean is false."""
-    live = segment(controls, name, text_, path, value, w=w, h=h, size=11.5)
-    off = box(name + " Off", label(text_, 11.5, FAINT, LIGHT, 0.3, name="Label"), w=w, h=h, dir="row", align="center")
+def choice(controls, machine, vm, name, text_, path, value, ok, h=28):
+    """A segment sharing its row, and a dim stand in for it while the ok boolean is false."""
+    live = segment(controls, name, text_, path, value, h=h, size=11.5)
+    off = box(name + " Off", label(text_, 11.5, FAINT, LIGHT, 0.3, name="Label"), ws="fill", h=h, dir="row",
+              align="center")
     if ok:
         bool_layer(machine, name + " Available", vm.path(ok), [live], [off])
     else:
@@ -465,33 +483,45 @@ def threads_panel(controls, machine, vm):
     """The Threads scene's controls and the graph script, shown while it is open."""
     P = vm.path
     caption = lambda t: label(t, 8.5, FAINT, REGULAR, 1.4, name="Caption")
-    backends = box("Backends", *[choice(controls, machine, vm, b, b, P("backend"), i, "_ok" + b if i else None, 65)
-                                 for i, b in enumerate(BACKENDS)], dir="row", line=HAIRLINE, radius=4)
+    backends = box("Backends", *[choice(controls, machine, vm, b, b, P("backend"), i, "_ok" + b if i else None)
+                                 for i, b in enumerate(BACKENDS)], ws="fill", dir="row", line=HAIRLINE, radius=4)
     threads = box("Thread Counts", *[choice(controls, machine, vm, f"Threads {n}", str(n), P("threads"), n,
-                                            f"_okThreads{n}" if n > 1 else None, 49)
-                                     for n in THREAD_CHOICES], dir="row", line=HAIRLINE, radius=4)
-    note = label("", 10.5, DIM, LIGHT, 0.1, path=P("threadsNote"), width=196, line_height=14, name="Note")
-    choices = box("Choices", box("Backend Group", caption("BACKEND"), backends, gap=7),
-                  box("Threads Group", caption("THREADS"), threads, gap=7), gap=7)
+                                            f"_okThreads{n}" if n > 1 else None)
+                                     for n in THREAD_CHOICES], ws="fill", dir="row", line=HAIRLINE, radius=4)
+    note = shown_in(box("Note", label("", 10.5, DIM, LIGHT, 0.1, path=P("threadsNote"), width=196, line_height=14,
+                                      name="Note")), WIDE, MEDIUM)
+    backend_group = box("Backend Group", caption("BACKEND"), backends, ws="fill", gap=7)
+    # The wider share to the three named backends when the groups sit side by side.
+    backend_group.attrs["fractionalWidth"] = 1.5
+    choices = box("Choices", backend_group, box("Threads Group", caption("THREADS"), threads, ws="fill", gap=7),
+                  ws="fill", gap=7)
     # Side by side in compact, where the panel is narrow but tall.
-    per_class(choices.meta["style"], "flexDirectionValue", [("uint", 0), ("uint", 0), ("uint", 2)])
-    per_class(choices.meta["style"], "gapHorizontal", [7.0, 7.0, 20.0])
-    side = box("Threads Controls", choices, note, gap=7)
+    per_class(choices.meta["style"], "flexDirectionValue", [COLUMN, COLUMN, ROW, COLUMN])
+    per_class(choices.meta["style"], "gapHorizontal", [7.0, 7.0, 14.0, 7.0])
+    side = box("Threads Controls", choices, note, w=196, gap=7)
+    per_class(side.meta["style"], "layoutWidthScaleType", [FIXED, FIXED, FILL, FILL])
     script = E("ScriptAsset", file="demo/threads_graph.as", name="threads_graph")
     graph = box("Graph", E("ScriptedLayout", scriptAssetId=script, name="Threads Graph"), ws="fill", hs="fill")
     panel = box("Threads", side, graph, ws="fill", h=190, dir="row", gap=24, pad=(10, 12, 14, 12), bg="E0151412",
                 radius=6)
-    # Compact stacks the graph under the controls.
-    per_class(panel.meta["style"], "flexDirectionValue", [("uint", 2), ("uint", 2), ("uint", 0)])
-    per_class(panel, "height", [190.0, 190.0, 290.0])
+    # The phone classes stack the graph under the controls; short sits beside the view, as tall as it.
+    per_class(panel.meta["style"], "flexDirectionValue", [ROW, ROW, COLUMN, COLUMN])
+    per_class(panel.meta["style"], "layoutHeightScaleType", [FIXED, FIXED, FIXED, FILL])
+    per_class(panel, "height", [190.0, 190.0, 250.0, 190.0])
     bool_layer(machine, "Threads Panel", P("threadsOpen"), [panel])
     return panel, script
+
+
+def help_text(hints, align=None, pad=None):
+    return box("Help", label(hints, 11, FAINT, LIGHT, 0.2, fill=True, align=align, name="Help"), ws="fill", pad=pad)
 
 
 def bottom_bar(controls, vm):
     P = vm.path
     paused_tag = label("PAUSED", 9.5, ACCENT, REGULAR, 2.0, name="Paused")
     paused_tag.attrs["opacity"] = 0.0
+    # Compact has no width for it; the pause button shows play while paused.
+    paused_box = shown_in(box("Paused Tag", paused_tag), WIDE, MEDIUM, SHORT)
     bars = icon("Pause", points_path([(-3, -5.5), (-3, 5.5)]), points_path([(3, -5.5), (3, 5.5)]))
     play = icon("Play", points_path([(-3.5, -5.5), (5.5, 0), (-3.5, 5.5)], closed=True))
     play.attrs["opacity"] = 0.0
@@ -503,17 +533,20 @@ def bottom_bar(controls, vm):
     reset = icon_button(controls, "Reset", [icon("Reset", *reset_paths())], [set_vm("Trigger", P("reset"))])
     tools = box("Tools", tool_button(controls, vm, "Pick", 0), tool_button(controls, vm, "Shoot", 1), dir="row",
                 line=HAIRLINE, radius=4, margin=(14, 0, 0, 0))
-    transport = box("Transport", pause, step, reset, tools, paused_tag, dir="row", align="centerLeft", gap=8)
-    keys = shown_in(box("Key Help", label(KEY_HELP, 11, FAINT, LIGHT, 0.2, fill=True, align="right", name="Help"),
-                        ws="fill"), WIDE, MEDIUM)
-    return box("Bottom", transport, keys, ws="fill", dir="row", align="bottomLeft", gap=140, pad=(10, 0, 0, 0))
+    transport = box("Transport", pause, step, reset, tools, paused_box, dir="row", align="centerLeft", gap=8)
+    keys = shown_in(box("Key Help", shown_in(help_text(KEY_HELP, "right"), WIDE, MEDIUM),
+                        shown_in(help_text(TOUCH_HELP, "right"), SHORT), ws="fill"), WIDE, MEDIUM, SHORT)
+    bottom = box("Bottom", transport, keys, ws="fill", dir="row", align="bottomLeft", gap=140, pad=(10, 0, 0, 0))
+    # A phone on its side needs the width for the hints.
+    per_class(bottom.meta["style"], "gapHorizontal", [140.0, 140.0, 140.0, 24.0])
+    return bottom
 
 
 def size_layer(machine, vm):
     """Plays the keys gathered by per_class for the class the script picked."""
     path = vm.path("layoutClass")
     states = []
-    for c, name in zip(CLASSES, ("wide", "medium", "compact")):
+    for c, name in zip(CLASSES, ("wide", "medium", "compact", "short")):
         to = [(other, 0, [cond("Number", path, "equal", float(other))]) for other in CLASSES if other != c]
         states.append((name, SIZE_KEYS[c], to))
     machine.layer("Size", states)
@@ -529,16 +562,17 @@ def main():
     left = left_column(controls, vm)
     # Right floats over the corner; in wide it is tall, so Right Room keeps the view clear of it.
     room = shown_in(box("Right Room", w=168, h=1), WIDE)
-    top = box("Top", left, stat_line(vm), clear_area(vm), room, right_panel(vm), ws="fill", hs="fill", dir="row", gap=24)
-    per_class(top.meta["style"], "flexDirectionValue", [("uint", 2), ("uint", 2), ("uint", 0)])
     threads, graph_script = threads_panel(controls, machine, vm)
-    touch = shown_in(box("Touch Help", label(TOUCH_HELP, 11, FAINT, LIGHT, 0.2, fill=True, name="Help"), ws="fill",
-                         pad=(10, 0, 0, 0)), COMPACT)
-    panels = box("Panels", top, threads, touch, bottom_bar(controls, vm), gap=16,
+    view = box("View", clear_area(vm), threads, ws="fill", hs="fill", gap=16)
+    per_class(view.meta["style"], "flexDirectionValue", [COLUMN, COLUMN, COLUMN, ROW])
+    top = box("Top", left, view, room, right_panel(vm), ws="fill", hs="fill", dir="row", gap=24)
+    per_class(top.meta["style"], "flexDirectionValue", [ROW, ROW, COLUMN, ROW])
+    touch = shown_in(help_text(TOUCH_HELP, pad=(10, 0, 0, 0)), COMPACT)
+    panels = box("Panels", top, touch, bottom_bar(controls, vm), gap=16,
                  absolute={"left": 18, "top": 28, "right": 28, "bottom": 28})
     scrims = [scrim("Scrim Left", "left", 364), scrim("Scrim Right", "right", 316), scrim("Scrim Top", "top", 240),
               scrim("Scrim Bottom", "bottom", 200)]
-    for s, shown in zip(scrims, ((WIDE, MEDIUM), (WIDE, MEDIUM), (COMPACT,), (COMPACT,))):
+    for s, shown in zip(scrims, ((WIDE, MEDIUM, SHORT), (WIDE, MEDIUM), (COMPACT,), (COMPACT, SHORT))):
         shown_in(s, *shown)
     # Laid out at the window size over uiScale, then scaled back up, so the
     # panels grow with the window.

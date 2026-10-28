@@ -135,15 +135,15 @@ front to back (in RML an earlier sibling draws on top):
 |---|---|
 | `Overlay` | absolute at 0, 0, sized `uiWidth` by `uiHeight` and scaled by `uiScale`, so it is laid out in UI units and drawn at the window size; holds `Panels` and the scrims |
 | `Panels` | absolute, inset 28 (18 on the left, where the rows reach past the margin): a column of `Top`, `Touch Help` and `Bottom` |
-| `Top` / `Left` | title block, then the eight scene rows (196 by 26, 4 apart) or, compact, the `Chips` (eight 34 by 26 chips and the open scene's name), then a 24 point rule and the wrapped description |
-| `Top` / `Stat Line` | compact only: STEP, DRAW, BODIES, AWAKE as runs of one text |
-| `Top` / `Clear` | a fill box between the panels; its computed bounds are bound back into `clearX`.. `clearHeight` |
+| `Top` / `Left` | title block, then the eight scene rows (196 by 26, 4 apart) or, compact and short, the `Chips` (two rows of four 44 by 38 chips, the open scene's name, and `Stat Lines`: STEP and DRAW, then BODIES and AWAKE, as runs of two texts), then a 24 point rule and the wrapped description |
+| `Top` / `View` | a fill box holding `Clear` and, while open, `Threads`; a column, or in short a row so the panel sits beside the scene |
+| `View` / `Clear` | a fill box between the panels; its computed bounds are bound back into `clearX`.. `clearHeight` |
 | `Top` / `Right Room` | wide only: an empty 168 column that keeps `Clear` off the right panel |
 | `Top` / `Right` | absolute in the top right corner, 168 wide: STEP and DRAW, a rule, the six counts, a rule, B3 PROFILE with its stacked bar and one row per part |
-| `Threads` | only while the Threads scene is open (the `Threads Panel` layer on `threadsOpen`): the backend and thread count choices with a note under them, and `Graph`, a fill box holding a second `ScriptedLayout` running `demo/threads_graph.as`; a row 190 tall, or in compact a column 290 tall with the two choices side by side |
-| `Touch Help` | compact only: drag to orbit, pinch to zoom, tap a body to pick |
-| `Bottom` | pause, step, reset (34 square), the Pick and Shoot pair in one outline, the PAUSED tag, and the key help, right aligned, filling the rest and wrapping upward when narrow (each hint holds together with no break spaces) |
-| `Scrim Left`, `Scrim Right`, `Scrim Top`, `Scrim Bottom` | gradients that keep the panels legible over the scene; the side pair outside compact, the top and bottom pair in it; they scale with the overlay |
+| `View` / `Threads` | only while the Threads scene is open (the `Threads Panel` layer on `threadsOpen`): the backend and thread count choices, each choice sharing its group's width so they fit at any size, with a note under them (wide and medium only), and `Graph`, a fill box holding a second `ScriptedLayout` running `demo/threads_graph.as`; a row 190 tall, in compact a column 250 tall with the two choices side by side (the backends taking the wider share), in short a column as tall as the view |
+| `Touch Help` | compact only: drag to orbit, pinch to zoom, tap a body to pick, tap with Shoot to fire |
+| `Bottom` | pause, step, reset (34 square, 40 in compact and short), the Pick and Shoot pair in one outline (64 by 34, 56 by 40), the PAUSED tag (not in compact, where the pause button's play icon says it), and the key help, or in short the touch hints, right aligned, filling the rest and wrapping upward when narrow (each hint holds together with no break spaces) |
+| `Scrim Left`, `Scrim Right`, `Scrim Top`, `Scrim Bottom` | gradients that keep the panels legible over the scene; the side pair in wide and medium, the top and bottom pair in compact, the left and bottom in short; they scale with the overlay |
 | `Stage` / `Demo` | a fill box holding the `ScriptedLayout` running `main.as`, with the `FocusData` that keys need |
 
 The icons are `PointsPath`s in a `Node` at the button center, so they keep
@@ -170,9 +170,12 @@ in `demo/shell.as`, window size in points):
 |---|---|---|---|
 | wide | 0 | width at least 1100 and at least 1.2 times the height | everything, as above |
 | medium | 1 | otherwise | the rows; STEP, DRAW, BODIES and AWAKE, floating in the top right corner (absolute, so the view takes the width under it); no description, profile or the other counts |
-| compact | 2 | width under 720, or portrait | chips and the open scene's name across the top, the stat line, touch hints over the transport and tools; no rows, right panel or key help |
+| compact | 2 | width under 720, or portrait | chips, the open scene's name and the stat lines across the top, touch hints over the transport and tools; no rows, right panel or key help |
+| short | 3 | under 480 high and not portrait: a phone on its side | the compact column on the left with the view beside it, the touch hints right of the transport, 24 apart rather than 140 |
 
-The UI scale is the window's smaller side over 800, clamped to 0.85 to 1.3.
+The UI scale is the window's smaller side over 800, clamped to 0.85 to 1.3;
+compact and short raise the floor to 1.1, so on a phone the transport buttons
+are 44 points and the chips 48 by 42, and the smallest labels near 10 points.
 The overlay is laid out at the window size divided by it and scaled back up,
 so text stays vector sharp; the class is picked from the unscaled size.
 
@@ -180,7 +183,8 @@ One state machine layer, `Size`, has a state per class, entered with no
 crossfade when `layoutClass` changes. Its states key what `per_class` and
 `shown_in` gathered in the generator: `displayValue` to show and hide boxes
 (a hidden box is out of hit testing too) and `Top`'s `flexDirectionValue`
-(row, or column in compact). `Right` is absolute in every class rather than
+(row, or column in compact), plus the touch sizes of the buttons and the
+Threads panel's shape. `Right` is absolute in every class rather than
 keyed absolute in medium: a box keyed to absolute in the frame it comes back
 from `display: none` is laid out at the left edge, which put the medium stats
 over the title after a resize out of compact. Wide holds its column open with
@@ -237,7 +241,7 @@ handles; the generator and it name the same properties.
 | `backend`, `threads` | number | Threads panel, script | the backend (0 serial, 1 lanes, 2 parallel) and thread count asked for; the script writes back what the world steps on |
 | `_okLanes`, `_okParallel`, `_okThreads2`, `_okThreads4`, `_okThreads8` | boolean | script | whether each choice is there to take; while false a dim stand in shows instead |
 | `threadsNote` | string | script | what the backend does, and why the choices that are off are off |
-| `layoutClass` | number | script, on resize | 0 wide, 1 medium, 2 compact |
+| `layoutClass` | number | script, on resize | 0 wide, 1 medium, 2 compact, 3 short |
 | `uiScale`, `uiWidth`, `uiHeight` | number | script, on resize | the overlay's scale and its size in UI units |
 | `clearX`, `clearY`, `clearWidth`, `clearHeight` | number | the layout | `Clear`'s computed bounds, written back by binds with `direction` |
 | `_uiPress` | boolean | every control's `down` | a press a control took; the script clears it and ignores the press |
@@ -309,7 +313,9 @@ shares with `main.as` as module globals:
   white), a mark wherever the backend or thread count changed, and once a serial step has been seen this session,
   a dashed line at it and the speed up against it.
 - In compact the graph sits under the choices (which go side by side), the legend goes and the history keeps only
-  its figures.
+  its figures. In short, beside the view, the graph is under 100 points high and shows the step time alone, and
+  under 200 wide the history drops the speed up line, which would run into the figure.
+- The axis steps reach 500 ms, so an interpreted capture's second long step still spaces its labels.
 
 How it records is in notes/threading.md (Tracing). Each span is two `clock()` reads and three stores: about 180
 spans per row per step here, so 360 reads on serial and 1460 on 4 parts. Turned off in the scene, the same bakes

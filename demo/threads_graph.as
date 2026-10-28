@@ -43,7 +43,7 @@ const GROUP_COUNT: i32 = 7;
 const GROUP_TONES: StaticArray<u32> = [0xFFEDE8E1, 0xFFC9C2B8, 0xFFA59E95, 0xFF877F75, 0xFF6E6860, 0xFF45413C, 0xFFE0875A];
 const GROUP_NAMES: StaticArray<string> = ["PAIRS", "COLLIDE", "SOLVER", "FINALIZE", "TREE", "OTHER", "COPY"];
 
-const AXIS_STEPS: StaticArray<f64> = [0.05, 0.1, 0.2, 0.25, 0.5, 1, 2, 2.5, 5, 10, 20, 50];
+const AXIS_STEPS: StaticArray<f64> = [0.05, 0.1, 0.2, 0.25, 0.5, 1, 2, 2.5, 5, 10, 20, 50, 100, 200, 500];
 const SCALE_STEPS: StaticArray<f64> = [0.25, 0.5, 1, 2, 3, 4, 5, 6, 8, 10, 15, 20, 30, 40, 50, 100, 200];
 
 const LABEL_WIDTH: f32 = 46;
@@ -176,11 +176,14 @@ export class ThreadsGraph extends Layout {
             let historyWidth = Mathf.min(Mathf.max(w * 0.3, 220), 300);
             this.timeline(renderer, 0, 0, w - historyWidth - 28, h);
             this.history(renderer, w - historyWidth, 0, historyWidth, h);
-        } else {
+        } else if (h >= 100) {
             // Stacked, the history keeps its figures and the timeline takes the rest
             let historyHeight: f32 = 36;
             this.timeline(renderer, 0, 0, w, h - historyHeight - 12);
             this.history(renderer, 0, h - historyHeight, w, historyHeight);
+        } else {
+            // Too low for the rows to read
+            this.history(renderer, 0, 0, w, h);
         }
     }
 
@@ -305,7 +308,10 @@ export class ThreadsGraph extends Layout {
         } else {
             speed = "Serial not yet measured";
         }
-        labels.draw(renderer, this.small!, speed, x + w, y + 18, DIM, true);
+        // Narrower, it would run into the step time
+        if (w >= 200) {
+            labels.draw(renderer, this.small!, speed, x + w, y + 18, DIM, true);
+        }
 
         let top = y + 42;
         let bottom = y + h - 14;
