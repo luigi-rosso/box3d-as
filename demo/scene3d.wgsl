@@ -253,6 +253,16 @@ fn sunAt(world: vec3f, n: vec3f) -> f32 {
     return mix(sun, 1.0, smoothstep(view.shadowFade.x, splits.w, depth));
 }
 
+// Matches SLOPE_BIAS in gpu_draw.as, which biases the casters drawn straight into the atlas.
+const CACHE_SLOPE_BIAS: f32 = 1.0;
+
+// Static casters into a cascade's float cache, with the slope bias the depth state gives the others.
+@fragment
+fn fs_cache(@builtin(position) p: vec4f) -> @location(0) vec4f {
+    let slope = max(abs(dpdx(p.z)), abs(dpdy(p.z)));
+    return vec4f(p.z + CACHE_SLOPE_BIAS * slope, 0.0, 0.0, 1.0);
+}
+
 // Each cascade's own tint, for the debug view.
 fn cascadeTint(world: vec3f) -> vec3f {
     let depth = dot(world - view.eye.xyz, view.forward.xyz);

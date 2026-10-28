@@ -21,8 +21,9 @@ const LAMBDA: f32 = 0.6;
 export const BLEND: f32 = 0.12;
 // Casters this far beyond a cascade's sphere toward the sun still cast into it.
 const CASTER_REACH: f32 = 40;
-// Sphere radii come in these steps, so a zoom seldom changes the texel size.
-const RADIUS_STEP: f32 = 1.08;
+// Sphere radii and the depths the cascades span come in these steps, so a zoom seldom changes the texel size
+// and bodies moving under a still camera leave the cascades, and the cached static casters, as they are.
+const STEP: f32 = 1.08;
 
 // The view depths a frame's solids span: small ones by their spheres when
 // in view, large ones by the band of heights they fill, which the view's
@@ -132,8 +133,8 @@ export class ShadowCascades {
                 far = Mathf.max(far, to);
             }
         }
-        near = Mathf.max(near, camera.near);
-        far = Mathf.min(far, reach);
+        near = Mathf.max(stepped(near, false), camera.near);
+        far = Mathf.min(stepped(far, true), reach);
         if (far <= near) {
             near = camera.near;
             far = reach;
@@ -179,7 +180,7 @@ export class ShadowCascades {
         }
         let t = 0.5 * (lo + hi);
         let radius = sliceRadius(t, mx, my, x0, x1, y0, y1, d0, d1);
-        radius = Mathf.pow(RADIUS_STEP, Mathf.ceil(Mathf.log(radius) / Mathf.log(RADIUS_STEP)));
+        radius = stepped(radius, true);
 
         let center = v3(camera.eye.x + (camera.right.x * mx + camera.up.x * my + camera.forward.x) * t,
             camera.eye.y + (camera.right.y * mx + camera.up.y * my + camera.forward.y) * t,
@@ -187,8 +188,9 @@ export class ShadowCascades {
         let texel = 2 * radius / <f32>tile;
         let cr = Mathf.floor(dot(center, this.right) / texel) * texel;
         let cu = Mathf.floor(dot(center, this.up) / texel) * texel;
-        let top = dot(center, this.toSun) + radius + CASTER_REACH;
-        let range = 2 * radius + CASTER_REACH;
+        // The near end snaps to whole texels too, and the box takes one more to cover that.
+        let top = Mathf.ceil((dot(center, this.toSun) + radius) / texel) * texel + CASTER_REACH;
+        let range = 2 * radius + CASTER_REACH + texel;
         this.texels[c] = texel;
         this.texelDepths[c] = texel / range;
 
@@ -215,6 +217,12 @@ export class ShadowCascades {
         m[o + 14] = top / range;
         m[o + 15] = 1;
     }
+}
+
+// x rounded up or down to a power of STEP.
+function stepped(x: f32, up: bool): f32 {
+    let e = Mathf.log(Mathf.max(x, 1e-3)) / Mathf.log(STEP);
+    return Mathf.pow(STEP, up ? Mathf.ceil(e) : Mathf.floor(e));
 }
 
 // The farthest corner of the slice from the point t deep on its center line, in camera space.
