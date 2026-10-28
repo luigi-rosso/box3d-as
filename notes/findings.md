@@ -485,3 +485,29 @@ a switch from compact to medium (a window widened past 720) laid it out at the l
 and the scene list. Repro headless: `--viewport=914x800 --advance=10 --data=layoutClass=2 --advance=10
 --data=layoutClass=1 --advance=10`. Workaround: author it absolute and key only its display. Done looks like: the
 insets apply whichever frame the position type changes in.
+
+## GPU renderer: what the GPU API could not do
+
+From moving the demo's solids onto `rive/gpu` (`demo/gpu_draw.as`). None of
+these blocked it.
+
+- **No GPU timing.** There are no timestamp or occlusion queries, so a script
+  cannot time its own passes. The renderer's GPU cost was not measured; the
+  script side is timed with `clock()` (`DRAW_LOG`) and the whole frame with
+  `--bench`. The CLI notes suggest a Metal System Trace of `--bench` instead.
+- **No `firstInstance` on WebGL2.** `GPUFeatures.drawBaseInstance` is false
+  there, so one instance buffer holding every batch is bound at each batch's
+  byte offset with `setVertexBuffer(1, buffer, offset)`, a vertex buffer bind
+  per batch. Fine at a few batches a frame.
+- **A canvas costs a composite.** `context.gpuTarget()` renders under all of
+  Rive's content, including the layout's own vector background, so the 3D
+  goes through a `GPUCanvas` and a `drawImage` over the background: one extra
+  full screen pass.
+- **Captures run at 1x.** `--screenshot` passes `resize` a scale of 1, so the
+  device pixel ratio path (canvas, MSAA and depth at twice the size, edge
+  widths in points) was checked only in headless Chrome with
+  `--force-device-scale-factor=2`.
+- **No alpha to coverage.** Ray traced sphere impostors would need `discard`
+  for their silhouettes, which MSAA does not smooth without alpha to
+  coverage, and a depth write from the fragment shader. Spheres and capsules
+  are meshes instead.

@@ -1,9 +1,12 @@
 # Demo: debug draw and app shell
 
-A rive-cli project that runs Box3D scenes from `lib/` and draws them with the
-Rive renderer: 3D shapes flattened to 2D paths through an orbit camera,
-painted back to front. The panels around the view are RML, bound to a view
-model the script writes.
+A rive-cli project that runs Box3D scenes from `lib/` and draws the solids
+instanced on the GPU with a depth buffer, through AnimaScript's GPU API and
+WGSL, into a canvas composited under vector overlays drawn with the Rive
+renderer. The 2D painter that came before it, 3D shapes flattened to paths
+and painted back to front, stays behind `--define=VECTOR_DRAW` and as the
+fallback when the host has no GPU canvas. The panels around the view are RML,
+bound to a view model the script writes.
 
 ## Files
 
@@ -17,7 +20,9 @@ model the script writes.
 | `demo/shell.as` | `Shell`, the script's handle on the `Demo` view model |
 | `demo/vec.as` | `Vec3`, `Quat`, `Xf` (p + q), `Ray`, f32 helpers |
 | `demo/camera.as` | `OrbitCamera`: yaw, pitch, distance, target, perspective framed in the clear area, rays, `shiftTarget` for following |
-| `demo/debug_draw.as` | `DebugDraw` plus `DebugHull`, `DebugMesh`, `DebugHeightField` |
+| `demo/debug_draw.as` | `DebugDraw` plus `DebugHull`, `DebugMesh`, `DebugHeightField`; the vector painter and overlays |
+| `demo/gpu_draw.as` | `GpuDraw`, the instanced GPU renderer, plus `GpuMesh` and `MeshWriter` |
+| `demo/scene3d.wgsl` | its shaders: faceted solids, spheres and capsules, blob shadows (asset name `demo/scene3d`) |
 | `demo/scene.as` | `DemoScene` and `SceneStats`, the contract for scenes |
 | `demo/b3view.as` | Box3D to DebugDraw: transform conversion, `ShapeCache`, `BodyView`, `fieldHeight` |
 | `demo/physics.as` | `PhysicsScene`, the Box3D base every scene extends |
@@ -48,7 +53,10 @@ Run the live window on AOT. The WAMR interpreter is 30 to 40 times slower here
 (the awake pyramid steps in 165 ms interpreted, 4.5 ms on AOT), which is fine
 for captures but not for play. The AOT compile takes about a minute.
 
-`START_SCENE` (1 based) picks the scene at launch. `STEP_LOG` logs the mean
+`START_SCENE` (1 based) picks the scene at launch. `VECTOR_DRAW` draws with
+the 2D painter instead of the GPU. `DRAW_LOG` logs the mean and max script
+draw time per 120 frames with the triangle (or, painted, face) count; use it
+with `--bench`, which draws every frame where captures draw only the last. `STEP_LOG` logs the mean
 and max step time once per simulated second (`console :0 step <scene> s<n>
 mean <ms> max <ms>`), which is how the table below was measured; `--bench`
 refuses `--key` and reports frames, not steps.
@@ -359,7 +367,104 @@ kinematic solids on a flat ground), `lightDir`. Over uneven ground turn
 `shadows` off and call `dd.shadow()` with the ground height under each body.
 `bodyInk(i)` gives a stable tint from the warm grey family.
 
-How it draws:
+### The GPU renderer
+
+`Main.init` gives `DebugDraw` a `GpuDraw` from `GpuDraw.create(context)`,
+which answers null when the host has no GPU canvas or the shader is missing,
+and the solids then go to it instead of the painter. Scenes call the same
+`DebugDraw` methods either way.
+
+- **Target.** One `GPUCanvas` at the window size times the device pixel ratio
+  (`resize`'s scale, through `dd.setScale`), cleared transparent, drawn with
+  `drawImage` over the vector background and under the vector overlays. It
+  renders 4x MSAA into a multisampled color texture that resolves into the
+  canvas, with a `depth32float` depth texture of the same sample count; both
+  are made again only when the canvas size changes.
+- **Depth.** Reverse Z: the vertex shader writes clip z as the near plane and
+  w as the camera depth, so stored depth is near over depth, 1 at the near
+  plane falling toward 0; it clears to 0 and tests `greater`. The projection
+  is `OrbitCamera`'s own, the focal length and the off center principal point
+  of the `Clear` box, built in the shader from the eye, the camera axes and
+  four numbers, so overlays, picking rays and the GPU image agree exactly.
+- **Geometry.** A `GpuMesh` is an immutable vertex buffer of triangles,
+  three vertices each: position, flat normal, and the corner's edge distances.
+  Each `DebugHull` builds one on first use, its faces fanned, and keeps it, and
+  `ShapeCache` already shares hulls by content hash, so the pyramid's 210
+  boxes and the ground are two meshes. `DebugMesh` and `DebugHeightField` build
+  theirs the same way, every triangle edge drawn as before, with no face cap.
+  `dd.box` uses a unit cube scaled per instance. Spheres and capsules share a
+  unit capsule: two hemispheres of unit directions, each tagged with its end,
+  joined by a band that stretches to the capsule's length and vanishes for a
+  sphere. It comes in two levels of detail, 40 by 2x10 and 16 by 2x4; under
+  14 device pixels of radius on screen an instance takes the coarse one.
+- **Instances.** A faceted instance is 48 bytes: rotation quaternion, origin,
+  scale, fill and edge as `unorm8x4`. A round one is 56: both centers and the
+  radius, the body's rotation (which turns a sphere's rings), fill and edge.
+  A shadow is 32: ground point, spread, opacity, lift. Recording writes
+  each into a preallocated staging `Float32Array` with a batch key; `render`
+  groups them by key with a counting sort into a second array and uploads
+  each kind with one `GPUBuffer.update`. A key is a geometry and whether the
+  body is static (and for rounds, the level of detail), so a frame is one
+  draw per hull, mesh or field geometry and layer, up to four round draws and
+  one shadow draw. WebGL2 has no `firstInstance`, so each batch binds the
+  instance buffer at its byte offset instead.
+- **Order.** Static geometry first, then the shadows, which test depth but
+  never write it, then everything that moves. A shadow therefore never covers
+  a body, and needs no sorting.
+- **Edges.** Every corner of a triangle carries one of (1,0,0), (0,1,0),
+  (0,0,1), and a component stays 1 at all three corners when the edge
+  opposite that corner is a fan diagonal inside a face. The fragment shader
+  turns each component into a pixel distance with its screen gradient
+  (`dpdxFine`, `dpdyFine`) and covers 0.6 points either side of the outline,
+  so an inner edge is 1.2 points shared by its two faces and a silhouette
+  0.6 points plus the MSAA edge. Faces only a few pixels across blend toward
+  the share of their area the lines would cover, so dense meshes keep their
+  tone without shimmer. Round shapes draw their rings (a sphere's two great
+  circles, a capsule's two cap seams) from signed distances to those planes,
+  and their outline from the facing ratio's own gradient.
+- **Shading.** The painter's Lambert per face (`0.42 + 0.5 n.l + 0.12 sky`)
+  in the vertex shader, flat, with the normal flipped toward the eye for one
+  sided meshes; per pixel with interpolated normals on spheres and capsules.
+  State tints (sleeping, kinematic, selected) and edge inks are worked out on
+  the CPU as before.
+- **Grid.** Drawn on the ground's upward faces in the faceted shader rather
+  than as a plane of its own: a plane at y 0 cut through the rain scene's wave
+  mesh. Ground is a static, not standing, shape; it arrives with a clear fill
+  alpha, which the shader reads as the flag. Minor lines every meter and
+  major every five, from `fract` distances in pixels, fading out from the
+  grid center and where they crowd closer than a few points.
+- **Shadows.** The painter's blob shadows as instanced quads on the ground,
+  a radial smoothstep in the fragment shader. Over uneven ground (`shadows`
+  off, the scene passing heights) the disc is pulled toward the eye by 0.8 of
+  its spread, so it shows on slopes the flat disc would dip under; it can
+  then show through a thin static wall right in front of it.
+- **No per frame allocation.** The pass descriptor, its attachment, the pass
+  object (`beginRenderPass(desc, into)`), the canvas image, the staging and
+  upload arrays and the GPU buffers are all made once. Capacities: 8192
+  faceted and 4096 round instances, 4096 shadows, 256 geometries a frame;
+  past them `droppedCount` counts.
+
+Draw cost against the painter, release AOT bake, `--bench=900` at 1280 by
+800, Apple M5 Max, two interleaved rounds (best shown). Script is `DRAW_LOG`'s
+mean over the last windows, `dd.begin` through `dd.end` with the scene's own
+draw; frame is the bench's render mean, which adds Rive's flush on the CPU but
+not GPU time, which the API cannot time (notes/findings.md). Before is the
+painter at 642691d, painter is this branch with `VECTOR_DRAW`.
+
+| Scene | Script, painter | Script, GPU | Frame, before | Frame, painter | Frame, GPU |
+|---|---|---|---|---|---|
+| 1 Pyramid, asleep | 1.17 to 1.35 ms | 0.014 to 0.018 ms | 1.88 ms | 1.92 ms | 0.20 ms |
+| 4 Rain, up to 260 bodies | 1.77 to 2.12 ms | 0.022 to 0.049 ms | 4.26 ms | 4.62 ms | 0.16 ms |
+| 5 Height field | 1.28 to 1.89 ms | 0.008 to 0.025 ms | 5.84 ms | 3.72 ms | 0.17 ms |
+
+The script now spends its draw on reading body transforms and writing 12 or
+14 floats per body. In headless Chrome on the published `@rive-app/webgl2`
+2.48.0 runtime the overlay's DRAW reads 0.06 to 0.14 ms and every scene holds
+60 fps, at 1x and 2x.
+
+The vector painter, below, is what `VECTOR_DRAW` and the fallback run.
+
+How the vector painter draws:
 
 - Solid faces are flat shaded from a fixed world light, back face culled,
   clipped against the near plane and culled off screen, then sorted per face
@@ -384,7 +489,7 @@ How it draws:
   primitive store is preallocated, so a frame allocates nothing; a 300 frame
   bench grows wasm memory by zero pages.
 
-Draw cost on the release AOT bake, from the overlay's DRAW figure (the shell
+The painter's draw cost on the release AOT bake, from the overlay's DRAW figure (the shell
 times `dd.begin` through `dd.end`, including the scene's draw and the Box3D
 queries in it): about 1 ms for the 210 box pyramid, 2.6 ms for the height
 field scene, 5 ms for rain at 200 bodies over the 3200 triangle mesh (3725
@@ -397,13 +502,15 @@ faces). The interpreter is roughly ten times slower.
 - Contact drawing allocates a `b3ContactData` per contact per frame (the
   port's `b3Body_GetContactData` news them); a fill-in-place variant in `lib/`
   would remove that, but `lib/` is not this task's to edit.
-- Painter's sort artifacts remain for large dynamic faces against each other;
-  there is no depth buffer.
+- The painter keeps its sort artifacts for large dynamic faces against each
+  other; the GPU renderer has none.
+- Shadows over uneven ground are lifted discs, not draped on the terrain.
 - The mover ignores `MoverShapeUserData` (no soft planes, no allies on
   category 2) and has no third person camera or mouse look.
 - `SceneStats.shapes` is gathered but not shown.
 - The G, C and J toggles have keys but no controls in the panels.
-- DRAW and FACES read 0 in headless captures (see Captures above).
+- DRAW and FACES read 0 in headless captures (see Captures above). FACES
+  counts triangles on the GPU renderer and faces on the painter.
 
 ## Screenshots
 
@@ -436,6 +543,21 @@ The RML shell, all AOT at 40 frames unless noted, in the same folder:
   `rmli_orbitui.png` a drag that starts on row 3 opens the scene without
   orbiting
 - `rmln.png` at 900 by 600, the key help wrapped
+
+GPU renderer captures, 1280 by 800, interpreted, in
+`/private/tmp/claude-501/-Users-luigi-Projects-rive/65e4f28b-1249-4d28-8600-bb5fb40b325a/scratchpad/gpu/shots/`:
+
+- `before_s1.png` .. `before_s7.png` and `before_collapse.png` the painter at
+  642691d, `after_*` the GPU renderer, `before_after_sheet.png` side by side;
+  150 frames, and the collapse is scene 1, 30 frames, a drag from 700,540 to
+  1100,700, 200 frames
+- `close_edges.png`, `close_round.png`, `close_ragdoll.png` and their
+  `_crop` zooms; `cmp_s1_edges.png`, `cmp_s7_grid.png` painter beside GPU
+- `r_s1_*`, `r_s7_*` and `responsive_sheet.png` the size classes;
+  `i_shoot`, `i_orbit`, `i_contacts` and `interact_sheet.png` input
+- `web_*.png` (webgl2 2.48.0), `webt_*.png` (webgl2-threads 2.48.0) and
+  `web2x_*.png` (2x) from headless Chrome on a local COOP/COEP mirror of the
+  page
 
 ## Host API notes
 
