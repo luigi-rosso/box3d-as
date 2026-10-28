@@ -102,6 +102,10 @@ class PyramidScene extends PhysicsScene {
     }
 
     build(): void {
+        // About five boxes of mass, so a shot punches through rather than bouncing off
+        this.shotRadius = 0.4;
+        this.shotDensity = 20;
+        this.shotSpeed = 80;
         addGroundBox(this, 30);
         let baseCount = 20;
         let h: f32 = 0.5;
