@@ -318,8 +318,8 @@ export class GpuDraw {
     private shadowDesc: GPUPassDesc = new GPUPassDesc();
     private shadowPass: GPURenderPass? = null;
 
-    // Static casters kept per cascade in float tiles while its fit and the static set hold, then written into
-    // the atlas every frame under the moving casters. Null where float targets are missing.
+    // With SHADOW_CACHE, static casters kept per cascade in float tiles while its fit and the static set hold,
+    // then written into the atlas every frame under the moving casters. Null otherwise.
     private blitPipeline: GPUPipeline? = null;
     private cacheFlat: GPUPipeline? = null;
     private cacheRound: GPUPipeline? = null;
@@ -353,7 +353,8 @@ export class GpuDraw {
         if (samples < 1) {
             samples = 1;
         }
-        let cache = features.colorBufferFloat && !isDefined(NO_SHADOW_CACHE) ? context.shader(CACHE_SHADER) : null;
+        // Opt in: writing the tiles back costs more GPU time than drawing this demo's static casters again.
+        let cache = isDefined(SHADOW_CACHE) && features.colorBufferFloat ? context.shader(CACHE_SHADER) : null;
         return new GpuDraw(canvas, shader, layout, samples, features.maxTextureSize2D, cache);
     }
 
@@ -609,7 +610,7 @@ export class GpuDraw {
         d[o + 9] = scale.z;
         d[o + 10] = reinterpret<f32>(fill);
         d[o + 11] = reinterpret<f32>(edge);
-        if (still && this.castsShadows) {
+        if (still && this.blitPipeline != null) {
             this.hashStatic(mesh.id, d, o, 10);
         }
     }
@@ -646,7 +647,7 @@ export class GpuDraw {
         d[o + 11] = q.w;
         d[o + 12] = reinterpret<f32>(fill);
         d[o + 13] = reinterpret<f32>(edge);
-        if (still && this.castsShadows) {
+        if (still && this.blitPipeline != null) {
             this.hashStatic(<u32>this.roundKeys[i], d, o, 12);
         }
     }
