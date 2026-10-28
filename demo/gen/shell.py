@@ -394,14 +394,11 @@ def right_panel(vm):
                                     label_track=1.4, swatch=tone) for p, tone in zip(PROFILE, TONES)], ws="fill",
                 gap=4.67)
     profile = shown_in(box("Profile", stat_row("B3 Profile", P("profileMs"), DIM), bar, parts, ws="fill", gap=9), WIDE)
-    right = box("Right", timing, rule(margin=(0, 4, 0, 9)), box("Counts", *counts, ws="fill", gap=8.4),
-                shown_in(rule(margin=(0, 4, 0, 13)), WIDE), profile, w=168, margin=(0, 1, 0, 0))
-    # Short in medium, so it floats over the corner and the view takes the full width below the left column.
-    style = right.meta["style"]
-    _points(style, "positionTop", 0)
-    _points(style, "positionRight", 0)
-    per_class(style, "positionTypeValue", [("uint", 1), ("uint", 2), ("uint", 1)])
-    return shown_in(right, WIDE, MEDIUM)
+    # Pinned to the corner in every class, since a keyed switch to absolute can land at the left after a live
+    # resize; the wide class holds its column open with Right Room instead.
+    return shown_in(box("Right", timing, rule(margin=(0, 4, 0, 9)), box("Counts", *counts, ws="fill", gap=8.4),
+                        shown_in(rule(margin=(0, 4, 0, 13)), WIDE), profile, w=168, margin=(0, 1, 0, 0),
+                        absolute={"top": 0, "right": 0}), WIDE, MEDIUM)
 
 
 def stat_line(vm):
@@ -465,7 +462,9 @@ def main():
     controls = Controls(machine, vm)
 
     left = left_column(controls, vm)
-    top = box("Top", left, stat_line(vm), clear_area(vm), right_panel(vm), ws="fill", hs="fill", dir="row", gap=24)
+    # Right floats over the corner; in wide it is tall, so Right Room keeps the view clear of it.
+    room = shown_in(box("Right Room", w=168, h=1), WIDE)
+    top = box("Top", left, stat_line(vm), clear_area(vm), room, right_panel(vm), ws="fill", hs="fill", dir="row", gap=24)
     per_class(top.meta["style"], "flexDirectionValue", [("uint", 2), ("uint", 2), ("uint", 0)])
     touch = shown_in(box("Touch Help", label(TOUCH_HELP, 11, FAINT, LIGHT, 0.2, fill=True, name="Help"), ws="fill",
                          pad=(10, 0, 0, 0)), COMPACT)

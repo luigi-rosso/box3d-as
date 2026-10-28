@@ -26,7 +26,7 @@ export function sizeClass(width: f32, height: f32): i32 {
 }
 
 // The panels grow and shrink with the window's smaller side, 800 points being 1.
-export function uiScale(width: f32, height: f32): f32 {
+export function uiScaleFor(width: f32, height: f32): f32 {
     return Mathf.min(Mathf.max(Mathf.min(width, height) / 800, 0.85), 1.3);
 }
 
@@ -89,7 +89,7 @@ export class Shell {
 
     // Picks the size class and scale for a window size.
     fit(width: f32, height: f32): void {
-        let scale = uiScale(width, height);
+        let scale = uiScaleFor(width, height);
         this.layoutClass.value = <f64>sizeClass(width, height);
         this.uiScale.value = <f64>scale;
         this.uiWidth.value = <f64>(width / scale);

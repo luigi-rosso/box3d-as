@@ -475,3 +475,13 @@ the view model (`direction="true"`). Inside a `LayoutComponent` scaled by 0.96, 
 points (279 laid out reads 267.8) while the size stays in the box's own units (567.7, not 545). The script multiplies
 the size by the scale it set. Done looks like: a computed root size beside the root position, or the schema saying
 which space each computed value is in.
+
+## A box keyed to absolute as it comes back from display none lands at the left
+
+In `demo/shell.rml` as of 5e4554c, the stats panel was relative and hidden (`displayValue` none) in the
+compact class and keyed to `flex` and `positionTypeValue` absolute, with `positionTop` and `positionRight` 0 authored,
+in medium. Starting in medium it sat in the top right corner, and a switch from wide to medium put it there too, but
+a switch from compact to medium (a window widened past 720) laid it out at the left edge of its row, over the title
+and the scene list. Repro headless: `--viewport=914x800 --advance=10 --data=layoutClass=2 --advance=10
+--data=layoutClass=1 --advance=10`. Workaround: author it absolute and key only its display. Done looks like: the
+insets apply whichever frame the position type changes in.

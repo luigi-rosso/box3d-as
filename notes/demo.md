@@ -123,7 +123,8 @@ front to back (in RML an earlier sibling draws on top):
 | `Top` / `Left` | title block, then the seven scene rows (196 by 26, 4 apart) or, compact, the `Chips` (seven 34 by 26 chips and the open scene's name), then a 24 point rule and the wrapped description |
 | `Top` / `Stat Line` | compact only: STEP, DRAW, BODIES, AWAKE as runs of one text |
 | `Top` / `Clear` | a fill box between the panels; its computed bounds are bound back into `clearX`.. `clearHeight` |
-| `Top` / `Right` | 168 wide: STEP and DRAW, a rule, the six counts, a rule, B3 PROFILE with its stacked bar and one row per part |
+| `Top` / `Right Room` | wide only: an empty 168 column that keeps `Clear` off the right panel |
+| `Top` / `Right` | absolute in the top right corner, 168 wide: STEP and DRAW, a rule, the six counts, a rule, B3 PROFILE with its stacked bar and one row per part |
 | `Touch Help` | compact only: drag to orbit, pinch to zoom, tap a body to pick |
 | `Bottom` | pause, step, reset (34 square), the Pick and Shoot pair in one outline, the PAUSED tag, and the key help, right aligned, filling the rest and wrapping upward when narrow (each hint holds together with no break spaces) |
 | `Scrim Left`, `Scrim Right`, `Scrim Top`, `Scrim Bottom` | gradients that keep the panels legible over the scene; the side pair outside compact, the top and bottom pair in it; they scale with the overlay |
@@ -146,7 +147,7 @@ sharing `scene`.
 
 ### Size classes
 
-On `resize` the script picks a class and a scale (`sizeClass` and `uiScale`
+On `resize` the script picks a class and a scale (`sizeClass` and `uiScaleFor`
 in `demo/shell.as`, window size in points):
 
 | Class | `layoutClass` | When | Shows |
@@ -162,8 +163,12 @@ so text stays vector sharp; the class is picked from the unscaled size.
 One state machine layer, `Size`, has a state per class, entered with no
 crossfade when `layoutClass` changes. Its states key what `per_class` and
 `shown_in` gathered in the generator: `displayValue` to show and hide boxes
-(a hidden box is out of hit testing too), `Top`'s `flexDirectionValue` (row,
-or column in compact) and `Right`'s `positionTypeValue` (absolute in medium).
+(a hidden box is out of hit testing too) and `Top`'s `flexDirectionValue`
+(row, or column in compact). `Right` is absolute in every class rather than
+keyed absolute in medium: a box keyed to absolute in the frame it comes back
+from `display: none` is laid out at the left edge, which put the medium stats
+over the title after a resize out of compact. Wide holds its column open with
+`Right Room` instead.
 
 ### Camera fit
 
