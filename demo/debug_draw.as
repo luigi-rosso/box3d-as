@@ -1,8 +1,10 @@
-// Debug draw for the physics demo: 3D shapes flattened to 2D paths through an
-// orbit camera. Shapes are recorded between begin() and end(), then painted
-// back to front: static shapes first, then their shadows, then everything else
-// sorted per face, then lines, points and labels on top. Box and hull faces that
-// overlap on screen are then ordered by their depths inside the overlap.
+// Debug draw for the physics demo. With a GpuDraw, solids, shadows and the
+// grid render instanced on the GPU with a depth buffer. Without one, 3D shapes
+// are flattened to 2D paths through an orbit camera. Shapes are recorded between
+// begin() and end(), then painted back to front: static shapes first, then their
+// shadows, then everything else sorted per face. Box and hull faces that overlap
+// on screen are then ordered by their depths inside the overlap. Lines, points
+// and labels go on top through the vector renderer either way.
 
 import { Renderer } from "rive/renderer";
 import { Paint, PaintStyle, StrokeJoin, StrokeCap } from "rive/paint";
@@ -13,6 +15,7 @@ import { Color } from "rive/color";
 import { Font, Text, TextRunStyle } from "rive/text";
 import { Vec3, Xf, v3, add, sub, scale, dot, cross, length, normalize, rotate, xfPoint, clampf } from "./vec";
 import { OrbitCamera } from "./camera";
+import { GpuDraw, GpuMesh, MeshWriter } from "./gpu_draw";
 
 // Body states, as Box3D reports them. Or STATE_SELECTED into any of them.
 export const STATE_AWAKE: i32 = 0;
@@ -74,6 +77,7 @@ export class DebugHull {
     faceIndex: StaticArray<i32>;
     normals: StaticArray<Vec3>;
     radius: f32 = 0;
+    gpu: GpuMesh? = null;
 
     // faceStart has one entry per face plus a final end offset into faceIndex.
     constructor(points: StaticArray<Vec3>, faceStart: StaticArray<i32>, faceIndex: StaticArray<i32>) {
@@ -95,6 +99,23 @@ export class DebugHull {
     get faceCount(): i32 {
         return this.faceStart.length - 1;
     }
+
+    gpuMesh(): GpuMesh? {
+        if (this.gpu == null) {
+            let w = new MeshWriter();
+            let loop = new StaticArray<Vec3>(MAX_CLIP);
+            for (let f = 0; f < this.faceCount; f++) {
+                let s = this.faceStart[f];
+                let n = min(this.faceStart[f + 1] - s, MAX_CLIP);
+                for (let i = 0; i < n; i++) {
+                    loop[i] = this.points[this.faceIndex[s + i]];
+                }
+                w.polygon(loop, n, this.normals[f]);
+            }
+            this.gpu = w.finish();
+        }
+        return this.gpu;
+    }
 }
 
 // A triangle mesh, counter clockwise seen from the front.
@@ -102,6 +123,7 @@ export class DebugMesh {
     vertices: StaticArray<Vec3>;
     indices: StaticArray<i32>;
     normals: StaticArray<Vec3>;
+    gpu: GpuMesh? = null;
 
     constructor(vertices: StaticArray<Vec3>, indices: StaticArray<i32>) {
         this.vertices = vertices;
@@ -119,6 +141,18 @@ export class DebugMesh {
     get triangleCount(): i32 {
         return this.indices.length / 3;
     }
+
+    gpuMesh(): GpuMesh? {
+        if (this.gpu == null) {
+            let w = new MeshWriter();
+            for (let t = 0; t < this.triangleCount; t++) {
+                w.triangle(this.vertices[this.indices[3 * t]], this.vertices[this.indices[3 * t + 1]],
+                    this.vertices[this.indices[3 * t + 2]], this.normals[t], true, true, true);
+            }
+            this.gpu = w.finish();
+        }
+        return this.gpu;
+    }
 }
 
 // Heights on a countX by countZ grid, row major along x, scaled per axis, the
@@ -130,6 +164,7 @@ export class DebugHeightField {
     heights: StaticArray<f32>;
     // Optional, one per cell, (countX - 1) * (countZ - 1); true skips the cell.
     holes: StaticArray<bool>? = null;
+    gpu: GpuMesh? = null;
 
     constructor(countX: i32, countZ: i32, scale: Vec3, heights: StaticArray<f32>) {
         this.countX = countX;
@@ -141,6 +176,39 @@ export class DebugHeightField {
     @inline point(i: i32, k: i32): Vec3 {
         return Vec3(<f32>i * this.scale.x, this.heights[k * this.countX + i] * this.scale.y, <f32>k * this.scale.z);
     }
+
+    gpuMesh(): GpuMesh? {
+        if (this.gpu == null) {
+            let w = new MeshWriter();
+            let holes = this.holes;
+            for (let k = 0; k + 1 < this.countZ; k++) {
+                for (let i = 0; i + 1 < this.countX; i++) {
+                    if (holes != null && holes[k * (this.countX - 1) + i]) {
+                        continue;
+                    }
+                    let a = this.point(i, k);
+                    let b = this.point(i + 1, k);
+                    let c = this.point(i + 1, k + 1);
+                    let d = this.point(i, k + 1);
+                    w.triangle(a, d, c, normalize(cross(sub(d, a), sub(c, a))), true, true, true);
+                    w.triangle(a, c, b, normalize(cross(sub(c, a), sub(b, a))), true, true, true);
+                }
+            }
+            this.gpu = w.finish();
+        }
+        return this.gpu;
+    }
+}
+
+const UNIT: Vec3 = Vec3(1, 1, 1);
+
+@inline function isStatic(state: i32): bool {
+    return (state & 15) == STATE_STATIC;
+}
+
+// The GPU draws the grid on ground faces, marked by a clear alpha.
+function groundInk(c: Color, state: i32): Color {
+    return isStatic(state) && (state & STATE_STANDING) == 0 ? c & 0x00ffffff : c;
 }
 
 function newellNormal(points: StaticArray<Vec3>, index: StaticArray<i32>, start: i32, end: i32): Vec3 {
@@ -256,6 +324,8 @@ export class DebugDraw {
     // Set by the shell; scenes read them to decide what to overlay.
     showContacts: bool = false;
     showJoints: bool = true;
+    // Solids go to the GPU when set; the vector painter otherwise.
+    gpu: GpuDraw? = null;
 
     // Counts of the last frame.
     primCount: i32 = 0;
@@ -352,6 +422,18 @@ export class DebugDraw {
         this.points = 0;
         this.labels = 0;
         this.droppedCount = 0;
+        let gpu = this.gpu;
+        if (gpu != null) {
+            gpu.begin();
+        }
+    }
+
+    // Device pixels per point, for the GPU canvas.
+    setScale(scale: f32): void {
+        let gpu = this.gpu;
+        if (gpu != null) {
+            gpu.scale = scale;
+        }
     }
 
     // ---- solids -----------------------------------------------------------
@@ -366,6 +448,12 @@ export class DebugDraw {
         }
         let base = this.stateColor(color, state);
         let layer = this.layerFor(state);
+        let gpu = this.gpu;
+        if (gpu != null) {
+            gpu.box(xf, halfExtents, groundInk(base, state), this.edgeColor(base, state), isStatic(state));
+            this.solidShadow(xf.p, length(halfExtents) * 0.85, layer, state);
+            return;
+        }
         // Each face as a loop over the two other axes, bit masks per axis.
         for (let axis = 0; axis < 3; axis++) {
             let bitA = 1 << axis;
@@ -382,14 +470,21 @@ export class DebugDraw {
                 this.face(4, n, base, state, layer, false, true);
             }
         }
-        if (this.shadows && layer == LAYER_MAIN && (state & 15) != STATE_STATIC) {
-            this.shadow(xf.p, length(halfExtents) * 0.85, this.shadowY);
-        }
+        this.solidShadow(xf.p, length(halfExtents) * 0.85, layer, state);
     }
 
     hull(xf: Xf, hull: DebugHull, color: Color, state: i32): void {
         let base = this.stateColor(color, state);
         let layer = this.layerFor(state);
+        let gpu = this.gpu;
+        if (gpu != null) {
+            let mesh = hull.gpuMesh();
+            if (mesh != null) {
+                gpu.flat(mesh, xf, UNIT, groundInk(base, state), this.edgeColor(base, state), isStatic(state));
+            }
+            this.solidShadow(xf.p, hull.radius * 0.8, layer, state);
+            return;
+        }
         let faceCount = hull.faceCount;
         for (let f = 0; f < faceCount; f++) {
             let s = hull.faceStart[f];
@@ -403,14 +498,19 @@ export class DebugDraw {
             }
             this.face(n, rotate(xf.q, hull.normals[f]), base, state, layer, false, true);
         }
-        if (this.shadows && layer == LAYER_MAIN && (state & 15) != STATE_STATIC) {
-            this.shadow(xf.p, hull.radius * 0.8, this.shadowY);
-        }
+        this.solidShadow(xf.p, hull.radius * 0.8, layer, state);
     }
 
     sphere(xf: Xf, center: Vec3, radius: f32, color: Color, state: i32): void {
         let cam = this.camera;
         let p = xfPoint(xf, center);
+        let gpu = this.gpu;
+        if (gpu != null) {
+            let base = this.stateColor(color, state);
+            gpu.round(p, p, radius, xf.q, base, this.edgeColor(base, state), isStatic(state));
+            this.solidShadow(p, radius, this.layerFor(state), state);
+            return;
+        }
         let c = cam.toCamera(p);
         if (c.z < cam.near + radius * 0.5) {
             return;
@@ -438,15 +538,22 @@ export class DebugDraw {
         let ringInk = withAlpha(scaleColor(base, 0.45), 0.85);
         this.ring(p, rotate(xf.q, v3(0, 1, 0)), radius, ringDepth, ringInk, layer);
         this.ring(p, rotate(xf.q, v3(1, 0, 0)), radius, ringDepth, ringInk, layer);
-        if (this.shadows && layer == LAYER_MAIN && (state & 15) != STATE_STATIC) {
-            this.shadow(p, radius, this.shadowY);
-        }
+        this.solidShadow(p, radius, layer, state);
     }
 
     capsule(xf: Xf, center1: Vec3, center2: Vec3, radius: f32, color: Color, state: i32): void {
         let cam = this.camera;
         let p1 = xfPoint(xf, center1);
         let p2 = xfPoint(xf, center2);
+        let gpu = this.gpu;
+        if (gpu != null) {
+            let base = this.stateColor(color, state);
+            let layer = this.layerFor(state);
+            gpu.round(p1, p2, radius, xf.q, base, this.edgeColor(base, state), isStatic(state));
+            this.solidShadow(p1, radius, layer, state);
+            this.solidShadow(p2, radius, layer, state);
+            return;
+        }
         let c1 = cam.toCamera(p1);
         let c2 = cam.toCamera(p2);
         if (c1.z < cam.near + radius * 0.5 || c2.z < cam.near + radius * 0.5) {
@@ -478,15 +585,21 @@ export class DebugDraw {
         let ringInk = withAlpha(scaleColor(base, 0.45), 0.85);
         this.ring(p1, axis, radius, depth - radius * 0.02, ringInk, layer);
         this.ring(p2, axis, radius, depth - radius * 0.02, ringInk, layer);
-        if (this.shadows && layer == LAYER_MAIN && (state & 15) != STATE_STATIC) {
-            this.shadow(p1, radius, this.shadowY);
-            this.shadow(p2, radius, this.shadowY);
-        }
+        this.solidShadow(p1, radius, layer, state);
+        this.solidShadow(p2, radius, layer, state);
     }
 
     mesh(xf: Xf, mesh: DebugMesh, color: Color, state: i32): void {
         let base = this.stateColor(color, state);
         let layer = this.layerFor(state);
+        let gpu = this.gpu;
+        if (gpu != null) {
+            let m = mesh.gpuMesh();
+            if (m != null) {
+                gpu.flat(m, xf, UNIT, groundInk(base, state), this.edgeColor(base, state), isStatic(state));
+            }
+            return;
+        }
         let n = mesh.triangleCount;
         let stride = 1;
         while (n / stride > MESH_FACE_CAP) {
@@ -503,6 +616,14 @@ export class DebugDraw {
     heightField(xf: Xf, field: DebugHeightField, color: Color, state: i32): void {
         let base = this.stateColor(color, state);
         let layer = this.layerFor(state);
+        let gpu = this.gpu;
+        if (gpu != null) {
+            let m = field.gpuMesh();
+            if (m != null) {
+                gpu.flat(m, xf, UNIT, groundInk(base, state), this.edgeColor(base, state), isStatic(state));
+            }
+            return;
+        }
         let cells = (field.countX - 1) * (field.countZ - 1);
         let stride = 1;
         while (2 * cells / (stride * stride) > MESH_FACE_CAP) {
@@ -606,6 +727,12 @@ export class DebugDraw {
             return;
         }
         let spread: f32 = radius * (1.0 + 0.12 * Mathf.max(h - radius, 0));
+        let gpu = this.gpu;
+        if (gpu != null) {
+            // Shadows on uneven ground lift toward the eye, out of the slopes under them.
+            gpu.shadow(v3(p.x, groundY, p.z), spread, 0.26 * fade, this.shadows ? 0 : spread * 0.8);
+            return;
+        }
         let cam = this.camera;
         let n = 16;
         let i = this.alloc(K_SHADOW, 2 * n + 1, 0, withAlpha(0xFF000000, 0.26 * fade), 0, LAYER_SHADOW);
@@ -635,6 +762,19 @@ export class DebugDraw {
 
     end(renderer: Renderer): void {
         this.drawCalls = 0;
+        let gpu = this.gpu;
+        if (gpu != null) {
+            if (this.showGrid) {
+                gpu.grid(Mathf.round(this.camera.target.x), Mathf.round(this.camera.target.z), <f32>this.gridExtent);
+            }
+            gpu.render(renderer, this.camera, this.lightDir, INK_GRID, INK_GRID_MAJOR);
+            this.primCount = gpu.triangles;
+            this.droppedCount += gpu.dropped;
+            this.drawLines(renderer);
+            this.drawPoints(renderer);
+            this.drawLabels(renderer);
+            return;
+        }
         this.primCount = this.prims;
         this.paintLayer(renderer, LAYER_STATIC);
         if (this.showGrid) {
@@ -648,6 +788,12 @@ export class DebugDraw {
     }
 
     // ---- internals --------------------------------------------------------
+
+    private solidShadow(p: Vec3, radius: f32, layer: i32, state: i32): void {
+        if (this.shadows && layer == LAYER_MAIN && (state & 15) != STATE_STATIC) {
+            this.shadow(p, radius, this.shadowY);
+        }
+    }
 
     private layerFor(state: i32): i32 {
         return (state & 15) == STATE_STATIC && (state & STATE_STANDING) == 0 ? LAYER_STATIC : LAYER_MAIN;

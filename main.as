@@ -12,6 +12,7 @@ import { clock } from "rive/os";
 import { formatFixed, formatInt } from "rive/format";
 import { OrbitCamera } from "./demo/camera";
 import { DebugDraw, INK_BACKGROUND } from "./demo/debug_draw";
+import { GpuDraw } from "./demo/gpu_draw";
 import { DemoScene, SceneStats } from "./demo/scene";
 import { makeScenes } from "./demo/scenes";
 import { Shell } from "./demo/shell";
@@ -96,6 +97,10 @@ export class Main extends Layout {
             this.dd.setFont(light(font));
         } else {
             context.log("box3d demo: InterVariable font missing, labels off");
+        }
+        // VECTOR_DRAW keeps the 2D painter.
+        if (!isDefined(VECTOR_DRAW)) {
+            this.dd.gpu = GpuDraw.create(context);
         }
         let start = 0;
         if (isDefined(START_SCENE)) {
@@ -188,6 +193,7 @@ export class Main extends Layout {
         this.width = <f32>width;
         this.height = <f32>height;
         this.camera.setViewport(this.width, this.height);
+        this.dd.setScale(<f32>scale);
         this.syncShell();
         let stops = new Array<GradientStop>();
         stops.push(GradientStop(0, 0xFF1D1C19));
