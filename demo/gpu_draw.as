@@ -9,7 +9,7 @@ import { Context } from "rive/host";
 import { Renderer } from "rive/renderer";
 import { Mat2D } from "rive/mat2d";
 import { BlendMode } from "rive/paint";
-import { ImageFilter, ImageSampler, ImageWrap } from "rive/image";
+import { Image, ImageFilter, ImageSampler, ImageWrap } from "rive/image";
 import {
     GPUBindGroup,
     GPUBindGroupLayout,
@@ -60,9 +60,13 @@ const MAX_SHADOWS: i32 = 4096;
 // Geometries one frame can draw; each gets a static and a moving batch.
 const MAX_MESHES: i32 = 256;
 
-// The unit capsule: rings of a sphere split at the equator into two caps.
-const ROUND_SEGMENTS: i32 = 40;
-const ROUND_RINGS: i32 = 10;
+// The unit capsule, rings of a sphere split at the equator into two caps,
+// in two levels of detail; rounds smaller on screen than DETAIL_PIXELS take the coarse one.
+const FINE_SEGMENTS: i32 = 40;
+const FINE_RINGS: i32 = 10;
+const COARSE_SEGMENTS: i32 = 16;
+const COARSE_RINGS: i32 = 4;
+const DETAIL_PIXELS: f32 = 14;
 
 // A geometry in a vertex buffer: position, normal and edge distances per
 // vertex, three vertices per triangle.
@@ -196,10 +200,10 @@ export class GpuDraw {
     dropped: i32 = 0;
 
     private canvas: GPUCanvas;
+    // Follows the canvas across resizes.
+    private image: Image;
     private samples: u32;
     private maxSize: u32;
-    private color: GPUTextureView? = null;
-    private depth: GPUTextureView? = null;
     private width: u32 = 0;
     private height: u32 = 0;
 
@@ -211,10 +215,10 @@ export class GpuDraw {
     private viewData: Float32Array = new Float32Array(VIEW_WORDS);
 
     private cube: GpuMesh;
-    private roundVertices: GPUBuffer;
-    private roundIndices: GPUBuffer;
-    private roundIndexCount: u32 = 0;
+    private fineRound: RoundMesh = makeRound(FINE_SEGMENTS, FINE_RINGS);
+    private coarseRound: RoundMesh = makeRound(COARSE_SEGMENTS, COARSE_RINGS);
 
+    private camera: OrbitCamera = new OrbitCamera();
     private frame: i32 = 0;
     private meshes: StaticArray<GpuMesh?> = new StaticArray<GpuMesh?>(MAX_MESHES);
     private meshCount: i32 = 0;
@@ -229,7 +233,7 @@ export class GpuDraw {
     private roundKeys: StaticArray<i32> = new StaticArray<i32>(MAX_ROUND);
     private roundStage: Float32Array = new Float32Array(MAX_ROUND * ROUND_WORDS);
     private roundData: Float32Array = new Float32Array(MAX_ROUND * ROUND_WORDS);
-    private roundStarts: StaticArray<i32> = new StaticArray<i32>(3);
+    private roundStarts: StaticArray<i32> = new StaticArray<i32>(5);
     private roundBuffer: GPUBuffer = new GPUBuffer(BufferUsage.vertex, <u32>(MAX_ROUND * ROUND_WORDS * 4));
     private rounds: i32 = 0;
 
@@ -268,6 +272,7 @@ export class GpuDraw {
 
     constructor(canvas: GPUCanvas, shader: GPUShaderModule, layout: GPUBindGroupLayout, samples: u32, maxSize: u32) {
         this.canvas = canvas;
+        this.image = canvas.image;
         this.samples = samples;
         this.maxSize = maxSize;
         let format = <TextureFormat>canvas.format;
@@ -306,10 +311,6 @@ export class GpuDraw {
         this.group = new GPUBindGroup(layout, [new GPUBindGroupUBO(0, this.viewBuffer)]);
 
         this.cube = makeCube();
-        let round = makeRound();
-        this.roundVertices = round.vertices;
-        this.roundIndices = round.indices;
-        this.roundIndexCount = round.count;
 
         this.attachment.loadOp = LoadOp.clear;
         this.attachment.clearA = 0;
@@ -345,7 +346,8 @@ export class GpuDraw {
         return new GPUPipeline(desc);
     }
 
-    begin(): void {
+    begin(camera: OrbitCamera): void {
+        this.camera = camera;
         this.frame++;
         this.meshCount = 0;
         this.flats = 0;
@@ -400,8 +402,11 @@ export class GpuDraw {
             this.dropped++;
             return;
         }
+        let cam = this.camera;
+        let near = Mathf.min(cam.toCamera(c1).z, cam.toCamera(c2).z);
+        let fine = cam.focal * radius * this.scale > DETAIL_PIXELS * Mathf.max(near, cam.near);
         let i = this.rounds++;
-        this.roundKeys[i] = still ? 0 : 1;
+        this.roundKeys[i] = (still ? 0 : 2) + (fine ? 1 : 0);
         let d = this.roundStage;
         let o = i * ROUND_WORDS;
         d[o] = c1.x;
@@ -460,14 +465,13 @@ export class GpuDraw {
             }
             this.width = pw;
             this.height = ph;
-            this.color = this.samples > 1 ? renderTexture(pw, ph, <TextureFormat>canvas.format, this.samples) : null;
-            this.depth = renderTexture(pw, ph, DEPTH_FORMAT, this.samples);
+            this.attach(canvas);
         }
         this.writeView(camera, light, minorInk, majorInk);
 
         let flatKeyCount = 2 * this.meshCount;
         groupByKey(this.flatKeys, this.flatStage, this.flatData, this.flats, FLAT_WORDS, flatKeyCount, this.flatStarts);
-        groupByKey(this.roundKeys, this.roundStage, this.roundData, this.rounds, ROUND_WORDS, 2, this.roundStarts);
+        groupByKey(this.roundKeys, this.roundStage, this.roundData, this.rounds, ROUND_WORDS, 4, this.roundStarts);
         if (this.flats > 0) {
             this.flatBuffer.update(0, this.flatData.buffer, <u32>(this.flats * FLAT_WORDS * 4));
         }
@@ -478,17 +482,6 @@ export class GpuDraw {
             this.shadowBuffer.update(0, this.shadowData.buffer, <u32>(this.shadows * SHADOW_WORDS * 4));
         }
 
-        let a = this.attachment;
-        if (this.samples > 1) {
-            a.view = this.color;
-            a.resolveTarget = canvas.colorView();
-            a.storeOp = StoreOp.discard;
-        } else {
-            a.view = null;
-            a.resolveTarget = null;
-            a.storeOp = StoreOp.store;
-        }
-        this.passDesc.depthView = this.depth;
         let pass = canvas.beginRenderPass(this.passDesc, this.pass);
         this.pass = pass;
         pass.setBindGroup(0, this.group);
@@ -506,8 +499,22 @@ export class GpuDraw {
 
         renderer.save();
         renderer.transform(Mat2D(camera.width / <f32>pw, 0, 0, camera.height / <f32>ph, 0, 0));
-        renderer.drawImage(canvas.image, this.sampler, BlendMode.srcOver, 1);
+        renderer.drawImage(this.image, this.sampler, BlendMode.srcOver, 1);
         renderer.restore();
+    }
+
+    // Targets sized to the canvas: multisampled color resolving into it, and depth.
+    private attach(canvas: GPUCanvas): void {
+        let a = this.attachment;
+        if (this.samples > 1) {
+            a.view = renderTexture(this.width, this.height, <TextureFormat>canvas.format, this.samples);
+            a.resolveTarget = canvas.colorView();
+            a.storeOp = StoreOp.discard;
+        } else {
+            a.view = null;
+            a.storeOp = StoreOp.store;
+        }
+        this.passDesc.depthView = renderTexture(this.width, this.height, DEPTH_FORMAT, this.samples);
     }
 
     private pixels(points: f32): u32 {
@@ -537,17 +544,22 @@ export class GpuDraw {
     }
 
     private drawRounds(pass: GPURenderPass, layer: i32): void {
+        this.drawRound(pass, 2 * layer, this.coarseRound);
+        this.drawRound(pass, 2 * layer + 1, this.fineRound);
+    }
+
+    private drawRound(pass: GPURenderPass, key: i32, mesh: RoundMesh): void {
         let starts = this.roundStarts;
-        let n = starts[layer + 1] - starts[layer];
+        let n = starts[key + 1] - starts[key];
         if (n <= 0) {
             return;
         }
         pass.setPipeline(this.roundPipeline);
-        pass.setVertexBuffer(0, this.roundVertices);
-        pass.setVertexBuffer(1, this.roundBuffer, <u32>(starts[layer] * ROUND_WORDS * 4));
-        pass.setIndexBuffer(this.roundIndices, <u32>IndexFormat.uint16);
-        pass.drawIndexed(this.roundIndexCount, <u32>n);
-        this.triangles += n * <i32>(this.roundIndexCount / 3);
+        pass.setVertexBuffer(0, mesh.vertices);
+        pass.setVertexBuffer(1, this.roundBuffer, <u32>(starts[key] * ROUND_WORDS * 4));
+        pass.setIndexBuffer(mesh.indices, <u32>IndexFormat.uint16);
+        pass.drawIndexed(mesh.count, <u32>n);
+        this.triangles += n * <i32>(mesh.count / 3);
     }
 
     private writeView(camera: OrbitCamera, light: Vec3, minorInk: u32, majorInk: u32): void {
@@ -642,20 +654,20 @@ class RoundMesh {
 
 // Two hemispheres of unit directions, each tagged with the cap it belongs
 // to, joined at the equator by a band that stretches into a capsule's side.
-function makeRound(): RoundMesh {
-    let columns = ROUND_SEGMENTS + 1;
+function makeRound(segments: i32, rings: i32): RoundMesh {
+    let columns = segments + 1;
     // Rows from the first cap's pole to its equator, then the second cap's equator to its pole.
-    let rows = 2 * (ROUND_RINGS + 1);
+    let rows = 2 * (rings + 1);
     let vertices = new Float32Array(rows * columns * 4);
     let o = 0;
     for (let row = 0; row < rows; row++) {
-        let second = row > ROUND_RINGS;
+        let second = row > rings;
         let ring = second ? row - 1 : row;
-        let phi: f32 = -1.5707964 + 3.1415927 * <f32>ring / <f32>(2 * ROUND_RINGS);
+        let phi: f32 = -1.5707964 + 3.1415927 * <f32>ring / <f32>(2 * rings);
         let y = Mathf.sin(phi);
         let r = Mathf.cos(phi);
         for (let c = 0; c < columns; c++) {
-            let theta: f32 = 6.2831853 * <f32>c / <f32>ROUND_SEGMENTS;
+            let theta: f32 = 6.2831853 * <f32>c / <f32>segments;
             vertices[o] = r * Mathf.cos(theta);
             vertices[o + 1] = y;
             vertices[o + 2] = -r * Mathf.sin(theta);
@@ -663,11 +675,11 @@ function makeRound(): RoundMesh {
             o += 4;
         }
     }
-    let count = (rows - 1) * ROUND_SEGMENTS * 6;
+    let count = (rows - 1) * segments * 6;
     let indices = new Uint16Array(count);
     let k = 0;
     for (let row = 0; row + 1 < rows; row++) {
-        for (let c = 0; c < ROUND_SEGMENTS; c++) {
+        for (let c = 0; c < segments; c++) {
             let a = <u16>(row * columns + c);
             let b = <u16>(row * columns + c + 1);
             let e = <u16>((row + 1) * columns + c);

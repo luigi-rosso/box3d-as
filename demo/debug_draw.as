@@ -424,7 +424,7 @@ export class DebugDraw {
         this.droppedCount = 0;
         let gpu = this.gpu;
         if (gpu != null) {
-            gpu.begin();
+            gpu.begin(camera);
         }
     }
 

@@ -71,6 +71,9 @@ export class Main extends Layout {
     logMax: f64 = 0;
     logCount: i32 = 0;
     logSeconds: i32 = 0;
+    drawSum: f64 = 0;
+    drawMax: f64 = 0;
+    drawCount: i32 = 0;
 
     // Pointer state.
     drag: i32 = DRAG_NONE;
@@ -295,7 +298,23 @@ export class Main extends Layout {
         dd.end(renderer);
         let ms = (clock() - t0) * 1000;
         this.drawMs = this.drawMs == 0 ? ms : this.drawMs * 0.9 + ms * 0.1;
+        if (isDefined(DRAW_LOG)) {
+            this.logDraw(ms);
+        }
+    }
 
+    // Mean and max draw over each 120 frames, for timing the renderers headless with --bench.
+    private logDraw(ms: f64): void {
+        this.drawSum += ms;
+        this.drawMax = Math.max(this.drawMax, ms);
+        this.drawCount++;
+        if (this.drawCount == 120) {
+            this.context!.log("draw " + this.scenes[this.current].name() + " mean " + formatFixed(this.drawSum / 120, 3) +
+                " max " + formatFixed(this.drawMax, 3) + " prims " + formatInt(<f64>this.dd.primCount));
+            this.drawSum = 0;
+            this.drawMax = 0;
+            this.drawCount = 0;
+        }
     }
 
     // ---- input ------------------------------------------------------------
