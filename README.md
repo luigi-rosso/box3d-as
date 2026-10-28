@@ -3,6 +3,9 @@
 Box3D, Erin Catto's 3D physics engine, ported to AnimaScript as a Rive scripting library. It keeps Box3D's C API
 names, and every result matches native Box3D bit for bit, step for step.
 
+**Live demo: [box3d-demo-wlepqf.rive.to](https://box3d-demo-wlepqf.rive.to).** Seven interactive scenes running in the
+browser: drag to orbit, grab and throw bodies, Tab to shoot.
+
 Upstream: [erincatto/box3d](https://github.com/erincatto/box3d) at `f36d061ba26998c87cb7dc593a4065aaa03fb7eb` (v0.1.0
 plus fixes). Box3D is MIT licensed. The port keeps that licence and Erin Catto's copyright on every file (`LICENSE`).
 
