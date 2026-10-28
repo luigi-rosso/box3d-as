@@ -38,6 +38,10 @@ export class ViewSpan {
     private x1: f32 = 0;
     private y0: f32 = 0;
     private y1: f32 = 0;
+    private nx0: f32 = 1;
+    private nx1: f32 = 1;
+    private ny0: f32 = 1;
+    private ny1: f32 = 1;
 
     reset(camera: OrbitCamera): void {
         this.camera = camera;
@@ -50,6 +54,10 @@ export class ViewSpan {
         this.x1 = (camera.width - camera.cx) / f;
         this.y0 = (camera.cy - camera.height) / f;
         this.y1 = camera.cy / f;
+        this.nx0 = Mathf.sqrt(1 + this.x0 * this.x0);
+        this.nx1 = Mathf.sqrt(1 + this.x1 * this.x1);
+        this.ny0 = Mathf.sqrt(1 + this.y0 * this.y0);
+        this.ny1 = Mathf.sqrt(1 + this.y1 * this.y1);
     }
 
     get empty(): bool {
@@ -64,18 +72,14 @@ export class ViewSpan {
             return;
         }
         let c = this.camera.toCamera(center);
-        if (c.z + radius < this.camera.near || outside(c.x, c.z, this.x0, this.x1, radius) ||
-            outside(c.y, c.z, this.y0, this.y1, radius)) {
+        if (c.z + radius < this.camera.near || c.x - this.x0 * c.z < -radius * this.nx0 ||
+            this.x1 * c.z - c.x < -radius * this.nx1 || c.y - this.y0 * c.z < -radius * this.ny0 ||
+            this.y1 * c.z - c.y < -radius * this.ny1) {
             return;
         }
         this.near = Mathf.min(this.near, c.z - radius);
         this.far = Mathf.max(this.far, c.z + radius);
     }
-}
-
-// Whether a sphere at a, depth z, lies past the side planes a = s0 z or a = s1 z.
-function outside(a: f32, z: f32, s0: f32, s1: f32, radius: f32): bool {
-    return (a - s0 * z) < -radius * Mathf.sqrt(1 + s0 * s0) || (s1 * z - a) < -radius * Mathf.sqrt(1 + s1 * s1);
 }
 
 export class ShadowCascades {

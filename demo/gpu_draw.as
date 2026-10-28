@@ -503,13 +503,15 @@ export class GpuDraw {
             mesh.slot = this.meshCount;
             this.meshes[this.meshCount++] = mesh;
         }
-        // Its bounds: the local box turned and scaled.
-        let q = xf.q;
-        let ry = Vec3(2 * (q.x * q.y + q.w * q.z), 1 - 2 * (q.x * q.x + q.z * q.z), 2 * (q.y * q.z - q.w * q.x));
-        let h = Vec3(mesh.half.x * scale.x, mesh.half.y * scale.y, mesh.half.z * scale.z);
-        let center = add(xf.p, rotate(q, Vec3(mesh.center.x * scale.x, mesh.center.y * scale.y, mesh.center.z * scale.z)));
-        let rise = Mathf.abs(ry.x * h.x) + Mathf.abs(ry.y * h.y) + Mathf.abs(ry.z * h.z);
-        this.span.add(center, length(h), center.y - rise, center.y + rise);
+        if (this.castsShadows) {
+            // Its bounds: the local box turned and scaled.
+            let q = xf.q;
+            let ry = Vec3(2 * (q.x * q.y + q.w * q.z), 1 - 2 * (q.x * q.x + q.z * q.z), 2 * (q.y * q.z - q.w * q.x));
+            let h = Vec3(mesh.half.x * scale.x, mesh.half.y * scale.y, mesh.half.z * scale.z);
+            let center = add(xf.p, rotate(q, Vec3(mesh.center.x * scale.x, mesh.center.y * scale.y, mesh.center.z * scale.z)));
+            let rise = Mathf.abs(ry.x * h.x) + Mathf.abs(ry.y * h.y) + Mathf.abs(ry.z * h.z);
+            this.span.add(center, length(h), center.y - rise, center.y + rise);
+        }
         let i = this.flats++;
         this.flatKeys[i] = 2 * mesh.slot + (still ? 0 : 1);
         let d = this.flatStage;
@@ -538,9 +540,10 @@ export class GpuDraw {
         let cam = this.camera;
         let near = Mathf.min(cam.toCamera(c1).z, cam.toCamera(c2).z);
         let fine = cam.focal * radius * this.scale > DETAIL_PIXELS * Mathf.max(near, cam.near);
-        let mid = lerp3(c1, c2, 0.5);
-        this.span.add(mid, length(sub(c2, c1)) * 0.5 + radius, Mathf.min(c1.y, c2.y) - radius,
-            Mathf.max(c1.y, c2.y) + radius);
+        if (this.castsShadows) {
+            this.span.add(lerp3(c1, c2, 0.5), length(sub(c2, c1)) * 0.5 + radius, Mathf.min(c1.y, c2.y) - radius,
+                Mathf.max(c1.y, c2.y) + radius);
+        }
         let i = this.rounds++;
         this.roundKeys[i] = (still ? 0 : 2) + (fine ? 1 : 0);
         let d = this.roundStage;
@@ -685,7 +688,9 @@ export class GpuDraw {
             pass.setBindGroup(0, this.casterGroups[c]);
             for (let layer = 0; layer < 2; layer++) {
                 this.drawFlats(pass, layer, this.flatCaster);
-                this.drawRounds(pass, layer, this.roundCaster);
+                // Past the first cascade a texel spans more than the fine mesh's facets.
+                this.drawRound(pass, 2 * layer, this.coarseRound, this.roundCaster);
+                this.drawRound(pass, 2 * layer + 1, c == 0 ? this.fineRound : this.coarseRound, this.roundCaster);
             }
         }
         pass.finish();
