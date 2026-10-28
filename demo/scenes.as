@@ -11,6 +11,8 @@ import { PhysicsScene, addGroundBox, takeFirst } from "./physics";
 import { createHuman } from "./human";
 import { CharacterMover } from "./mover";
 import { toVec3, toB3, toXf, fieldHeight } from "./b3view";
+import { g_threads } from "./threads";
+import { b3EnableTrace, b3GetTraceBegin, b3GetTraceEnd, b3TraceBegin, b3TraceEnd } from "../lib/trace";
 import {
     B3_DEG_TO_RAD,
     B3_PI,
@@ -58,7 +60,9 @@ import {
     b3Vec3_one,
     b3Vec3_zero,
     b3_dynamicBody,
+    b3_kinematicBody,
     b3_nullBodyId,
+    b3WorldDef,
 } from "../lib/box3d";
 
 // Terrain a step lighter than a ground box so its relief reads.
@@ -794,6 +798,136 @@ class CharacterScene extends PhysicsScene {
     }
 }
 
+// ---- threads ---------------------------------------------------------------
+
+const PIT_EXTENT: f32 = 9.0;
+const PIT_WALL: f32 = 1.1;
+const PIT_SIDE: i32 = 16;
+const PIT_LAYERS: i32 = 8;
+const PIT_SPIN: f32 = 0.45;
+
+// A walled pit of balls and capsules stirred by a kinematic paddle, with sleep off, so every step has about the same
+// work to share out; the panel picks what it is shared over and traces each step.
+class ThreadsScene extends PhysicsScene {
+    balls: Array<b3BodyId> = new Array<b3BodyId>();
+
+    name(): string {
+        return "Threads";
+    }
+
+    hint(): string {
+        return "2048 balls and capsules stirred by a paddle. Lanes copy each step out to jobs; parallel calls share the world's memory.";
+    }
+
+    home(camera: OrbitCamera): void {
+        camera.animateTo(v3(0, 0, 0), 30, 0.6, 0.8);
+    }
+
+    worldDef(): b3WorldDef {
+        let def = super.worldDef();
+        def.enableSleep = false;
+        return def;
+    }
+
+    reset(): void {
+        // The lanes hold the world being destroyed
+        g_threads.stop(this.worldId);
+        super.reset();
+        g_threads.detect();
+        g_threads.open = true;
+        g_threads.clearHistory();
+        b3EnableTrace(true);
+    }
+
+    leave(): void {
+        g_threads.stop(this.worldId);
+        g_threads.open = false;
+        b3EnableTrace(false);
+    }
+
+    build(): void {
+        this.crowd = true;
+        this.balls = new Array<b3BodyId>();
+        addGroundBox(this, PIT_EXTENT + 4);
+        let shapeDef = b3DefaultShapeDef();
+        // Walls in 2 m blocks, so each face sorts close to the balls beside it
+        let wallId = this.addStanding(b3DefaultBodyDef(), INK_GROUND);
+        let blocks = <i32>(PIT_EXTENT);
+        for (let side = 0; side < 4; side++) {
+            let sign: f32 = side % 2 == 0 ? -1.0 : 1.0;
+            let alongX = side < 2;
+            for (let k = 0; k < blocks; k++) {
+                let along: f32 = -PIT_EXTENT + 1.0 + 2.0 * <f32>k;
+                let at = alongX ? b3Vec3(along, PIT_WALL, sign * PIT_EXTENT) : b3Vec3(sign * PIT_EXTENT, PIT_WALL, along);
+                let transform = b3Transform(at, b3Quat_identity);
+                let wall = alongX ? b3MakeTransformedBoxHull(1.0, PIT_WALL, 0.2, transform)
+                    : b3MakeTransformedBoxHull(0.2, PIT_WALL, 1.0, transform);
+                b3CreateHullShape(wallId, shapeDef, wall.base);
+            }
+        }
+
+        let paddleDef = b3DefaultBodyDef();
+        paddleDef.type = b3_kinematicBody;
+        paddleDef.position = b3Vec3(0, 0.6, 0);
+        paddleDef.angularVelocity = b3Vec3(0, PIT_SPIN, 0);
+        let paddleId = this.addBody(paddleDef, INK_ACCENT);
+        b3CreateHullShape(paddleId, shapeDef, b3MakeBoxHull(PIT_EXTENT - 1.4, 0.6, 0.15).base);
+
+        let bodyDef = b3DefaultBodyDef();
+        bodyDef.type = b3_dynamicBody;
+        let pitch: f32 = (2.0 * PIT_EXTENT - 1.4) / <f32>PIT_SIDE;
+        let start: f32 = -0.5 * pitch * <f32>(PIT_SIDE - 1);
+        let n = 0;
+        for (let layer = 0; layer < PIT_LAYERS; layer++) {
+            for (let i = 0; i < PIT_SIDE; i++) {
+                for (let j = 0; j < PIT_SIDE; j++) {
+                    bodyDef.position = b3Vec3(start + pitch * <f32>i + this.random(-0.1, 0.1), 1.6 + 0.9 * <f32>layer,
+                        start + pitch * <f32>j + this.random(-0.1, 0.1));
+                    bodyDef.rotation = randomAxisAngle(this);
+                    let id = this.addBody(bodyDef, bodyInk(n));
+                    this.balls.push(id);
+                    if (n % 3 == 0) {
+                        shapeDef.baseMaterial.rollingResistance = 0.2;
+                        b3CreateCapsuleShape(id, shapeDef, b3Capsule(b3Vec3(0, -0.2, 0), b3Vec3(0, 0.2, 0), 0.22));
+                    } else {
+                        shapeDef.baseMaterial.rollingResistance = 0.1;
+                        b3CreateSphereShape(id, shapeDef, b3Sphere(b3Vec3_zero, 0.3));
+                    }
+                    n++;
+                }
+            }
+        }
+    }
+
+    preStep(dt: f32): void {
+        if (this.stepCount % 60 == 0) {
+            this.dropEscaped();
+        }
+        g_threads.apply(this.worldId);
+        b3TraceBegin();
+    }
+
+    // The paddle flings a few over the wall; they drop back in.
+    dropEscaped(): void {
+        let inside: f32 = PIT_EXTENT - 0.5;
+        for (let i = 0; i < this.balls.length; i++) {
+            let id = this.balls[i];
+            let p = b3Body_GetPosition(id);
+            if (Mathf.abs(p.x) < inside && Mathf.abs(p.z) < inside && p.y > -1) {
+                continue;
+            }
+            b3Body_SetTransform(id, b3Vec3(this.random(-4, 4), 5, this.random(-4, 4)), b3Quat_identity);
+            b3Body_SetLinearVelocity(id, b3Vec3_zero);
+            b3Body_SetAngularVelocity(id, b3Vec3_zero);
+        }
+    }
+
+    postStep(dt: f32): void {
+        b3TraceEnd();
+        g_threads.record((b3GetTraceEnd() - b3GetTraceBegin()) * 1000);
+    }
+}
+
 export function makeScenes(): Array<DemoScene> {
     let list = new Array<DemoScene>();
     list.push(new PyramidScene());
@@ -803,5 +937,6 @@ export function makeScenes(): Array<DemoScene> {
     list.push(new HeightFieldScene());
     list.push(new BulletScene());
     list.push(new CharacterScene());
+    list.push(new ThreadsScene());
     return list;
 }

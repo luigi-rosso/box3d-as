@@ -142,7 +142,7 @@ struct RoundIn {
     // 0 for the first cap, 1 for the second.
     @location(1) end: f32,
     @location(2) first: vec4f,   // first center, radius
-    @location(3) second: vec4f,  // second center, the same as the first for a sphere
+    @location(3) second: vec4f,  // second center, the same as the first for a sphere, 1 to draw rings
     @location(4) rotation: vec4f,
     @location(5) fill: vec4f,
     @location(6) edge: vec4f,
@@ -156,6 +156,7 @@ struct RoundOut {
     @location(2) ring: vec2f,
     @location(3) @interpolate(flat) fill: vec4f,
     @location(4) @interpolate(flat) edge: vec4f,
+    @location(5) @interpolate(flat) rings: f32,
 }
 
 @vertex
@@ -181,6 +182,7 @@ fn vs_round(i: RoundIn) -> RoundOut {
     o.ring = select(vec2f(s, dot(p - c1, u)), vec2f(s, s - reach), capsule);
     o.fill = ink(i.fill);
     o.edge = ink(i.edge);
+    o.rings = i.second.w;
     return o;
 }
 
@@ -196,7 +198,7 @@ fn fs_round(i: RoundOut) -> @location(0) vec4f {
     let rim = facing / max(sqrt(fdx * fdx + fdy * fdy), 1e-6);
     let px = view.right.w;
     var c = lit(i.fill.rgb, n);
-    let rings = cover(min(ring.x, ring.y), LINE * px) * 0.85;
+    let rings = cover(min(ring.x, ring.y), LINE * px) * 0.85 * i.rings;
     c = mix(c, i.fill.rgb * 0.45, rings);
     c = mix(c, i.edge.rgb, cover(rim, LINE * px) * i.edge.a);
     return vec4f(c, 1.0);

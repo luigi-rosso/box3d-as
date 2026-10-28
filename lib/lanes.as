@@ -11,6 +11,7 @@ import { Lanes } from "rive/lanes";
 
 import { b3GetTicks, b3GetLengthUnitsPerMeter, b3OnMain, b3SetLengthUnitsPerMeter } from "./core";
 import {
+	B3_LANE_TRACE_BYTES,
 	B3_MAX_LANES,
 	b3_laneBackendJobs,
 	b3_laneBackendParallel,
@@ -23,6 +24,10 @@ import {
 	b3HeaderI32,
 	b3LaneAwait,
 	b3LaneNow,
+	b3LaneTraceArm,
+	b3LaneTraceGather,
+	b3LaneTraceOpen,
+	b3LaneTraceSend,
 	b3LaneWriter,
 	b3MakeLaneTaskContext,
 	b3ReadF32,
@@ -41,6 +46,22 @@ import {
 	b3LaneCollideSupported,
 } from "./lane_collide";
 import { b3LaneTreeApply, b3LaneTreeJob, b3LaneTreeMain, b3LaneTreePack } from "./lane_tree";
+import {
+	b3SpanBegin,
+	b3SpanEnd,
+	b3TraceRow,
+	b3TraceRowAt,
+	b3_traceCollide,
+	b3_traceCopy,
+	b3_traceIntegratePositions,
+	b3_traceIntegrateVelocities,
+	b3_tracePrepare,
+	b3_traceRelax,
+	b3_traceRestitution,
+	b3_traceSolve,
+	b3_traceStore,
+	b3_traceWarmStart,
+} from "./trace";
 import { b3EnqueueTaskCallback, b3FinishTaskCallback, b3TaskCallback } from "./types";
 import { B3_GRAPH_COLOR_COUNT } from "./constants";
 import { b3Vec3 } from "./math_functions";
@@ -98,7 +119,8 @@ const C_OUTPUTS: u32 = 64;
 const C_INPUTS: u32 = 96;
 const C_READY: u32 = 128;
 const C_PAIRS: u32 = 192;
-const C_BYTES: u32 = C_PAIRS + 4 * 64;
+const C_TRACES: u32 = C_PAIRS + 4 * 64;
+const C_BYTES: u32 = C_TRACES + 4 * <u32>B3_MAX_LANES;
 
 // Pair region words, by byte offset. Lane p appends what it sends lane q in a step to pair p * lanes + q, with
 // each exchange's offset and count in a table, so a pair's lock has one writer and one reader and is never
@@ -217,6 +239,7 @@ export class b3LanePartition {
 	appended: Int32Array = new Int32Array(B3_MAX_LANES);
 	spins: u64 = 0;
 	exchangesWaited: i32 = 0;
+	trace: b3TraceRow? = null;
 
 	constructor(context: b3StepContext) {
 		this.context = context;
@@ -666,64 +689,81 @@ unsafe function b3LaneExchange(part: b3LanePartition, exchanges: Array<SharedReg
 // b3SolverTask's stage order without joints or the overflow color
 function b3LaneSolveStages(part: b3LanePartition, exchanges: Array<SharedRegion>): void {
 	let times = part.times;
+	let trace = part.trace;
 	let colorCount = part.activeColorCount;
 	part.epoch = part.epochBase;
 	part.appended.fill(0);
 	let ticks = b3LaneNow();
+	let traceBegin = b3SpanBegin(trace);
 
 	for (let i = 0; i < colorCount; ++i) {
 		b3RunBlocks(part, b3_stagePrepareWideContacts, 0, 0, part.wideFlat[i], part.wideCount[i]);
 		b3RunBlocks(part, b3_stagePrepareContacts, 0, 0, part.groupFlat[i], part.groupCount[i]);
 	}
 	times[T_PREPARE] += b3LaneNow() - ticks;
+	b3SpanEnd(trace, b3_tracePrepare, traceBegin);
 
 	let subStepCount = part.context.subStepCount;
 	for (let subStep = 0; subStep < subStepCount; ++subStep) {
 		ticks = b3LaneNow();
+		traceBegin = b3SpanBegin(trace);
 		b3RunBodies(part, b3_stageIntegrateVelocities);
 		times[T_INTEGRATE_VELOCITIES] += b3LaneNow() - ticks;
+		b3SpanEnd(trace, b3_traceIntegrateVelocities, traceBegin);
 
 		ticks = b3LaneNow();
+		traceBegin = b3SpanBegin(trace);
 		for (let i = 0; i < colorCount; ++i) {
 			b3RunColor(part, exchanges, b3_stageWarmStart, i);
 		}
 		times[T_WARM_START] += b3LaneNow() - ticks;
+		b3SpanEnd(trace, b3_traceWarmStart, traceBegin);
 
 		ticks = b3LaneNow();
+		traceBegin = b3SpanBegin(trace);
 		for (let i = 0; i < colorCount; ++i) {
 			b3RunColor(part, exchanges, b3_stageSolve, i);
 		}
 		times[T_SOLVE] += b3LaneNow() - ticks;
+		b3SpanEnd(trace, b3_traceSolve, traceBegin);
 
 		ticks = b3LaneNow();
+		traceBegin = b3SpanBegin(trace);
 		b3RunBodies(part, b3_stageIntegratePositions);
 		times[T_INTEGRATE_POSITIONS] += b3LaneNow() - ticks;
+		b3SpanEnd(trace, b3_traceIntegratePositions, traceBegin);
 
 		ticks = b3LaneNow();
+		traceBegin = b3SpanBegin(trace);
 		for (let i = 0; i < colorCount; ++i) {
 			b3RunColor(part, exchanges, b3_stageRelax, i);
 		}
 		times[T_RELAX] += b3LaneNow() - ticks;
+		b3SpanEnd(trace, b3_traceRelax, traceBegin);
 	}
 
 	let world = part.context.world;
 	let restitutionIterations = world.restitutionIterations;
 	if (restitutionIterations > 0 && part.context.anyRestitution.value != 0) {
 		ticks = b3LaneNow();
+		traceBegin = b3SpanBegin(trace);
 		for (let j = 0; j < restitutionIterations; ++j) {
 			for (let i = 0; i < colorCount; ++i) {
 				b3RunColor(part, exchanges, b3_stageRestitution, i);
 			}
 		}
 		times[T_RESTITUTION] += b3LaneNow() - ticks;
+		b3SpanEnd(trace, b3_traceRestitution, traceBegin);
 	}
 
 	ticks = b3LaneNow();
+	traceBegin = b3SpanBegin(trace);
 	for (let i = 0; i < colorCount; ++i) {
 		b3RunBlocks(part, b3_stageStoreWideImpulses, 0, 0, part.wideFlat[i], part.wideCount[i]);
 		b3RunBlocks(part, b3_stageStoreImpulses, 0, 0, part.groupFlat[i], part.groupCount[i]);
 	}
 	times[T_STORE] += b3LaneNow() - ticks;
+	b3SpanEnd(trace, b3_traceStore, traceBegin);
 }
 
 @inline function b3ImpulseBytes(manifolds: StaticArray<b3Manifold>, manifoldCount: i32): i32 {
@@ -801,7 +841,8 @@ export unsafe function b3LaneSolvePartition(
 	input: Blob,
 	output: SharedRegion,
 	exchanges: Array<SharedRegion>,
-	partition: i32
+	partition: i32,
+	traceRegion: SharedRegion
 ): void {
 	let part = r.part;
 	part.partition = partition;
@@ -810,6 +851,9 @@ export unsafe function b3LaneSolvePartition(
 	for (let i = 0; i < T_COUNT; ++i) {
 		part.times[i] = 0;
 	}
+	let trace = b3LaneTraceOpen(traceRegion);
+	part.trace = trace;
+	let traceBegin = b3SpanBegin(trace);
 	let ticks = b3LaneNow();
 	// The section blob: the common header, then this partition's section
 	input.readInto(0, r.header);
@@ -818,22 +862,32 @@ export unsafe function b3LaneSolvePartition(
 	input.readInto(<u32>(4 * H_WORDS), r.input, 0, length);
 	b3LaneSolveSetup(r);
 	part.times[T_SETUP] = b3LaneNow() - ticks;
+	b3SpanEnd(trace, b3_traceCopy, traceBegin);
 	b3LaneSolveStages(part, exchanges);
 	ticks = b3LaneNow();
+	traceBegin = b3SpanBegin(trace);
 	b3LaneSolveOutput(r, output);
 	part.times[T_OUTPUT] = b3LaneNow() - ticks;
+	b3SpanEnd(trace, b3_traceCopy, traceBegin);
+	b3LaneTraceSend(traceRegion, trace);
 	exchanges[partition * part.lanes + partition].atomicStore(X_DONE, part.epochBase | (EPOCH_STRIDE - 1));
 }
 
-@job export function b3LaneSolveJob(input: Blob, output: SharedRegion, exchanges: Array<SharedRegion>, partition: i32): i32 {
+@job export function b3LaneSolveJob(
+	input: Blob,
+	output: SharedRegion,
+	exchanges: Array<SharedRegion>,
+	partition: i32,
+	trace: SharedRegion,
+): i32 {
 	let replica = new b3LaneSolveReplica();
-	b3LaneSolvePartition(replica, input, output, exchanges, partition);
+	b3LaneSolvePartition(replica, input, output, exchanges, partition, trace);
 	return partition;
 }
 
-@job export function b3LaneCollideJob(snapshot: Blob, input: Blob, partition: i32): Blob {
+@job export function b3LaneCollideJob(snapshot: Blob, input: Blob, partition: i32, trace: SharedRegion): Blob {
 	let replica = new b3LaneCollideReplica();
-	return b3LaneCollidePartition(replica, snapshot, input, partition);
+	return b3LaneCollidePartition(replica, snapshot, input, partition, trace);
 }
 
 // A worker per extra lane. It spins on the control region's serial between commands, briefly, then sleeps.
@@ -882,12 +936,13 @@ export unsafe function b3LaneSolvePartition(
 		let ready = C_READY + 4 * <u32>partition;
 		while (control.atomicLoad(ready) != serial) {}
 		let input = new Blob(control.atomicLoad(C_INPUTS + 4 * <u32>partition));
+		let trace = new SharedRegion(control.atomicLoad(C_TRACES + 4 * <u32>partition));
 		if (command == CMD_SOLVE) {
 			let output = new SharedRegion(control.atomicLoad(C_OUTPUTS + 4 * <u32>partition));
-			b3LaneSolvePartition(replica, input, output, exchanges, partition);
+			b3LaneSolvePartition(replica, input, output, exchanges, partition, trace);
 		} else if (command == CMD_COLLIDE) {
 			let snapshot = new Blob(control.atomicLoad(C_SNAPSHOT));
-			let answer = b3LaneCollidePartition(collideReplica, snapshot, input, partition);
+			let answer = b3LaneCollidePartition(collideReplica, snapshot, input, partition, trace);
 			result = answer;
 			let mine = exchanges[partition * lanes + partition];
 			mine.atomicStore(X_RESULT, answer.id);
@@ -929,6 +984,8 @@ export class b3LaneTasks {
 	wake: Signal = Signal.create();
 	exchanges: Array<SharedRegion> = new Array<SharedRegion>();
 	outputs: Array<SharedRegion> = new Array<SharedRegion>();
+	// Each lane's trace spans, then the tree job's
+	traces: Array<SharedRegion> = new Array<SharedRegion>();
 	workers: Array<Worker> = new Array<Worker>();
 	jobs: Array<Job<i32>> = new Array<Job<i32>>();
 	writer: b3LaneWriter = new b3LaneWriter();
@@ -973,6 +1030,9 @@ export class b3LaneTasks {
 		for (let p = 0; p < lanes; ++p) {
 			this.outputs.push(SharedRegion.create(1 << 16));
 		}
+		for (let p = 0; p <= lanes; ++p) {
+			this.traces.push(SharedRegion.create(B3_LANE_TRACE_BYTES));
+		}
 		for (let q = 0; q < lanes * lanes; ++q) {
 			this.exchanges.push(SharedRegion.create(X_DATA));
 		}
@@ -988,6 +1048,7 @@ export class b3LaneTasks {
 		let control = this.control;
 		for (let p = 0; p < this.lanes; ++p) {
 			control.atomicStore(C_OUTPUTS + 4 * <u32>p, this.outputs[p].id);
+			control.atomicStore(C_TRACES + 4 * <u32>p, this.traces[p].id);
 		}
 		for (let q = 0; q < this.lanes * this.lanes; ++q) {
 			control.atomicStore(C_PAIRS + 4 * <u32>q, this.exchanges[q].id);
@@ -1002,6 +1063,25 @@ export class b3LaneTasks {
 			this.control.atomicStore(C_SERIAL, this.serial);
 			this.wake.notify();
 		}
+	}
+
+	// Jobs are all joined between steps, so their shared memory can go; workers may still read it as they quit
+	release(): void {
+		if (this.backend != b3_laneBackendJobs) {
+			return;
+		}
+		let regions = [this.exchanges, this.outputs, this.traces];
+		for (let i = 0; i < regions.length; ++i) {
+			for (let k = 0; k < regions[i].length; ++k) {
+				regions[i][k].release();
+			}
+		}
+		let snapshot = this.collide.snapshot.blob;
+		if (snapshot != null) {
+			snapshot.release();
+		}
+		this.control.release();
+		this.wake.release();
 	}
 }
 
@@ -1175,6 +1255,8 @@ unsafe function b3LaneSolve(t: b3LaneTasks, context: b3StepContext): bool {
 	b3SetBitCountAndClear(taskContext.hitEventBitSet, <u32>b3GetIdCapacity(world.contactIdPool));
 	taskContext.hasHitEvents = false;
 
+	let trace = b3TraceRowAt(0);
+	let traceBegin = b3SpanBegin(trace);
 	let ticks = b3LaneNow();
 	let lanes = t.lanes;
 	let awakeCount = context.sims.length;
@@ -1293,6 +1375,9 @@ unsafe function b3LaneSolve(t: b3LaneTasks, context: b3StepContext): bool {
 	// The workers wake now and pick up each section as it is ready
 	let replicaOnMain = lanes == 1 && t.replicaOnMain;
 	let firstPacked = replicaOnMain ? 0 : 1;
+	for (let p = firstPacked; p < lanes; ++p) {
+		b3LaneTraceArm(t.traces[p]);
+	}
 	if (t.backend == b3_laneBackendWorkers && lanes > 1) {
 		let control = t.control;
 		control.atomicStore(C_COMMAND, CMD_SOLVE);
@@ -1441,7 +1526,7 @@ unsafe function b3LaneSolve(t: b3LaneTasks, context: b3StepContext): bool {
 				t.control.atomicStore(C_INPUTS + 4 * <u32>p, input.id);
 				t.control.atomicStore(C_READY + 4 * <u32>p, t.serial);
 			} else {
-				t.jobs.push(Jobs.run(b3LaneSolveJob, input, t.outputs[p], t.exchanges, p));
+				t.jobs.push(Jobs.run(b3LaneSolveJob, input, t.outputs[p], t.exchanges, p, t.traces[p]));
 			}
 		}
 	}
@@ -1451,6 +1536,7 @@ unsafe function b3LaneSolve(t: b3LaneTasks, context: b3StepContext): bool {
 	context.anyRestitution.value = anyRestitution ? 1 : 0;
 	stats.pack += b3LaneNow() - ticks;
 	stats.bytesIn += <f64>w.length;
+	b3SpanEnd(trace, b3_traceCopy, traceBegin);
 
 	ticks = b3LaneNow();
 	if (replicaOnMain) {
@@ -1458,9 +1544,10 @@ unsafe function b3LaneSolve(t: b3LaneTasks, context: b3StepContext): bool {
 			t.mainReplica = new b3LaneSolveReplica();
 		}
 		let replica = t.mainReplica!;
-		b3LaneSolvePartition(replica, t.inputs[0], t.outputs[0], t.exchanges, 0);
+		b3LaneSolvePartition(replica, t.inputs[0], t.outputs[0], t.exchanges, 0, t.traces[0]);
 		part = replica.part;
 	} else {
+		part.trace = trace;
 		b3LaneSolveStages(part, t.exchanges);
 	}
 	stats.partition0 += b3LaneNow() - ticks;
@@ -1483,14 +1570,19 @@ unsafe function b3LaneSolve(t: b3LaneTasks, context: b3StepContext): bool {
 		t.jobs.length = 0;
 	}
 	stats.wait += b3LaneNow() - ticks;
+	for (let p = firstPacked; p < lanes; ++p) {
+		b3LaneTraceGather(t.traces[p], p);
+	}
 
 	ticks = b3LaneNow();
+	traceBegin = b3SpanBegin(trace);
 	b3LaneSolveApply(t, context, firstPacked);
 	for (let k = 0; k < t.inputs.length; ++k) {
 		t.inputs[k].release();
 	}
 	t.inputs.length = 0;
 	stats.apply += b3LaneNow() - ticks;
+	b3SpanEnd(trace, b3_traceCopy, traceBegin);
 	stats.solves += 1;
 	stats.mainSpins += <f64>part.spins;
 	stats.exchanges += <f64>part.exchangesWaited;
@@ -1573,6 +1665,11 @@ unsafe function b3LaneCollide(t: b3LaneTasks, context: b3StepContext, contactCou
 	}
 	t.serial += 1;
 	let serial = t.serial;
+	for (let p = 1; p < lanes; ++p) {
+		b3LaneTraceArm(t.traces[p]);
+	}
+	let trace = b3TraceRowAt(0);
+	let traceBegin = b3SpanBegin(trace);
 	b3LaneCollideBegin(m, context, contactCount, lanes);
 	let snapshot = m.snapshot.blob!;
 	let control = t.control;
@@ -1591,13 +1688,16 @@ unsafe function b3LaneCollide(t: b3LaneTasks, context: b3StepContext, contactCou
 			control.atomicStore(C_INPUTS + 4 * <u32>p, input.id);
 			control.atomicStore(C_READY + 4 * <u32>p, serial);
 		} else {
-			t.collideJobs.push(Jobs.run(b3LaneCollideJob, snapshot, input, p));
+			t.collideJobs.push(Jobs.run(b3LaneCollideJob, snapshot, input, p, t.traces[p]));
 		}
 	}
+	b3SpanEnd(trace, b3_traceCopy, traceBegin);
 
 	let ticks = b3LaneNow();
+	traceBegin = b3SpanBegin(trace);
 	b3CollideTask<b3OnMain>(m.ranges[0], m.ranges[1], 0, context);
 	m.partition0 += b3LaneNow() - ticks;
+	b3SpanEnd(trace, b3_traceCollide, traceBegin);
 
 	for (let p = 1; p < lanes; ++p) {
 		ticks = b3LaneNow();
@@ -1616,8 +1716,11 @@ unsafe function b3LaneCollide(t: b3LaneTasks, context: b3StepContext, contactCou
 			}
 		}
 		m.wait += b3LaneNow() - ticks;
+		b3LaneTraceGather(t.traces[p], p);
 		if (answer != null) {
+			traceBegin = b3SpanBegin(trace);
 			b3LaneCollideApply(m, context, p, answer);
+			b3SpanEnd(trace, b3_traceCopy, traceBegin);
 			answer.release();
 		}
 		if (t.backend == b3_laneBackendJobs) {
@@ -1639,9 +1742,14 @@ const TREE_TASK: u64 = 1;
 // closure, which cannot cross to a lane, so it runs here at once as the default callback runs it.
 unsafe function b3LaneEnqueue(t: b3LaneTasks, task: b3TaskCallback, taskContext: u64, name: string): u64 {
 	if (name == "rebuild tree" && t.treeJob == null) {
+		let trace = b3TraceRowAt(0);
+		let traceBegin = b3SpanBegin(trace);
 		let input = b3LaneTreePack(t.tree, t.world);
 		t.treeInput = input;
-		t.treeJob = Jobs.run(b3LaneTreeJob, input);
+		let treeTrace = t.traces[t.lanes];
+		b3LaneTraceArm(treeTrace);
+		t.treeJob = Jobs.run(b3LaneTreeJob, input, treeTrace);
+		b3SpanEnd(trace, b3_traceCopy, traceBegin);
 		t.tree.tasks += 1;
 		return TREE_TASK;
 	}
@@ -1657,11 +1765,16 @@ unsafe function b3LaneFinish(t: b3LaneTasks, userTask: u64): void {
 	let ticks = b3LaneNow();
 	let result = job.join();
 	t.tree.wait += b3LaneNow() - ticks;
+	// The tree job's row follows the lanes'
+	b3LaneTraceGather(t.traces[t.lanes], t.lanes);
 	if (result == null || !result.ok) {
 		console.log("b3LaneFinish: tree job failed " + (job.failed != null ? job.failed! : "?"));
 	} else {
 		let output = result.value;
+		let trace = b3TraceRowAt(0);
+		let traceBegin = b3SpanBegin(trace);
 		b3LaneTreeApply(t.tree, t.world, output);
+		b3SpanEnd(trace, b3_traceCopy, traceBegin);
 		output.release();
 	}
 	job.release();
@@ -1678,6 +1791,7 @@ export function b3World_EnableLanes(worldId: b3WorldId, lanes: i32, backend: i32
 	for (let i = 0; i < b3_laneTasks.length; ++i) {
 		let old = b3_laneTasks[i];
 		old.stop();
+		old.release();
 		old.world.enqueueTaskFcn = old.enqueueTask;
 		old.world.finishTaskFcn = old.finishTask;
 	}

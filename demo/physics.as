@@ -93,6 +93,8 @@ export class PhysicsScene implements DemoScene {
     contactScale: f32 = 0.3;
     // Uneven ground: shadows land at groundHeight() under each body.
     uneven: bool = false;
+    // Hundreds of round bodies: no rings or shadows, which would cost more to draw than the bodies.
+    crowd: bool = false;
     groundY: f32 = 0;
 
     shots: Array<b3BodyId> = new Array<b3BodyId>();
@@ -150,6 +152,8 @@ export class PhysicsScene implements DemoScene {
     keyUp(key: i32): bool {
         return false;
     }
+
+    leave(): void {}
 
     // ---- world ------------------------------------------------------------
 
@@ -265,7 +269,8 @@ export class PhysicsScene implements DemoScene {
     // ---- drawing ----------------------------------------------------------
 
     draw(dd: DebugDraw): void {
-        dd.shadows = !this.uneven;
+        dd.shadows = !this.uneven && !this.crowd;
+        dd.rings = !this.crowd;
         dd.shadowY = this.groundY;
         dd.gridY = this.groundY;
         for (let i = 0; i < this.views.length; i++) {

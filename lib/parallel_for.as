@@ -5,6 +5,7 @@
 import { B3_ASSERT, b3AtomicInt } from "./core";
 import { B3_MAX_TASKS, B3_MAX_WORKERS } from "./constants";
 import { b3World } from "./physics_world";
+import { b3IsTracing, b3SpanBegin, b3SpanEnd, b3TraceRowAt, b3TraceTaskKind } from "./trace";
 
 // Callback invoked by b3ParallelFor to process a range of items. May be called
 // multiple times per worker: work is divided into blocks that workers claim
@@ -24,6 +25,7 @@ class b3ParallelForShared {
 	blockCount: i32 = 0;
 	blockSize: i32 = 0;
 	itemCount: i32 = 0;
+	traceKind: i32 = 0;
 	callback: b3ParallelForCallback;
 
 	constructor(callback: b3ParallelForCallback) {
@@ -49,6 +51,8 @@ function b3ParallelForTrampoline(task: b3ParallelForTask): void {
 	let blockCount = shared.blockCount;
 	let blockSize = shared.blockSize;
 	let itemCount = shared.itemCount;
+	let trace = b3TraceRowAt(workerIndex);
+	let traceBegin = b3SpanBegin(trace);
 
 	for (;;) {
 		// b3AtomicFetchAddInt
@@ -66,6 +70,7 @@ function b3ParallelForTrampoline(task: b3ParallelForTask): void {
 
 		callback(start, end, workerIndex);
 	}
+	b3SpanEnd(trace, shared.traceKind, traceBegin);
 }
 
 // Divide [0, itemCount) into blocks and process them with cooperative claiming:
@@ -118,6 +123,7 @@ export function b3ParallelFor(
 	shared.blockCount = blockCount;
 	shared.blockSize = blockSize;
 	shared.itemCount = itemCount;
+	shared.traceKind = b3IsTracing() ? b3TraceTaskKind(name) : 0;
 	shared.nextBlock.value = 0;
 
 	let handles = new StaticArray<u64>(taskCount);

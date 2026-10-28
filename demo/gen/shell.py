@@ -15,17 +15,20 @@ from rml import E, VM, Machine, Node, bind, cond, document, set_vm, toggle_vm
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-SCENES = 7
+SCENES = 8
 PROFILE = ["pairs", "collide", "solver", "update", "ccd", "islands", "other"]
 TONES = ["FFEDE8E1", "FFC9C2B8", "FFA59E95", "FF877F75", "FF6E6860", "FF58534D", "FF45413C"]
 STATS = ["bodies", "awake", "contacts", "joints", "islands", "faces"]
+# The Threads scene's panel; demo/threads.as holds the same choices.
+BACKENDS = ["Serial", "Lanes", "Parallel"]
+THREAD_CHOICES = [1, 2, 4, 8]
 # Size classes the script writes to layoutClass; see demo/shell.as.
 WIDE, MEDIUM, COMPACT = 0, 1, 2
 CLASSES = [WIDE, MEDIUM, COMPACT]
 # No break space inside each hint, so a wrapped line keeps a key with its action.
 KEY_HELP = "   ".join(h.replace(" ", "\u00a0") for h in (
     "Drag orbit", "Shift drag pan", "Scroll zoom", "P pause", "O step", "R reset", "Tab tool", "C contacts", "J joints",
-    "1-7 scene"))
+    "1-8 scene"))
 TOUCH_HELP = "   ".join(h.replace(" ", "\u00a0") for h in ("Drag to orbit", "Pinch to zoom", "Tap a body to pick"))
 
 INK = "FFEDE8E1"
@@ -243,6 +246,14 @@ def view_model():
     vm.str("profileMs", "0 ms")
     for p in PROFILE:
         vm.num("profile" + p.capitalize())
+    vm.bool("threadsOpen")
+    vm.num("backend")
+    vm.num("threads", 1)
+    vm.str("threadsNote", "")
+    for name in BACKENDS[1:]:
+        vm.bool("_ok" + name)
+    for n in THREAD_CHOICES[1:]:
+        vm.bool(f"_okThreads{n}")
     vm.num("layoutClass")
     vm.num("uiScale", 1)
     vm.num("uiWidth", 1280)
@@ -340,17 +351,21 @@ def icon_button(controls, name, shapes, actions, active=None, active_extra=None)
     return button
 
 
-def tool_button(controls, vm, name, value):
-    t = label(name, 12, DIM, LIGHT, 0.3, name="Label")
-    button = box(name, t, w=64, h=34, dir="row", align="center", bg=CLEAR, radius=4)
+def segment(controls, name, text_, path, value, w=64, h=34, size=12):
+    """One choice of a segmented control writing value to a number property."""
+    t = label(text_, size, DIM, LIGHT, 0.3, name="Label")
+    button = box(name, t, w=w, h=h, dir="row", align="center", bg=CLEAR, radius=4)
     bg, tc = button.meta["bg"].meta["color"], t.meta["color"]
-    tool = vm.path("tool")
     controls.add(button,
                  {"idle": {(bg, "colorValue"): CLEAR, (tc, "colorValue"): DIM},
                   "hover": {(bg, "colorValue"): CLEAR, (tc, "colorValue"): INK},
                   "active": {(bg, "colorValue"): INK, (tc, "colorValue"): INVERTED}},
-                 [set_vm("Number", tool, float(value))], active=equals(tool, value))
+                 [set_vm("Number", path, float(value))], active=equals(path, value))
     return button
+
+
+def tool_button(controls, vm, name, value):
+    return segment(controls, name, name, vm.path("tool"), value)
 
 
 # ------------------------------------------------------------------ panels
@@ -423,6 +438,56 @@ def clear_area(vm):
     return area
 
 
+def bool_layer(machine, name, path, on_nodes, off_nodes=()):
+    """Shows on_nodes while a boolean holds and off_nodes while it does not."""
+    def keys(on):
+        k = {(n.meta["style"], "displayValue"): ("uint", 0 if on else 1) for n in on_nodes}
+        k.update({(n.meta["style"], "displayValue"): ("uint", 1 if on else 0) for n in off_nodes})
+        return k
+    for n in on_nodes:
+        n.meta["style"].attrs["displayValue"] = "none"
+    when, unless = is_true(path)
+    machine.layer(name, [("off", keys(False), [(1, 0, when)]), ("on", keys(True), [(0, 0, unless)])])
+
+
+def choice(controls, machine, vm, name, text_, path, value, ok, w, h=28):
+    """A segment, and a dim stand in for it while the ok boolean is false."""
+    live = segment(controls, name, text_, path, value, w=w, h=h, size=11.5)
+    off = box(name + " Off", label(text_, 11.5, FAINT, LIGHT, 0.3, name="Label"), w=w, h=h, dir="row", align="center")
+    if ok:
+        bool_layer(machine, name + " Available", vm.path(ok), [live], [off])
+    else:
+        off.meta["style"].attrs["displayValue"] = "none"
+    return [live, off]
+
+
+def threads_panel(controls, machine, vm):
+    """The Threads scene's controls and the graph script, shown while it is open."""
+    P = vm.path
+    caption = lambda t: label(t, 8.5, FAINT, REGULAR, 1.4, name="Caption")
+    backends = box("Backends", *[choice(controls, machine, vm, b, b, P("backend"), i, "_ok" + b if i else None, 65)
+                                 for i, b in enumerate(BACKENDS)], dir="row", line=HAIRLINE, radius=4)
+    threads = box("Thread Counts", *[choice(controls, machine, vm, f"Threads {n}", str(n), P("threads"), n,
+                                            f"_okThreads{n}" if n > 1 else None, 49)
+                                     for n in THREAD_CHOICES], dir="row", line=HAIRLINE, radius=4)
+    note = label("", 10.5, DIM, LIGHT, 0.1, path=P("threadsNote"), width=196, line_height=14, name="Note")
+    choices = box("Choices", box("Backend Group", caption("BACKEND"), backends, gap=7),
+                  box("Threads Group", caption("THREADS"), threads, gap=7), gap=7)
+    # Side by side in compact, where the panel is narrow but tall.
+    per_class(choices.meta["style"], "flexDirectionValue", [("uint", 0), ("uint", 0), ("uint", 2)])
+    per_class(choices.meta["style"], "gapHorizontal", [7.0, 7.0, 20.0])
+    side = box("Threads Controls", choices, note, gap=7)
+    script = E("ScriptAsset", file="demo/threads_graph.as", name="threads_graph")
+    graph = box("Graph", E("ScriptedLayout", scriptAssetId=script, name="Threads Graph"), ws="fill", hs="fill")
+    panel = box("Threads", side, graph, ws="fill", h=190, dir="row", gap=24, pad=(10, 12, 14, 12), bg="E0151412",
+                radius=6)
+    # Compact stacks the graph under the controls.
+    per_class(panel.meta["style"], "flexDirectionValue", [("uint", 2), ("uint", 2), ("uint", 0)])
+    per_class(panel, "height", [190.0, 190.0, 290.0])
+    bool_layer(machine, "Threads Panel", P("threadsOpen"), [panel])
+    return panel, script
+
+
 def bottom_bar(controls, vm):
     P = vm.path
     paused_tag = label("PAUSED", 9.5, ACCENT, REGULAR, 2.0, name="Paused")
@@ -466,9 +531,10 @@ def main():
     room = shown_in(box("Right Room", w=168, h=1), WIDE)
     top = box("Top", left, stat_line(vm), clear_area(vm), room, right_panel(vm), ws="fill", hs="fill", dir="row", gap=24)
     per_class(top.meta["style"], "flexDirectionValue", [("uint", 2), ("uint", 2), ("uint", 0)])
+    threads, graph_script = threads_panel(controls, machine, vm)
     touch = shown_in(box("Touch Help", label(TOUCH_HELP, 11, FAINT, LIGHT, 0.2, fill=True, name="Help"), ws="fill",
                          pad=(10, 0, 0, 0)), COMPACT)
-    panels = box("Panels", top, touch, bottom_bar(controls, vm), gap=16,
+    panels = box("Panels", top, threads, touch, bottom_bar(controls, vm), gap=16,
                  absolute={"left": 18, "top": 28, "right": 28, "bottom": 28})
     scrims = [scrim("Scrim Left", "left", 364), scrim("Scrim Right", "right", 316), scrim("Scrim Top", "top", 240),
               scrim("Scrim Bottom", "bottom", 200)]
@@ -488,7 +554,7 @@ def main():
     board = E("Artboard", style, paint("Fill", BACKGROUND), overlay, stage, machine_node, *machine.anims,
               styleId=style, viewModelId=vm, viewModelInstanceId=vm.node.attrs["defaultInstanceId"],
               defaultStateMachineId=machine_node, width=1280.0, height=800.0, x=0.0, y=0.0, name="Box3D")
-    roots = [board, vm.node, FONT, script, NEGATE, WHOLE, HUNDREDTHS, WEIGHT]
+    roots = [board, vm.node, FONT, script, graph_script, NEGATE, WHOLE, HUNDREDTHS, WEIGHT]
     with open(os.path.join(ROOT, "demo", "shell.rml"), "w") as f:
         f.write(document(roots))
 

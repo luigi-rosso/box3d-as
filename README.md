@@ -3,7 +3,7 @@
 Box3D, Erin Catto's 3D physics engine, ported to AnimaScript as a Rive scripting library. It keeps Box3D's C API
 names, and every result matches native Box3D bit for bit, step for step.
 
-**Live demo: [box3d-demo-wlepqf.rive.to](https://box3d-demo-wlepqf.rive.to).** Seven interactive scenes running in the
+**Live demo: [box3d-demo-wlepqf.rive.to](https://box3d-demo-wlepqf.rive.to).** Eight interactive scenes running in the
 browser: drag to orbit, grab and throw bodies, Tab to shoot.
 
 Upstream: [erincatto/box3d](https://github.com/erincatto/box3d) at `f36d061ba26998c87cb7dc593a4065aaa03fb7eb` (v0.1.0
@@ -69,9 +69,12 @@ as `f32` (`<f32>(1.0 / 60.0)`; a constant expression of float literals is `f64`)
   [the character mover](examples/mover.as) and [threading](examples/threading.as).
   `examples/check.sh` runs each one under `rive --test` and checks what it shows (`examples/tests.as`), such as the
   box coming to rest or four lanes ending bit for bit where the serial path does.
-- **The demo** at the repo root is a rive-cli project with seven scenes: pyramid, card house, ragdolls with a
-  wrecking ball, rain on a mesh, height field, bullets, and a capsule character. Orbit, pick and shoot, with overlays
-  for contacts, joints and the profile (`notes/demo.md`). It needs AOT for interactive rates:
+- **The demo** at the repo root is a rive-cli project with eight scenes: pyramid, card house, ragdolls with a
+  wrecking ball, rain on a mesh, height field, bullets, a capsule character, and threads. Orbit, pick and shoot, with
+  overlays for contacts, joints and the profile (`notes/demo.md`). The threads scene stirs 2048 balls and capsules and
+  draws each step's tasks on each thread as it runs, with the step time over the last five seconds: serial or lanes
+  on master's toolchain, parallel calls too on the `parallel-calls` toolchain with `lib/parallel/` included, and
+  serial in a browser runtime without threads, such as the live demo's. It needs AOT for interactive rates:
 
   ```sh
   RIVE_WAMRC=<wamrc> rive . --aot

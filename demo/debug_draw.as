@@ -320,6 +320,8 @@ export class DebugDraw {
     gridExtent: i32 = 16;
     shadows: bool = true;
     shadowY: f32 = 0;
+    // Great circles on spheres and seams on capsules, which show spin
+    rings: bool = true;
     lightDir: Vec3 = normalize(v3(0.3, 0.9, 0.5));
     // Set by the shell; scenes read them to decide what to overlay.
     showContacts: bool = false;
@@ -351,6 +353,7 @@ export class DebugDraw {
     // Scratch for ordering them: slots in the sorted order, a graph of which paints first, and clipped overlaps.
     private slots: StaticArray<i32> = new StaticArray<i32>(MAX_PRIMS);
     private solids: StaticArray<i32> = new StaticArray<i32>(MAX_PRIMS);
+    private byLeft: StaticArray<i32> = new StaticArray<i32>(MAX_PRIMS);
     private indegree: StaticArray<i32> = new StaticArray<i32>(MAX_PRIMS);
     private adjStart: StaticArray<i32> = new StaticArray<i32>(MAX_PRIMS + 1);
     private emitted: StaticArray<bool> = new StaticArray<bool>(MAX_PRIMS);
@@ -507,7 +510,7 @@ export class DebugDraw {
         let gpu = this.gpu;
         if (gpu != null) {
             let base = this.stateColor(color, state);
-            gpu.round(p, p, radius, xf.q, base, this.edgeColor(base, state), isStatic(state));
+            gpu.round(p, p, radius, xf.q, base, this.edgeColor(base, state), isStatic(state), this.rings);
             this.solidShadow(p, radius, this.layerFor(state), state);
             return;
         }
@@ -534,10 +537,12 @@ export class DebugDraw {
         this.floats[o + 3] = h.x;
         this.floats[o + 4] = h.y;
         // Two great circles show the spin.
-        let ringDepth = c.z - radius * 0.02;
-        let ringInk = withAlpha(scaleColor(base, 0.45), 0.85);
-        this.ring(p, rotate(xf.q, v3(0, 1, 0)), radius, ringDepth, ringInk, layer);
-        this.ring(p, rotate(xf.q, v3(1, 0, 0)), radius, ringDepth, ringInk, layer);
+        if (this.rings) {
+            let ringDepth = c.z - radius * 0.02;
+            let ringInk = withAlpha(scaleColor(base, 0.45), 0.85);
+            this.ring(p, rotate(xf.q, v3(0, 1, 0)), radius, ringDepth, ringInk, layer);
+            this.ring(p, rotate(xf.q, v3(1, 0, 0)), radius, ringDepth, ringInk, layer);
+        }
         this.solidShadow(p, radius, layer, state);
     }
 
@@ -549,7 +554,7 @@ export class DebugDraw {
         if (gpu != null) {
             let base = this.stateColor(color, state);
             let layer = this.layerFor(state);
-            gpu.round(p1, p2, radius, xf.q, base, this.edgeColor(base, state), isStatic(state));
+            gpu.round(p1, p2, radius, xf.q, base, this.edgeColor(base, state), isStatic(state), this.rings);
             this.solidShadow(p1, radius, layer, state);
             this.solidShadow(p2, radius, layer, state);
             return;
@@ -581,10 +586,12 @@ export class DebugDraw {
         this.floats[o + 6] = h.x;
         this.floats[o + 7] = h.y;
         // Seams where the cylinder meets the caps.
-        let axis = normalize(sub(p2, p1));
-        let ringInk = withAlpha(scaleColor(base, 0.45), 0.85);
-        this.ring(p1, axis, radius, depth - radius * 0.02, ringInk, layer);
-        this.ring(p2, axis, radius, depth - radius * 0.02, ringInk, layer);
+        if (this.rings) {
+            let axis = normalize(sub(p2, p1));
+            let ringInk = withAlpha(scaleColor(base, 0.45), 0.85);
+            this.ring(p1, axis, radius, depth - radius * 0.02, ringInk, layer);
+            this.ring(p2, axis, radius, depth - radius * 0.02, ringInk, layer);
+        }
         this.solidShadow(p1, radius, layer, state);
         this.solidShadow(p2, radius, layer, state);
     }
@@ -1172,6 +1179,33 @@ export class DebugDraw {
         return Mathf.abs(den) < 1e-9 ? 1e9 : -this.plane[p + 3] / den;
     }
 
+    // Shell sort of the k solids' indices by their screen left edge.
+    private sortByLeft(k: i32): void {
+        let byLeft = this.byLeft;
+        let list = this.solids;
+        let bounds = this.screenBounds;
+        for (let i = 0; i < k; i++) {
+            byLeft[i] = i;
+        }
+        let gap = 1;
+        while (gap < k / 3) {
+            gap = gap * 3 + 1;
+        }
+        while (gap > 0) {
+            for (let i = gap; i < k; i++) {
+                let v = byLeft[i];
+                let left = bounds[4 * list[v]];
+                let j = i;
+                while (j >= gap && bounds[4 * list[byLeft[j - gap]]] > left) {
+                    byLeft[j] = byLeft[j - gap];
+                    j -= gap;
+                }
+                byLeft[j] = v;
+            }
+            gap = (gap - 1) / 3;
+        }
+    }
+
     // Reorders the solid faces of the depth sorted order[0..n) in place, leaving other prims where they are.
     // Where two faces overlap on screen, the one farther away inside the overlap paints first; a topological
     // sort keeps every such pair, and the centroid order otherwise. Centroid depth alone misorders faces of
@@ -1193,10 +1227,21 @@ export class DebugDraw {
         for (let i = 0; i <= k; i++) {
             adjStart[i] = 0;
         }
+        // Only faces whose screen spans overlap in x can overlap, so sweep them by left edge; each pair is still
+        // measured from its farther face, as an all pairs loop would.
+        let byLeft = this.byLeft;
+        this.sortByLeft(k);
+        let bounds = this.screenBounds;
         let edges = 0;
-        for (let i = 0; i < k && edges < MAX_EDGES; i++) {
-            let a = list[i];
-            for (let j = i + 1; j < k && edges < MAX_EDGES; j++) {
+        for (let s = 0; s < k && edges < MAX_EDGES; s++) {
+            let right = bounds[4 * list[byLeft[s]] + 2];
+            for (let t = s + 1; t < k && edges < MAX_EDGES; t++) {
+                if (bounds[4 * list[byLeft[t]]] >= right) {
+                    break;
+                }
+                let i = min(byLeft[s], byLeft[t]);
+                let j = max(byLeft[s], byLeft[t]);
+                let a = list[i];
                 let b = list[j];
                 if (!this.overlapOnScreen(a, b) || this.overlapArea(a, b) < MIN_OVERLAP) {
                     continue;

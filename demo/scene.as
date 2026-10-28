@@ -34,6 +34,8 @@ export interface DemoScene {
 
     // Builds or rebuilds the world from scratch.
     reset(): void;
+    // Another scene is opening.
+    leave(): void;
     // One fixed step; the shell calls it at 60 Hz while running.
     step(dt: f32): void;
     draw(dd: DebugDraw): void;

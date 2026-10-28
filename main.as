@@ -16,6 +16,7 @@ import { GpuDraw } from "./demo/gpu_draw";
 import { DemoScene, SceneStats } from "./demo/scene";
 import { makeScenes } from "./demo/scenes";
 import { Shell } from "./demo/shell";
+import { g_threads } from "./demo/threads";
 
 const STEP: f32 = 1.0 / 60.0;
 const MAX_STEPS_PER_FRAME: i32 = 3;
@@ -170,6 +171,9 @@ export class Main extends Layout {
         if (index < 0 || index >= this.scenes.length) {
             return;
         }
+        if (index != this.current) {
+            this.scenes[this.current].leave();
+        }
         this.current = index;
         this.drag = DRAG_NONE;
         let scene = this.scenes[index];
@@ -216,6 +220,7 @@ export class Main extends Layout {
         let shell = this.shell;
         if (shell != null) {
             this.followShell(shell);
+            shell.syncThreads(g_threads);
             // The bound position is in artboard points, the size in the overlay's unscaled units.
             let c = shell.clear;
             let k = shell.uiScale.value;

@@ -397,7 +397,7 @@ export class GpuDraw {
 
     // A capsule between two world points, or a sphere when they coincide;
     // q orients a sphere's rings.
-    round(c1: Vec3, c2: Vec3, radius: f32, q: Quat, fill: u32, edge: u32, still: bool): void {
+    round(c1: Vec3, c2: Vec3, radius: f32, q: Quat, fill: u32, edge: u32, still: bool, rings: bool): void {
         if (this.rounds >= MAX_ROUND) {
             this.dropped++;
             return;
@@ -416,7 +416,7 @@ export class GpuDraw {
         d[o + 4] = c2.x;
         d[o + 5] = c2.y;
         d[o + 6] = c2.z;
-        d[o + 7] = 0;
+        d[o + 7] = rings ? 1.0 : 0.0;
         d[o + 8] = q.x;
         d[o + 9] = q.y;
         d[o + 10] = q.z;

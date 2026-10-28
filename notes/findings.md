@@ -511,3 +511,12 @@ these blocked it.
   for their silhouettes, which MSAA does not smooth without alpha to
   coverage, and a depth write from the fragment shader. Spheres and capsules
   are meshes instead.
+
+## The heap growth warning fires while a large world is first built
+
+rive master CLI, the demo's Threads scene (2048 bodies, about 11600 contacts once settled), `--aot --bench=3000`. In
+the first 300 frames the CLI warns twice: `script heap grew 8MB over 147 frames; at this rate every frame traps in
+roughly 17 minutes; the collector is running, so something is accumulating references`. Nothing is: the bench
+reports 760 to 968 wasm pages (+208) over 3000 frames and the same +208 over 8000, so the heap stops growing once
+the contacts and their manifolds have settled, and the warning does not come back. Done looks like: the warning
+waits for growth that outlasts a warm up, or says the rate is an early one.

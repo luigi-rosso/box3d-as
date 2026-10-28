@@ -12,7 +12,7 @@ bound to a view model the script writes.
 
 | File | What it holds |
 |---|---|
-| `rive.yaml` | project; `main: Box3D`, `scripting: wasm`, `dangerouslyFast: true`; compiles `lib/`, excludes `demo/gen`, `verify`, `bench`, `notes` |
+| `rive.yaml` | project; `main: Box3D`, `scripting: wasm`, `dangerouslyFast: true`; compiles `lib/`, excludes `demo/gen`, `lib/parallel`, `verify`, `bench`, `notes` |
 | `main.as` | the `Main` layout: steps and draws the scene, camera and pointer input, keys, follows the view model |
 | `demo/shell.rml` | generated, do not edit: the `Box3D` artboard, its panels, state machine and the `Demo` view model |
 | `demo/gen/shell.py` | writes `demo/shell.rml`: theme, layout, icons, controls, the view model |
@@ -28,7 +28,9 @@ bound to a view model the script writes.
 | `demo/physics.as` | `PhysicsScene`, the Box3D base every scene extends |
 | `demo/human.as` | `createHuman`, the ragdoll from shared/human.c via verify/scenes/scenes.as |
 | `demo/mover.as` | `CharacterMover`, samples/mover.cpp |
-| `demo/scenes.as` | the seven scenes and `makeScenes()`, the registry the shell reads |
+| `demo/scenes.as` | the eight scenes and `makeScenes()`, the registry the shell reads |
+| `demo/threads.as` | `ThreadsState` (`g_threads`): which backends and thread counts this runtime has, putting the Threads scene's world on one, the step history |
+| `demo/threads_graph.as` | `ThreadsGraph`, the script in the Threads panel that draws the timeline and the step history |
 | `demo/fonts/InterVariable.ttf` | Inter variable (OFL, license beside it), used at weight 300 and 420 with tabular figures |
 
 `dangerouslyFast` is on because the live window otherwise plays the fueled
@@ -77,6 +79,7 @@ parallel).
 | 5 | Height field | b3CreateWave 41 by 41 with spheres, 14 sided wheels, capsules and rocks rolling from the peaks; a static baked compound (6 capsule posts, 2 box hulls, a sphere dome) in the middle; a body every 40 steps up to 110, the fallen respawn over a peak | 50 to 112 | 0.6 to 1.0 ms mean, 7.5 max |
 | 6 | Bullets | sample_continuous.cpp BulletVersusStack (500 m/s bullet at step 30) beside ThinWall (sphere, capsule and box at 180 m/s every 150 steps against a 20 cm static wall) | 17 | 0.1 to 0.26 ms mean |
 | 7 | Character | samples/mover.cpp on a level: a 30 cm step, an 18 degree ramp to a ledge, a long wall in 2 m blocks, a short wall, eight 20 cm treads to a landing, five crates | 7 | 0.003 to 0.035 ms |
+| 8 | Threads | a walled pit of 1365 balls and 683 capsules stirred by a kinematic paddle, sleep off; see The Threads scene below | 2051 | 2.2 to 2.7 ms serial, 1.0 ms on 4 parallel parts |
 
 Times are `STEP_LOG` means per simulated second over 600 frames, release AOT
 bake (`aot -O3`), Apple M5 Max, one scene at a time, from the commit that adds
@@ -95,7 +98,7 @@ mover's queries).
 | Space or B | shoot from the screen center, unless the scene uses Space |
 | P / O / R | pause, single step (pauses), reset |
 | Tab | switch Pick and Shoot |
-| 1-7 | open a scene; the list on the left does the same |
+| 1-8 | open a scene; the list on the left does the same |
 | F | ease back to the scene's home view |
 | G | grid on or off |
 | C | contact points and normals on or off (off by default) |
@@ -128,11 +131,12 @@ front to back (in RML an earlier sibling draws on top):
 |---|---|
 | `Overlay` | absolute at 0, 0, sized `uiWidth` by `uiHeight` and scaled by `uiScale`, so it is laid out in UI units and drawn at the window size; holds `Panels` and the scrims |
 | `Panels` | absolute, inset 28 (18 on the left, where the rows reach past the margin): a column of `Top`, `Touch Help` and `Bottom` |
-| `Top` / `Left` | title block, then the seven scene rows (196 by 26, 4 apart) or, compact, the `Chips` (seven 34 by 26 chips and the open scene's name), then a 24 point rule and the wrapped description |
+| `Top` / `Left` | title block, then the eight scene rows (196 by 26, 4 apart) or, compact, the `Chips` (eight 34 by 26 chips and the open scene's name), then a 24 point rule and the wrapped description |
 | `Top` / `Stat Line` | compact only: STEP, DRAW, BODIES, AWAKE as runs of one text |
 | `Top` / `Clear` | a fill box between the panels; its computed bounds are bound back into `clearX`.. `clearHeight` |
 | `Top` / `Right Room` | wide only: an empty 168 column that keeps `Clear` off the right panel |
 | `Top` / `Right` | absolute in the top right corner, 168 wide: STEP and DRAW, a rule, the six counts, a rule, B3 PROFILE with its stacked bar and one row per part |
+| `Threads` | only while the Threads scene is open (the `Threads Panel` layer on `threadsOpen`): the backend and thread count choices with a note under them, and `Graph`, a fill box holding a second `ScriptedLayout` running `demo/threads_graph.as`; a row 190 tall, or in compact a column 290 tall with the two choices side by side |
 | `Touch Help` | compact only: drag to orbit, pinch to zoom, tap a body to pick |
 | `Bottom` | pause, step, reset (34 square), the Pick and Shoot pair in one outline, the PAUSED tag, and the key help, right aligned, filling the rest and wrapping upward when narrow (each hint holds together with no break spaces) |
 | `Scrim Left`, `Scrim Right`, `Scrim Top`, `Scrim Bottom` | gradients that keep the panels legible over the scene; the side pair outside compact, the top and bottom pair in it; they scale with the overlay |
@@ -207,12 +211,16 @@ handles; the generator and it name the same properties.
 | `paused` | boolean | pause button, P, step | the pause button and PAUSED follow it |
 | `tool` | number | Pick, Shoot, Tab | 0 Pick, 1 Shoot |
 | `stepOnce`, `reset` | trigger | step and reset buttons | the script listens with `addListenerWith`; O and R call the same handlers |
-| `sceneName0`..`sceneName6` | string | script, once | row titles from `DemoScene.name()` |
+| `sceneName0`..`sceneName7` | string | script, once | row titles from `DemoScene.name()` |
 | `sceneTitle` | string | script | the open scene's name, under the chips |
 | `description` | string | script | the open scene's `hint()` |
 | `stepMs`, `drawMs`, `profileMs` | string | script | formatted with `formatMs` (3 decimals under 0.1 ms) |
 | `bodies`, `awake`, `contacts`, `joints`, `islands`, `faces` | number | script | shown through `DataConverterToString` |
 | `profilePairs` .. `profileOther` | number | script | ms per part, shown to 2 decimals and weighting the bar |
+| `threadsOpen` | boolean | script | the Threads scene is open, which shows its panel |
+| `backend`, `threads` | number | Threads panel, script | the backend (0 serial, 1 lanes, 2 parallel) and thread count asked for; the script writes back what the world steps on |
+| `_okLanes`, `_okParallel`, `_okThreads2`, `_okThreads4`, `_okThreads8` | boolean | script | whether each choice is there to take; while false a dim stand in shows instead |
+| `threadsNote` | string | script | what the backend does, and why the choices that are off are off |
 | `layoutClass` | number | script, on resize | 0 wide, 1 medium, 2 compact |
 | `uiScale`, `uiWidth`, `uiHeight` | number | script, on resize | the overlay's scale and its size in UI units |
 | `clearX`, `clearY`, `clearWidth`, `clearHeight` | number | the layout | `Clear`'s computed bounds, written back by binds with `direction` |
@@ -241,6 +249,79 @@ reaches its binds only on the next advance, so the script writes the overlay
 from `advance`. DRAW and FACES are measured in `draw` and so read 0 in a
 headless capture; they are live in the window.
 
+## The Threads scene
+
+Scene 8 shows the threaded step as it runs. The pit is 16 by 16 by 8 bodies (every third a capsule) in 2 m wall
+blocks, stirred by a kinematic paddle at 0.45 rad/s, with sleep off so every step has about the same work: about
+11500 contacts once settled. Bodies the paddle flings over the wall drop back in once a second, so the count stays
+put. The scene sets `crowd`: at 1176 bodies the spin rings cost 4 ms of a 10.5 ms frame and the shadows 2, more than
+the balls themselves, and a pile of 864 boxes was no better, its overlapping faces taking 18 ms a frame to order
+(7 after the sweep above). With both off, 2048 bodies draw in about 7.3 ms on AOT.
+
+The panel under the view (`Threads` above) picks the backend and the thread count; the script follows it between
+steps (`ThreadsState.apply`) and writes back what the world steps on:
+
+| Backend | What runs where | Threads |
+|---|---|---|
+| Serial | everything on the main thread | 1 |
+| Lanes | `b3World_EnableLanes` on jobs with collide, solve and the tree: the narrow phase and the solver stages on copies of what they read, partition 0 on the main lane, the tree rebuild on a job | 1 to `Jobs.threads() + 1`, at most 8 |
+| Parallel | `b3GetParallelBackend().enable` with collide and solve: parallel calls over the world's own memory, capped at the thread count by `limit` | 1 to `Parallel.size()`, at most 8 |
+
+Choices it cannot take show dim, with the reason in the note under them. What each place offers, detected at run
+time from `Jobs.threads()`, `b3GetParallelBackend()` and its `size()`:
+
+| Where | Serial | Lanes | Parallel |
+|---|---|---|---|
+| master rive-cli | yes | 1, 2, 4 (8 with `--job-threads=7`) | off: needs the parallel-calls toolchain and lib/parallel |
+| parallel-calls rive-cli, as checked in | yes | the same | off, the same, since rive.yaml leaves out `lib/parallel` |
+| parallel-calls rive-cli, `lib/parallel` included | yes | the same | 1, 2, 4 (`Parallel.size()` is the 6 fast cores; 8 with `--job-threads=7`) |
+| a browser runtime without threads, such as the live demo's | yes | off: this runtime has no threads | off, the same |
+
+It opens on the best backend there is, at up to 8 threads. Leaving the scene (`leave()`) puts the world back on the
+serial path and turns tracing off, since the lane hooks are global and would otherwise reach the next scene's
+world.
+
+The graphs are `ThreadsGraph` (`demo/threads_graph.as`), a script in the panel's layout box, so it draws over the
+scrims, scales with the overlay and gets its size from the layout; it reads `g_threads` and the trace, which it
+shares with `main.as` as module globals:
+
+- **Latest step, by thread**: a row per thread (main, then lane 1.. and the tree job, or part 1..), each span of
+  `lib/trace.as` placed by when it ran in the step, in the profile panel's tones (pairs, collide, solver, finalize,
+  tree) and the copying to and from lanes in the accent. The axis is ms and eases toward the latest steps' length;
+  a mark shows where the step ended. Rows are 16 points or less; the legend shows the groups the step has.
+- **Step time**: ms per step over the last 300 steps, in the backend's ink (serial grey, lanes accent, parallel
+  white), a mark wherever the backend or thread count changed, and once a serial step has been seen this session,
+  a dashed line at it and the speed up against it.
+- In compact the graph sits under the choices (which go side by side), the legend goes and the history keeps only
+  its figures.
+
+How it records is in notes/threading.md (Tracing). Each span is two `clock()` reads and three stores: about 180
+spans per row per step here, so 360 reads on serial and 1460 on 4 parts. Turned off in the scene, the same bakes
+read 2.30 to 2.73 against 2.24 to 2.70 ms serial and 0.97 to 1.26 against 1.01 to 1.34 ms on 4 parts, inside the
+machine's noise; the difference is at most about 0.05 ms. The other scenes never turn it on.
+
+Ms per step, `STEP_LOG` means over seconds 6 to 10, min over 2 to 3 interleaved rounds, release AOT bake (`aot
+-O3`), Apple M5 Max, shared with other agents' runs (1 minute load 21 to 37):
+
+| Toolchain | Serial | Lanes 1 | Lanes 2 | Lanes 4 | Lanes 8 | Parallel 1 | Parallel 2 | Parallel 4 | Parallel 8 |
+|---|---|---|---|---|---|---|---|---|---|
+| master | 2.24 | 2.57 | 4.05 | 4.14 | 7.74 | | | | |
+| parallel-calls, lib/parallel | 2.26 | | | 4.91 | | 2.62 | 1.76 | 1.01 | 1.21 |
+
+- **Parallel calls** take the step from 2.26 to 1.01 ms at 4 parts, 2.2x; 8 parts (with `--job-threads=7`) is no
+  faster, two of them landing on the efficiency cores while the machine is busy. The timeline shows why it is not
+  4x: the pairs are found in parallel, but making the contacts, the solver set up and the island work between the
+  calls stay on the main row, and each of the solver's 170 or so stages ends in a sync.
+- **Lanes lose here**: 4.1 ms at 4 and 7.7 at 8. The timeline shows the main lane packing each lane's section one
+  after another (the accent spans on the main row) while the lanes wait, then copying the results back; this scene
+  has 11500 contacts to copy each step, against the solver work of a few hundred µs per lane.
+- In headless Chrome (`bench/web/lanes.html` on the threads build of the web harness, 4 parts, 3 job threads) the
+  same scene steps in 1.8 to 2.9 ms under the same load, and every part's first span lands within 0.1 ms of the
+  step's start, so the parts' clocks agree there. The page harness draws nothing, so that run was checked from a
+  logged summary of the rows, not a capture.
+- On the harness built without threads (node, `bench/web/lanes.mjs` on `out/wasm_release`) the release bake
+  opens on Serial with "This runtime has no threads", and steps without trapping.
+
 ## The interface scenes implement
 
 ```as
@@ -255,6 +336,7 @@ export interface DemoScene {
     name(): string;
     hint(): string;
     reset(): void;
+    leave(): void;                       // another scene is opening
     step(dt: f32): void;                 // fixed 1/60 s; the shell times it
     draw(dd: DebugDraw): void;
     stats(out: SceneStats): void;
@@ -269,10 +351,11 @@ export interface DemoScene {
 }
 ```
 
-The shell calls `reset()` and `home()` when a scene opens, `step()` at 60 Hz
-while running (at most three per frame), `updateCamera()` every frame and
-`draw()` every frame between `dd.begin()` and `dd.end()`, after setting
-`dd.showContacts` and `dd.showJoints` from the C and J toggles.
+The shell calls `leave()` on the scene it leaves and `reset()` and `home()`
+on the one that opens, `step()` at 60 Hz while running (at most three per
+frame), `updateCamera()` every frame and `draw()` every frame between
+`dd.begin()` and `dd.end()`, after setting `dd.showContacts` and
+`dd.showJoints` from the C and J toggles.
 
 ## PhysicsScene
 
@@ -281,7 +364,8 @@ needs: `name`, `hint`, `home`, `worldDef`, `preStep(dt)` (before
 `b3World_Step`), `postStep(dt)`, `drawExtra(dd)`, `groundHeight(x, z)`,
 `updateCamera`, `keyDown`/`keyUp`. Options set in `build()`: `shotRadius`,
 `shotSpeed`, `shotDensity`, `shotBullet`, `maxShots`, `contactScale`,
-`uneven` (shadows at `groundHeight` under each body instead of on a plane).
+`uneven` (shadows at `groundHeight` under each body instead of on a plane),
+`crowd` (no rings or shadows, for hundreds of round bodies).
 
 - **World**: `reset()` destroys and recreates the world with one worker,
   clears the views, joints, shots and shape cache, and reseeds `random(lo,
@@ -365,7 +449,8 @@ Options a scene sets in `draw()`: `showGrid`, `gridY`, `gridExtent`,
 `shadows` with `shadowY` (automatic contact shadows under awake and
 kinematic solids on a flat ground), `lightDir`. Over uneven ground turn
 `shadows` off and call `dd.shadow()` with the ground height under each body.
-`bodyInk(i)` gives a stable tint from the warm grey family.
+`rings` (on by default) draws the great circles on spheres and the seams on
+capsules. `bodyInk(i)` gives a stable tint from the warm grey family.
 
 ### The GPU renderer
 
@@ -469,7 +554,12 @@ How the vector painter draws:
 - Solid faces are flat shaded from a fixed world light, back face culled,
   clipped against the near plane and culled off screen, then sorted per face
   by mean depth across all shapes and painted far to near, each with a
-  hairline edge.
+  hairline edge. Solid faces that overlap on screen are then ordered by their
+  depths inside the overlap, with a topological sort. The overlapping pairs come
+  from a sweep over the faces' screen left edges, which finds the pairs a loop
+  over every two faces finds, measured the same way, so it orders the same; for
+  a pile of 864 boxes (about 2500 faces) it took the ordering from 18 to 7 ms a
+  frame, most of what is left being the overlap clipping.
 - `STATE_STATIC` shapes go to a background layer painted first, then the
   grid, then shadows, then the sorted dynamic layer. That keeps large ground
   faces from sorting over the bodies resting on them. Standing static shapes
@@ -509,6 +599,7 @@ faces). The interpreter is roughly ten times slower.
   category 2) and has no third person camera or mouse look.
 - `SceneStats.shapes` is gathered but not shown.
 - The G, C and J toggles have keys but no controls in the panels.
+- The Threads panel has no workers backend choice; `b3_laneBackendWorkers` works with the same tracing.
 - DRAW and FACES read 0 in headless captures (see Captures above). FACES
   counts triangles on the GPU renderer and faces on the painter.
 
@@ -527,6 +618,15 @@ Final captures in `/private/tmp/claude-501/-Users-luigi-Projects-rive/65e4f28b-1
 - `i7home.png` the character level; `i7climb.png` up the stairs onto the landing (W held);
   `i7push.png` crates pushed (S and D held)
 - `t1.png` .. `t7.png` the AOT timing runs at 600 frames
+
+The Threads scene, release AOT at 600 frames, in `/private/tmp/claude-501/-Users-luigi-Projects-rive/65e4f28b-1249-4d28-8600-bb5fb40b325a/scratchpad/t8final/`
+(the `.log` beside each has `STEP_LOG`): `m_s_r2.png` serial, `m_l1_r1`, `m_l2_r1`, `m_l4_r1`, `m_l8_r2` lanes at
+1, 2, 4 and 8 on master; `pp_s_r2`, `pp_l4_r2`, `pp_p1_r2`, `pp_p2_r2`, `pp_p4_r2`, `pp_p8_r2` on parallel-calls
+with lib/parallel; `p_p4_r2` the same CLI without it, Parallel off and the scene on lanes. In
+`/private/tmp/claude-501/-Users-luigi-Projects-rive/65e4f28b-1249-4d28-8600-bb5fb40b325a/scratchpad/t8shots/`, interpreted: `u5med.png` medium, `u6cmp.png` compact, `u6wide.png`
+wide, `u4click.png` after clicking 2, Serial and Lanes, and in `cmp/` the other seven scenes before and after
+(`before_<n>.png`, `after_<n>.png`; the view is pixel identical, only the scene list, the key help and the timing
+digits differ).
 
 The RML shell, all AOT at 40 frames unless noted, in the same folder:
 
