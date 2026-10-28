@@ -69,12 +69,15 @@ as `f32` (`<f32>(1.0 / 60.0)`; a constant expression of float literals is `f64`)
   [the character mover](examples/mover.as) and [threading](examples/threading.as).
   `examples/check.sh` runs each one under `rive --test` and checks what it shows (`examples/tests.as`), such as the
   box coming to rest or four lanes ending bit for bit where the serial path does.
-- **The demo** at the repo root is a rive-cli project with eight scenes: pyramid, card house, ragdolls with a
-  wrecking ball, rain on a mesh, height field, bullets, a capsule character, and threads. Orbit, pick and shoot, with
-  overlays for contacts, joints and the profile (`notes/demo.md`). The threads scene stirs 2048 balls and capsules and
-  draws each step's tasks on each thread as it runs, with the step time over the last five seconds: serial or lanes
-  on master's toolchain, parallel calls too on the `parallel-calls` toolchain with `lib/parallel/` included, and
-  serial in a browser runtime without threads, such as the live demo's. It needs AOT for interactive rates:
+- **The demo** at the repo root is a rive-cli project with eight scenes: pyramid, card house, ragdolls with a wrecking
+  ball, rain on a mesh, height field, bullets, a capsule character, and threads. Orbit, pick and shoot, with overlays
+  for contacts, joints and the profile (`notes/demo.md`). The solids draw instanced on the GPU with a depth buffer,
+  through AnimaScript's GPU API and WGSL (`demo/gpu_draw.as`, `demo/scene3d.wgsl`), one draw per geometry: the
+  script's draw takes 0.01 to 0.1 ms where the 2D painter took 0.6 to 1.8 ms, and `--define=VECTOR_DRAW` keeps the
+  painter. The threads scene stirs 2048 balls and capsules and draws each step's tasks on each thread as it runs, with
+  the step time over the last five seconds: serial or lanes on master's toolchain, parallel calls too on the
+  `parallel-calls` toolchain with `lib/parallel/` included, and serial in a browser runtime without threads, such as
+  the live demo's. It needs AOT for interactive rates:
 
   ```sh
   RIVE_WAMRC=<wamrc> rive . --aot

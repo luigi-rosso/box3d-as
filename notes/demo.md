@@ -530,17 +530,23 @@ and the solids then go to it instead of the painter. Scenes call the same
   past them `droppedCount` counts.
 
 Draw cost against the painter, release AOT bake, `--bench=900` at 1280 by
-800, Apple M5 Max, two interleaved rounds (best shown). Script is `DRAW_LOG`'s
-mean over the last windows, `dd.begin` through `dd.end` with the scene's own
-draw; frame is the bench's render mean, which adds Rive's flush on the CPU but
-not GPU time, which the API cannot time (notes/findings.md). Before is the
-painter at 642691d, painter is this branch with `VECTOR_DRAW`.
+800, Apple M5 Max, two interleaved rounds after the merge of the Threads
+scene. Script is `DRAW_LOG`'s mean over the last windows, `dd.begin` through
+`dd.end` with the scene's own draw; frame is the bench's render mean, which
+adds Rive's flush on the CPU but not GPU time, which the API cannot time
+(notes/findings.md). Before is the painter on main at db958de, painter is
+this branch with `VECTOR_DRAW`.
 
 | Scene | Script, painter | Script, GPU | Frame, before | Frame, painter | Frame, GPU |
 |---|---|---|---|---|---|
-| 1 Pyramid, asleep | 1.17 to 1.35 ms | 0.014 to 0.018 ms | 1.88 ms | 1.92 ms | 0.20 ms |
-| 4 Rain, up to 260 bodies | 1.77 to 2.12 ms | 0.022 to 0.049 ms | 4.26 ms | 4.62 ms | 0.16 ms |
-| 5 Height field | 1.28 to 1.89 ms | 0.008 to 0.025 ms | 5.84 ms | 3.72 ms | 0.17 ms |
+| 1 Pyramid, asleep | 0.61 ms | 0.011 ms | 1.16 ms | 1.15 ms | 0.15 ms |
+| 4 Rain, up to 260 bodies | 1.59 to 1.61 ms | 0.022 ms | 4.01 ms | 4.03 ms | 0.16 ms |
+| 5 Height field | 1.12 to 1.14 ms | 0.007 ms | 3.26 ms | 3.28 ms | 0.15 ms |
+| 8 Threads, 2048 rounds | 1.61 to 1.79 ms | 0.093 to 0.10 ms | 6.77 ms | 6.88 ms | 0.47 ms |
+
+The Threads pit is two round draws on the GPU (coarse and fine detail) plus
+a few hull draws for the walls and paddle; it honors `crowd`, with no rings
+and no shadows, which would sit under the pile unseen.
 
 The script now spends its draw on reading body transforms and writing 12 or
 14 floats per body. In headless Chrome on the published `@rive-app/webgl2`
@@ -658,6 +664,10 @@ GPU renderer captures, 1280 by 800, interpreted, in
 - `web_*.png` (webgl2 2.48.0), `webt_*.png` (webgl2-threads 2.48.0) and
   `web2x_*.png` (2x) from headless Chrome on a local COOP/COEP mirror of the
   page
+- after the Threads merge: `m2_gpu_s1.png` .. `m2_gpu_s8.png` and
+  `m2_vec_s1.png` .. `m2_vec_s8.png` (`VECTOR_DRAW`), side by side in
+  `m2_vector_gpu_sheet.png`; `m2_gpu_collapse.png`; `m2web_*.png` and
+  `m2webt_*.png` the page on webgl2 and webgl2-threads 2.48.0
 
 ## Host API notes
 
