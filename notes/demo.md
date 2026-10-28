@@ -198,6 +198,18 @@ center projection, so orbit still pivots on the target and rays, pan and the
 Space shot all go through the same center. At 1280 by 800 the focal length is
 976, against 1018 before.
 
+That cone only promises what the 1280 by 800 tuning showed, and a scene wider
+or taller than it spilled out of `Clear` and under the panels: the Character
+level's ramp under the wide stats, the chain's anchor off the top of a phone.
+So the fit is four tangents, left, right, below and above the target, which
+`animateTo` resets to the cone and `include(lo, hi)` widens until a world box
+seen from the home view lies inside. The focal length fits their spans into
+`Clear` and the principal point sits where it centers them, so the target is
+off the box's center when the content is lopsided. Ragdolls and chain includes
+the pile and the anchor (and its target rose to 5 m), Character the whole
+level (from 22 m, its target 4 m right of the capsule), Threads the pit's walls.
+A scene that fits the cone keeps its framing.
+
 The script reads the bounds every `advance` and calls `camera.frame()`. The
 bound `computedRootX/Y` already include the overlay's scale, but
 `computedWidth/Height` are in its unscaled units, so the script multiplies
