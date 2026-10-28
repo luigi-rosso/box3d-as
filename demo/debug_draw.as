@@ -322,7 +322,8 @@ export class DebugDraw {
     shadowY: f32 = 0;
     // Great circles on spheres and seams on capsules, which show spin
     rings: bool = true;
-    lightDir: Vec3 = normalize(v3(0.3, 0.9, 0.5));
+    // Toward the sun: high on the left of the home views, so shadows fall back and to the right.
+    lightDir: Vec3 = normalize(v3(-0.42, 0.78, 0.62));
     // Set by the shell; scenes read them to decide what to overlay.
     showContacts: bool = false;
     showJoints: bool = true;
@@ -725,6 +726,10 @@ export class DebugDraw {
     // own on shadowY when shadows is on; scenes over uneven ground turn that
     // off and call this with the ground height under each body.
     shadow(p: Vec3, radius: f32, groundY: f32): void {
+        let maps = this.gpu;
+        if (maps != null && maps.castsShadows) {
+            return;
+        }
         let h = p.y - groundY;
         if (h < -radius) {
             return;

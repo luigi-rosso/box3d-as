@@ -30,6 +30,7 @@ const KEY_B: i32 = 66;
 const KEY_C: i32 = 67;
 const KEY_F: i32 = 70;
 const KEY_G: i32 = 71;
+const KEY_H: i32 = 72;
 const KEY_J: i32 = 74;
 const KEY_O: i32 = 79;
 const KEY_P: i32 = 80;
@@ -482,6 +483,11 @@ export class Main extends Layout {
             scene.home(this.camera);
         } else if (key == KEY_G) {
             this.gridOn = !this.gridOn;
+        } else if (key == KEY_H) {
+            let gpu = this.dd.gpu;
+            if (gpu != null) {
+                this.context!.log("shadows " + gpu.cycleShadows());
+            }
         } else if (key == KEY_C) {
             this.contactsOn = !this.contactsOn;
         } else if (key == KEY_J) {

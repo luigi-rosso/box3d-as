@@ -1602,7 +1602,7 @@
                                 <TextStyleAxis tag="2003265652" axisValue="300" name="Weight" id="0:4705"/>
                                 <TextStyleFeature tag="1953396077" featureValue="1" name="tnum" id="0:4706"/>
                             </TextStylePaint>
-                            <TextValueRun styleId="0:4707" text="Drag orbit   Shift drag pan   Scroll zoom   P pause   O step   R reset   Tab tool   C contacts   J joints   1-8 scene" name="Run" id="0:4710"/>
+                            <TextValueRun styleId="0:4707" text="Drag orbit   Shift drag pan   Scroll zoom   P pause   O step   R reset   Tab tool   C contacts   J joints   H shadows   1-8 scene" name="Run" id="0:4710"/>
                         </Text>
                     </LayoutComponent>
                 </LayoutComponent>

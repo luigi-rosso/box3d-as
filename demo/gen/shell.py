@@ -28,7 +28,7 @@ CLASSES = [WIDE, MEDIUM, COMPACT]
 # No break space inside each hint, so a wrapped line keeps a key with its action.
 KEY_HELP = "   ".join(h.replace(" ", "\u00a0") for h in (
     "Drag orbit", "Shift drag pan", "Scroll zoom", "P pause", "O step", "R reset", "Tab tool", "C contacts", "J joints",
-    "1-8 scene"))
+    "H shadows", "1-8 scene"))
 TOUCH_HELP = "   ".join(h.replace(" ", "\u00a0") for h in ("Drag to orbit", "Pinch to zoom", "Tap a body to pick"))
 
 INK = "FFEDE8E1"

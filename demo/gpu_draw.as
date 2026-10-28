@@ -1,9 +1,11 @@
 // Instanced GPU drawing of the demo's solids, with a reverse Z depth buffer,
 // into a canvas DebugDraw composites under its vector overlays. Each hull,
 // mesh or height field geometry is one draw for all its instances, every
-// sphere and capsule one more, and the blob shadows one. Static geometry draws
-// first, then the shadows, which test depth but never write it, then
-// everything that moves, so a shadow never covers a body.
+// sphere and capsule one more. The same draws first fill a depth atlas of
+// cascaded sun shadows, which every solid casts and receives. With the maps
+// off, blob shadows stand in: static geometry draws first, then the blobs,
+// which test depth but never write it, then everything that moves, so a blob
+// never covers a body.
 
 import { Context } from "rive/host";
 import { Renderer } from "rive/renderer";
@@ -13,6 +15,8 @@ import { Image, ImageFilter, ImageSampler, ImageWrap } from "rive/image";
 import {
     GPUBindGroup,
     GPUBindGroupLayout,
+    GPUBindGroupSampler,
+    GPUBindGroupTexture,
     GPUBindGroupUBO,
     GPUBlendState,
     GPUBuffer,
@@ -24,10 +28,12 @@ import {
     GPUPipeline,
     GPUPipelineDesc,
     GPURenderPass,
+    GPUSampler,
     GPUShaderModule,
     GPUTexture,
     GPUTextureDesc,
     GPUTextureView,
+    GPUTextureViewDesc,
     GPUVertexAttribute,
     GPUVertexBufferLayout,
 } from "rive/gpu";
@@ -35,15 +41,19 @@ import {
     BlendFactor,
     BufferUsage,
     CompareFunction,
+    Filter,
     IndexFormat,
     LoadOp,
     StoreOp,
+    TextureAspect,
     TextureFormat,
     VertexFormat,
     VertexStepMode,
+    WrapMode,
 } from "rive/gpu_enums";
-import { Vec3, Quat, Xf, cross, sub, normalize } from "./vec";
+import { Vec3, Quat, Xf, add, cross, sub, scale, normalize, rotate, length, lerp3 } from "./vec";
 import { OrbitCamera } from "./camera";
+import { BLEND, CASCADES, ShadowCascades, ViewSpan } from "./shadows";
 
 const DEPTH_FORMAT: TextureFormat = TextureFormat.depth32float;
 const SHADER: string = "demo/scene3d";
@@ -52,7 +62,32 @@ const VERTEX_WORDS: i32 = 9;
 const FLAT_WORDS: i32 = 12;
 const ROUND_WORDS: i32 = 14;
 const SHADOW_WORDS: i32 = 8;
-const VIEW_WORDS: i32 = 36;
+const VIEW_WORDS: i32 = 132;
+const CASTER_WORDS: i32 = 16;
+
+// Shadow qualities H steps through: maps with a 7 texel tent filter, soft
+// maps, half size maps with a 5 texel tent for weaker devices, and blobs.
+export const SHADOW_HIGH: i32 = 0;
+export const SHADOW_SOFT: i32 = 1;
+export const SHADOW_LOW: i32 = 2;
+export const SHADOW_OFF: i32 = 3;
+const SHADOW_NAMES: StaticArray<string> = ["high", "soft", "low", "off"];
+// The atlas holds the cascades two by two.
+const ATLAS_HIGH: u32 = 4096;
+const ATLAS_LOW: u32 = 2048;
+// Receivers move this many texels along their normal, and compare this many texels of depth nearer the sun.
+const NORMAL_OFFSET: f32 = 1.0;
+const DEPTH_BIAS: f32 = 1.0;
+// Casters push sloped faces back by this much of their slope.
+const SLOPE_BIAS: f32 = 1.0;
+// The sun's angular radius as a tangent, for the soft penumbra; wider than the real sun so it reads.
+const SUN_SIZE: f32 = 0.05;
+// Shadows fade out over the last share of their reach.
+const FADE: f32 = 0.15;
+// What light a surface out of the sun keeps: a little warm.
+const SHADOW_TINT_R: f32 = 1.05;
+const SHADOW_TINT_G: f32 = 0.99;
+const SHADOW_TINT_B: f32 = 0.9;
 
 const MAX_FLAT: i32 = 8192;
 const MAX_ROUND: i32 = 4096;
@@ -73,6 +108,9 @@ const DETAIL_PIXELS: f32 = 14;
 export class GpuMesh {
     buffer: GPUBuffer;
     vertices: u32;
+    // Local bounds, for how high the scene reaches.
+    center: Vec3 = Vec3(0, 0, 0);
+    half: Vec3 = Vec3(0, 0, 0);
     // The batch it fills this frame, when frame is the renderer's.
     slot: i32 = -1;
     frame: i32 = -1;
@@ -116,7 +154,17 @@ export class MeshWriter {
             words[i] = this.data[i];
         }
         let buffer = new GPUBuffer(BufferUsage.vertex, <u32>(count * 4), words.buffer, true);
-        return new GpuMesh(buffer, <u32>(count / VERTEX_WORDS));
+        let mesh = new GpuMesh(buffer, <u32>(count / VERTEX_WORDS));
+        let lo = Vec3(words[0], words[1], words[2]);
+        let hi = lo;
+        for (let i = 0; i < count; i += VERTEX_WORDS) {
+            let p = Vec3(words[i], words[i + 1], words[i + 2]);
+            lo = Vec3(Mathf.min(lo.x, p.x), Mathf.min(lo.y, p.y), Mathf.min(lo.z, p.z));
+            hi = Vec3(Mathf.max(hi.x, p.x), Mathf.max(hi.y, p.y), Mathf.max(hi.z, p.z));
+        }
+        mesh.center = scale(add(lo, hi), 0.5);
+        mesh.half = scale(sub(hi, lo), 0.5);
+        return mesh;
     }
 
     private vertex(p: Vec3, n: Vec3, ba: f32, bb: f32, bc: f32): void {
@@ -210,6 +258,9 @@ export class GpuDraw {
     private flatPipeline: GPUPipeline;
     private roundPipeline: GPUPipeline;
     private shadowPipeline: GPUPipeline;
+    private flatCaster: GPUPipeline;
+    private roundCaster: GPUPipeline;
+    private layout: GPUBindGroupLayout;
     private group: GPUBindGroup;
     private viewBuffer: GPUBuffer = new GPUBuffer(BufferUsage.uniform, <u32>(VIEW_WORDS * 4));
     private viewData: Float32Array = new Float32Array(VIEW_WORDS);
@@ -241,6 +292,8 @@ export class GpuDraw {
     private shadowBuffer: GPUBuffer = new GPUBuffer(BufferUsage.vertex, <u32>(MAX_SHADOWS * SHADOW_WORDS * 4));
     private shadows: i32 = 0;
 
+    private span: ViewSpan = new ViewSpan();
+
     private gridOn: bool = false;
     private gridX: f32 = 0;
     private gridZ: f32 = 0;
@@ -249,6 +302,20 @@ export class GpuDraw {
     private passDesc: GPUPassDesc = new GPUPassDesc();
     private attachment: GPUColorAttachment = new GPUColorAttachment();
     private pass: GPURenderPass? = null;
+
+    shadowQuality: i32 = SHADOW_HIGH;
+    private cascades: ShadowCascades = new ShadowCascades();
+    private casterBuffers: Array<GPUBuffer> = new Array<GPUBuffer>();
+    private casterGroups: Array<GPUBindGroup> = new Array<GPUBindGroup>();
+    private casterData: Float32Array = new Float32Array(CASTER_WORDS);
+    private shadowSampler: GPUSampler = new GPUSampler(Filter.linear, Filter.linear, Filter.nearest, WrapMode.clampToEdge,
+        WrapMode.clampToEdge, CompareFunction.less);
+    // Bound where the atlas would be while the atlas is drawn into.
+    private standIn: GPUTextureView;
+    private atlas: GPUTexture? = null;
+    private atlasSize: u32 = 0;
+    private shadowDesc: GPUPassDesc = new GPUPassDesc();
+    private shadowPass: GPURenderPass? = null;
     private sampler: ImageSampler = ImageSampler(ImageWrap.clamp, ImageWrap.clamp, ImageFilter.bilinear);
 
     // Null when the host has no GPU canvas or the shader is missing.
@@ -308,7 +375,28 @@ export class GpuDraw {
             attribute(VertexFormat.float4, 1, 16),
         ]);
         this.shadowPipeline = this.pipeline(shader, layout, format, "vs_shadow", "fs_shadow", [shadowInstance], false);
-        this.group = new GPUBindGroup(layout, [new GPUBindGroupUBO(0, this.viewBuffer)]);
+        this.flatCaster = caster(shader, layout, "vs_flat_cast", [perVertex, flatInstance]);
+        this.roundCaster = caster(shader, layout, "vs_round_cast", [roundVertex, roundInstance]);
+
+        this.layout = layout;
+        let standIn = new GPUTexture(depthDesc(1));
+        this.standIn = standIn.view(depthOnly());
+        for (let c = 0; c < CASCADES; c++) {
+            let buffer = new GPUBuffer(BufferUsage.uniform, <u32>(CASTER_WORDS * 4));
+            this.casterBuffers.push(buffer);
+            this.casterGroups.push(this.bindGroup(buffer, this.standIn));
+        }
+        this.group = this.bindGroup(this.casterBuffers[0], this.standIn);
+        this.shadowDesc.depthLoadOp = LoadOp.clear;
+        this.shadowDesc.depthStoreOp = StoreOp.store;
+        this.shadowDesc.depthClearValue = 1;
+        this.shadowDesc.label = "shadows";
+        if (maxSize < ATLAS_HIGH) {
+            this.shadowQuality = SHADOW_LOW;
+        }
+        if (isDefined(NO_SHADOWS)) {
+            this.shadowQuality = SHADOW_OFF;
+        }
 
         this.cube = makeCube();
 
@@ -319,6 +407,43 @@ export class GpuDraw {
         this.passDesc.depthStoreOp = StoreOp.discard;
         this.passDesc.depthClearValue = 0;
         this.passDesc.label = "solids";
+    }
+
+    private bindGroup(casterBuffer: GPUBuffer, atlas: GPUTextureView): GPUBindGroup {
+        return new GPUBindGroup(this.layout, [new GPUBindGroupUBO(0, this.viewBuffer), new GPUBindGroupUBO(1, casterBuffer)],
+            [new GPUBindGroupTexture(2, atlas)], [new GPUBindGroupSampler(3, this.shadowSampler)]);
+    }
+
+    // True when the solids cast shadow maps, so no blobs are needed.
+    get castsShadows(): bool {
+        return this.shadowQuality != SHADOW_OFF;
+    }
+
+    // Steps to the next shadow quality and names it.
+    cycleShadows(): string {
+        let q = (this.shadowQuality + 1) % SHADOW_NAMES.length;
+        if (q != SHADOW_OFF && q != SHADOW_LOW && this.maxSize < ATLAS_HIGH) {
+            q = SHADOW_LOW;
+        }
+        this.shadowQuality = q;
+        return SHADOW_NAMES[q];
+    }
+
+    // The atlas at the size the quality wants, made again when that changes.
+    private prepareAtlas(): void {
+        let size = this.shadowQuality == SHADOW_LOW ? ATLAS_LOW : ATLAS_HIGH;
+        if (size == this.atlasSize) {
+            return;
+        }
+        let old = this.atlas;
+        if (old != null) {
+            old.release();
+        }
+        let atlas = new GPUTexture(depthDesc(size));
+        this.atlas = atlas;
+        this.atlasSize = size;
+        this.shadowDesc.depthView = atlas.view();
+        this.group = this.bindGroup(this.casterBuffers[0], atlas.view(depthOnly()));
     }
 
     private pipeline(shader: GPUShaderModule, layout: GPUBindGroupLayout, format: TextureFormat, vertex: string,
@@ -355,6 +480,7 @@ export class GpuDraw {
         this.shadows = 0;
         this.dropped = 0;
         this.gridOn = false;
+        this.span.reset(camera);
     }
 
     // ---- recording ----------------------------------------------------------
@@ -377,6 +503,13 @@ export class GpuDraw {
             mesh.slot = this.meshCount;
             this.meshes[this.meshCount++] = mesh;
         }
+        // Its bounds: the local box turned and scaled.
+        let q = xf.q;
+        let ry = Vec3(2 * (q.x * q.y + q.w * q.z), 1 - 2 * (q.x * q.x + q.z * q.z), 2 * (q.y * q.z - q.w * q.x));
+        let h = Vec3(mesh.half.x * scale.x, mesh.half.y * scale.y, mesh.half.z * scale.z);
+        let center = add(xf.p, rotate(q, Vec3(mesh.center.x * scale.x, mesh.center.y * scale.y, mesh.center.z * scale.z)));
+        let rise = Mathf.abs(ry.x * h.x) + Mathf.abs(ry.y * h.y) + Mathf.abs(ry.z * h.z);
+        this.span.add(center, length(h), center.y - rise, center.y + rise);
         let i = this.flats++;
         this.flatKeys[i] = 2 * mesh.slot + (still ? 0 : 1);
         let d = this.flatStage;
@@ -405,6 +538,9 @@ export class GpuDraw {
         let cam = this.camera;
         let near = Mathf.min(cam.toCamera(c1).z, cam.toCamera(c2).z);
         let fine = cam.focal * radius * this.scale > DETAIL_PIXELS * Mathf.max(near, cam.near);
+        let mid = lerp3(c1, c2, 0.5);
+        this.span.add(mid, length(sub(c2, c1)) * 0.5 + radius, Mathf.min(c1.y, c2.y) - radius,
+            Mathf.max(c1.y, c2.y) + radius);
         let i = this.rounds++;
         this.roundKeys[i] = (still ? 0 : 2) + (fine ? 1 : 0);
         let d = this.roundStage;
@@ -467,7 +603,12 @@ export class GpuDraw {
             this.height = ph;
             this.attach(canvas);
         }
-        this.writeView(camera, light, minorInk, majorInk);
+        let maps = this.castsShadows && !this.span.empty;
+        if (maps) {
+            this.prepareAtlas();
+            this.cascades.fit(camera, light, <i32>(this.atlasSize / 2), this.span);
+        }
+        this.writeView(camera, light, minorInk, majorInk, maps);
 
         let flatKeyCount = 2 * this.meshCount;
         groupByKey(this.flatKeys, this.flatStage, this.flatData, this.flats, FLAT_WORDS, flatKeyCount, this.flatStarts);
@@ -482,19 +623,23 @@ export class GpuDraw {
             this.shadowBuffer.update(0, this.shadowData.buffer, <u32>(this.shadows * SHADOW_WORDS * 4));
         }
 
+        if (maps) {
+            this.drawCasters(canvas);
+        }
+
         let pass = canvas.beginRenderPass(this.passDesc, this.pass);
         this.pass = pass;
         pass.setBindGroup(0, this.group);
         this.triangles = 0;
-        this.drawFlats(pass, 0);
-        this.drawRounds(pass, 0);
-        if (this.shadows > 0) {
+        this.drawFlats(pass, 0, this.flatPipeline);
+        this.drawRounds(pass, 0, this.roundPipeline);
+        if (this.shadows > 0 && !maps) {
             pass.setPipeline(this.shadowPipeline);
             pass.setVertexBuffer(0, this.shadowBuffer);
             pass.draw(6, <u32>this.shadows);
         }
-        this.drawFlats(pass, 1);
-        this.drawRounds(pass, 1);
+        this.drawFlats(pass, 1, this.flatPipeline);
+        this.drawRounds(pass, 1, this.roundPipeline);
         pass.finish();
 
         renderer.save();
@@ -522,7 +667,31 @@ export class GpuDraw {
         return p < this.maxSize ? p : this.maxSize;
     }
 
-    private drawFlats(pass: GPURenderPass, layer: i32): void {
+    // Every solid into each cascade's tile of the atlas.
+    private drawCasters(canvas: GPUCanvas): void {
+        let matrices = this.cascades.matrices;
+        let data = this.casterData;
+        for (let c = 0; c < CASCADES; c++) {
+            for (let k = 0; k < CASTER_WORDS; k++) {
+                data[k] = matrices[c * CASTER_WORDS + k];
+            }
+            this.casterBuffers[c].update(0, data.buffer);
+        }
+        let pass = canvas.beginRenderPass(this.shadowDesc, this.shadowPass);
+        this.shadowPass = pass;
+        let tile = <f32>(this.atlasSize / 2);
+        for (let c = 0; c < CASCADES; c++) {
+            pass.setViewport(<f32>(c & 1) * tile, <f32>(c >> 1) * tile, tile, tile);
+            pass.setBindGroup(0, this.casterGroups[c]);
+            for (let layer = 0; layer < 2; layer++) {
+                this.drawFlats(pass, layer, this.flatCaster);
+                this.drawRounds(pass, layer, this.roundCaster);
+            }
+        }
+        pass.finish();
+    }
+
+    private drawFlats(pass: GPURenderPass, layer: i32, pipeline: GPUPipeline): void {
         let starts = this.flatStarts;
         let bound = false;
         for (let s = 0; s < this.meshCount; s++) {
@@ -532,7 +701,7 @@ export class GpuDraw {
                 continue;
             }
             if (!bound) {
-                pass.setPipeline(this.flatPipeline);
+                pass.setPipeline(pipeline);
                 bound = true;
             }
             let mesh = this.meshes[s]!;
@@ -543,18 +712,18 @@ export class GpuDraw {
         }
     }
 
-    private drawRounds(pass: GPURenderPass, layer: i32): void {
-        this.drawRound(pass, 2 * layer, this.coarseRound);
-        this.drawRound(pass, 2 * layer + 1, this.fineRound);
+    private drawRounds(pass: GPURenderPass, layer: i32, pipeline: GPUPipeline): void {
+        this.drawRound(pass, 2 * layer, this.coarseRound, pipeline);
+        this.drawRound(pass, 2 * layer + 1, this.fineRound, pipeline);
     }
 
-    private drawRound(pass: GPURenderPass, key: i32, mesh: RoundMesh): void {
+    private drawRound(pass: GPURenderPass, key: i32, mesh: RoundMesh, pipeline: GPUPipeline): void {
         let starts = this.roundStarts;
         let n = starts[key + 1] - starts[key];
         if (n <= 0) {
             return;
         }
-        pass.setPipeline(this.roundPipeline);
+        pass.setPipeline(pipeline);
         pass.setVertexBuffer(0, mesh.vertices);
         pass.setVertexBuffer(1, this.roundBuffer, <u32>(starts[key] * ROUND_WORDS * 4));
         pass.setIndexBuffer(mesh.indices, <u32>IndexFormat.uint16);
@@ -562,7 +731,7 @@ export class GpuDraw {
         this.triangles += n * <i32>(mesh.count / 3);
     }
 
-    private writeView(camera: OrbitCamera, light: Vec3, minorInk: u32, majorInk: u32): void {
+    private writeView(camera: OrbitCamera, light: Vec3, minorInk: u32, majorInk: u32, maps: bool): void {
         let d = this.viewData;
         let w = camera.width;
         let h = camera.height;
@@ -596,8 +765,85 @@ export class GpuDraw {
         d[27] = this.gridOn ? this.gridExtent : 0;
         writeInk(d, 28, minorInk);
         writeInk(d, 32, majorInk);
+        this.writeShadows(d, maps);
         this.viewBuffer.update(0, d.buffer);
     }
+
+    private writeShadows(d: Float32Array, maps: bool): void {
+        let cascades = this.cascades;
+        let m = cascades.matrices;
+        for (let k = 0; k < CASCADES * 16; k++) {
+            d[36 + k] = m[k];
+        }
+        for (let c = 0; c < CASCADES; c++) {
+            d[100 + c] = cascades.splits[c];
+            d[104 + c] = cascades.texels[c];
+            d[108 + c] = cascades.texelDepths[c];
+        }
+        let filter: f32 = 0;
+        if (maps) {
+            filter = 2;
+            if (this.shadowQuality == SHADOW_SOFT) {
+                filter = 3;
+            } else if (this.shadowQuality == SHADOW_LOW) {
+                filter = 1;
+            }
+        }
+        d[112] = 1 / <f32>Mathf.max(<f32>this.atlasSize, 1);
+        d[113] = filter;
+        d[114] = NORMAL_OFFSET;
+        d[115] = DEPTH_BIAS;
+        d[116] = maps ? SHADOW_TINT_R : 1;
+        d[117] = maps ? SHADOW_TINT_G : 1;
+        d[118] = maps ? SHADOW_TINT_B : 1;
+        d[119] = maps && isDefined(CSM_DEBUG) ? 1 : 0;
+        d[120] = cascades.far * (1 - FADE);
+        d[121] = BLEND;
+        d[122] = SUN_SIZE;
+        d[123] = 0;
+        writeVec(d, 124, cascades.right);
+        writeVec(d, 128, cascades.up);
+    }
+}
+
+function writeVec(d: Float32Array, o: i32, v: Vec3): void {
+    d[o] = v.x;
+    d[o + 1] = v.y;
+    d[o + 2] = v.z;
+    d[o + 3] = 0;
+}
+
+function depthDesc(size: u32): GPUTextureDesc {
+    let desc = new GPUTextureDesc();
+    desc.width = size;
+    desc.height = size;
+    desc.format = DEPTH_FORMAT;
+    desc.renderTarget = true;
+    return desc;
+}
+
+// A view the shader samples as texture_depth_2d.
+function depthOnly(): GPUTextureViewDesc {
+    let desc = new GPUTextureViewDesc();
+    desc.aspect = TextureAspect.depthOnly;
+    return desc;
+}
+
+// A depth only pipeline drawing into one cascade's tile, sloped faces pushed back so lit faces do not shadow themselves.
+function caster(shader: GPUShaderModule, layout: GPUBindGroupLayout, vertex: string,
+    buffers: Array<GPUVertexBufferLayout>): GPUPipeline {
+    let depth = new GPUDepthStencilDesc();
+    depth.format = DEPTH_FORMAT;
+    depth.compare = CompareFunction.less;
+    depth.write = true;
+    depth.depthBiasSlopeScale = SLOPE_BIAS;
+    let desc = new GPUPipelineDesc();
+    desc.vertexModule = shader;
+    desc.vertexEntryPoint = vertex;
+    desc.vertexBuffers = buffers;
+    desc.bindGroupLayouts = [layout];
+    desc.depthStencil = depth;
+    return new GPUPipeline(desc);
 }
 
 function writeInk(d: Float32Array, o: i32, c: u32): void {
