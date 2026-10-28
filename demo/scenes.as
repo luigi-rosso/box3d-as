@@ -102,6 +102,10 @@ class PyramidScene extends PhysicsScene {
     }
 
     build(): void {
+        // About five boxes of mass, so a shot punches through rather than bouncing off
+        this.shotRadius = 0.4;
+        this.shotDensity = 20;
+        this.shotSpeed = 80;
         addGroundBox(this, 30);
         let baseCount = 20;
         let h: f32 = 0.5;
@@ -197,6 +201,8 @@ class CardHouseScene extends PhysicsScene {
 
 // samples/sample_joint.cpp BallAndChain swinging through a pile of shared/human.c ragdolls.
 class RagdollScene extends PhysicsScene {
+    anchorY: f32 = 0;
+
     name(): string {
         return "Ragdolls and chain";
     }
@@ -206,7 +212,8 @@ class RagdollScene extends PhysicsScene {
     }
 
     home(camera: OrbitCamera): void {
-        camera.animateTo(v3(0, 3.5, 0), 17, 0.42, 0.2);
+        camera.animateTo(v3(0, 5, 0), 17, 0.42, 0.2);
+        camera.include(v3(-1.5, 0, -1.5), v3(1.5, this.anchorY + 0.2, 1.5));
     }
 
     build(): void {
@@ -218,6 +225,7 @@ class RagdollScene extends PhysicsScene {
         let sphereRadius: f32 = 1.0;
         // The ball's lowest swing just clears the floor.
         let anchorY: f32 = 2.0 * linkExtent * <f32>linkCount + sphereRadius + 1.45;
+        this.anchorY = anchorY;
 
         let bodyDef = b3DefaultBodyDef();
         bodyDef.position = b3Vec3(0, anchorY, 0);
@@ -658,7 +666,9 @@ class CharacterScene extends PhysicsScene {
 
     home(camera: OrbitCamera): void {
         let p = this.mover.transform.p;
-        camera.animateTo(v3(p.x + 2.0, p.y - 0.2, p.z - 1.0), 15, 0.2, 0.45);
+        camera.animateTo(v3(p.x + 4.0, p.y - 0.2, p.z - 1.0), 22, 0.3, 0.55);
+        // The level, from the long wall to the short one and out to the ledge.
+        camera.include(v3(-6, 0, -6.8), v3(12.9, 2.5, 4.7));
         this.following = false;
     }
 
@@ -821,6 +831,8 @@ class ThreadsScene extends PhysicsScene {
 
     home(camera: OrbitCamera): void {
         camera.animateTo(v3(0, 0, 0), 30, 0.6, 0.8);
+        let rim: f32 = PIT_EXTENT + 0.2;
+        camera.include(v3(-rim, 0, -rim), v3(rim, 2.0 * PIT_WALL, rim));
     }
 
     worldDef(): b3WorldDef {

@@ -14,9 +14,14 @@ const PROFILE_NAMES: StaticArray<string> = ["profilePairs", "profileCollide", "p
 export const CLASS_WIDE: i32 = 0;
 export const CLASS_MEDIUM: i32 = 1;
 export const CLASS_COMPACT: i32 = 2;
+export const CLASS_SHORT: i32 = 3;
 
-// Wide keeps every panel; compact is for phones and small windows; medium sits between.
+// Wide keeps every panel; compact is for phones and small windows; short is a phone on its side, too low for the
+// scene rows; medium sits between.
 export function sizeClass(width: f32, height: f32): i32 {
+    if (height < 480 && width >= height) {
+        return CLASS_SHORT;
+    }
     if (width < 720 || width < height) {
         return CLASS_COMPACT;
     }
@@ -26,9 +31,11 @@ export function sizeClass(width: f32, height: f32): i32 {
     return CLASS_MEDIUM;
 }
 
-// The panels grow and shrink with the window's smaller side, 800 points being 1.
-export function uiScaleFor(width: f32, height: f32): f32 {
-    return Mathf.min(Mathf.max(Mathf.min(width, height) / 800, 0.85), 1.3);
+// The panels grow and shrink with the window's smaller side, 800 points being 1, and on phones stay large
+// enough to read and to press.
+export function uiScaleFor(width: f32, height: f32, layoutClass: i32): f32 {
+    let touch = layoutClass == CLASS_COMPACT || layoutClass == CLASS_SHORT;
+    return Mathf.min(Mathf.max(Mathf.min(width, height) / 800, touch ? 1.1 : 0.85), 1.3);
 }
 
 export function formatMs(ms: f64): string {
@@ -137,8 +144,9 @@ export class Shell {
 
     // Picks the size class and scale for a window size.
     fit(width: f32, height: f32): void {
-        let scale = uiScaleFor(width, height);
-        this.layoutClass.value = <f64>sizeClass(width, height);
+        let layoutClass = sizeClass(width, height);
+        let scale = uiScaleFor(width, height, layoutClass);
+        this.layoutClass.value = <f64>layoutClass;
         this.uiScale.value = <f64>scale;
         this.uiWidth.value = <f64>(width / scale);
         this.uiHeight.value = <f64>(height / scale);

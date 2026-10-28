@@ -27,6 +27,11 @@ export class OrbitCamera {
     frameY: f32 = 0;
     frameWidth: f32 = 0;
     frameHeight: f32 = 0;
+    // Tangents the frame must show left, right, below and above the target.
+    fitLeft: f32 = FIT_X;
+    fitRight: f32 = FIT_X;
+    fitDown: f32 = FIT_Y;
+    fitUp: f32 = FIT_Y;
 
     // Derived by update().
     eye: Vec3 = Vec3(0, 0, 0);
@@ -83,6 +88,10 @@ export class OrbitCamera {
 
     // Eases toward a view; any direct input cancels it.
     animateTo(target: Vec3, distance: f32, yaw: f32, pitch: f32): void {
+        this.fitLeft = FIT_X;
+        this.fitRight = FIT_X;
+        this.fitDown = FIT_Y;
+        this.fitUp = FIT_Y;
         this.goalTarget = target;
         this.goalDistance = distance;
         // Take the short way around.
@@ -94,6 +103,22 @@ export class OrbitCamera {
         this.yawVelocity = 0;
         this.pitchVelocity = 0;
         this.animating = true;
+    }
+
+    // Widens the fit so a world box shows whole from the view animateTo set.
+    include(lo: Vec3, hi: Vec3): void {
+        let goal = new OrbitCamera();
+        goal.set(this.goalTarget, this.goalDistance, this.goalYaw, this.goalPitch);
+        for (let i = 0; i < 8; i++) {
+            let c = goal.toCamera(Vec3((i & 1) != 0 ? hi.x : lo.x, (i & 2) != 0 ? hi.y : lo.y, (i & 4) != 0 ? hi.z : lo.z));
+            let x = c.x / c.z;
+            let y = c.y / c.z;
+            this.fitLeft = Mathf.max(this.fitLeft, -x);
+            this.fitRight = Mathf.max(this.fitRight, x);
+            this.fitDown = Mathf.max(this.fitDown, -y);
+            this.fitUp = Mathf.max(this.fitUp, y);
+        }
+        this.update();
     }
 
     // Moves the target, and any eased goal with it, without cancelling input.
@@ -169,9 +194,12 @@ export class OrbitCamera {
         let framed = this.frameWidth > 1 && this.frameHeight > 1;
         let w = framed ? this.frameWidth : this.width;
         let h = framed ? this.frameHeight : this.height;
-        this.focal = Mathf.min(0.5 * w / FIT_X, 0.5 * h / FIT_Y);
-        this.cx = (framed ? this.frameX : 0) + 0.5 * w;
-        this.cy = (framed ? this.frameY : 0) + 0.5 * h;
+        let spanX = this.fitLeft + this.fitRight;
+        let spanY = this.fitDown + this.fitUp;
+        this.focal = Mathf.min(w / spanX, h / spanY);
+        // The fit is centered in the frame, so the target sits off center when the fit is lopsided.
+        this.cx = (framed ? this.frameX : 0) + 0.5 * (w - this.focal * spanX) + this.focal * this.fitLeft;
+        this.cy = (framed ? this.frameY : 0) + 0.5 * (h - this.focal * spanY) + this.focal * this.fitUp;
     }
 
     // Camera space: x right, y up, z depth along the view.
