@@ -59,6 +59,17 @@ import {
 } from "../physics_world";
 import { b3EnqueueTaskCallback, b3FinishTaskCallback, b3TaskCallback, b3WorldId } from "../types";
 import { b3ParallelBackend, b3SetParallelBackend } from "../lane_common";
+import { B3_MAX_WORKERS } from "../constants";
+import {
+	b3SpanBegin,
+	b3SpanEnd,
+	b3TraceRowAt,
+	b3TraceStageKind,
+	b3_traceCollide,
+	b3_traceFinalize,
+	b3_tracePairs,
+	b3_traceTree,
+} from "../trace";
 
 export const b3_parallelCollide: i32 = 1;
 export const b3_parallelSolve: i32 = 2;
@@ -75,6 +86,9 @@ export class b3ParallelStats {
 
 export const b3_parallelStats = new b3ParallelStats();
 
+// The most parts a call runs on
+let s_partLimit = B3_MAX_WORKERS;
+
 // Runs one stage's blocks on whichever parts claim them, then waits for every part, as C's main thread waits for
 // the stage's completion count.
 function b3RunStage(part: Part, stage: b3SolverStage, context: b3StepContext): void {
@@ -85,9 +99,12 @@ function b3RunStage(part: Part, stage: b3SolverStage, context: b3StepContext): v
 
 	let blocks = stage.blocks;
 	let workerIndex = part.index;
+	let trace = b3TraceRowAt(workerIndex);
+	let traceBegin = b3SpanBegin(trace);
 	for (let i = part.claim(blockCount, 1); i < blockCount; i = part.claim(blockCount, 1)) {
 		b3ExecuteBlock(stage, context, blocks[i].block, workerIndex);
 	}
+	b3SpanEnd(trace, b3TraceStageKind(stage.type), traceBegin);
 	part.sync();
 }
 
@@ -249,7 +266,7 @@ function b3ParallelSolve(context: b3StepContext): bool {
 		taskContext.hasHitEvents = false;
 	}
 
-	Parallel.run(b3ParallelSolverTask, context);
+	Parallel.runUpTo(s_partLimit, b3ParallelSolverTask, context);
 	b3_parallelStats.solves += 1;
 	return true;
 }
@@ -263,14 +280,19 @@ function b3ParallelSolve(context: b3StepContext): bool {
 	blockSize: i32,
 	rebuildTrees: bool,
 ): void {
+	let workerIndex = part.index;
+	let trace = b3TraceRowAt(workerIndex);
+	let traceBegin = b3SpanBegin(trace);
 	if (rebuildTrees && part.index == part.count - 1) {
 		b3UpdateTreesTaskAt<b3InParallel>(context.world);
+		b3SpanEnd(trace, b3_traceTree, traceBegin);
+		traceBegin = b3SpanBegin(trace);
 	}
 
-	let workerIndex = part.index;
 	for (let start = part.claim(contactCount, blockSize); start < contactCount; start = part.claim(contactCount, blockSize)) {
 		b3CollideTask<b3InParallel>(start, min(start + blockSize, contactCount), workerIndex, context);
 	}
+	b3SpanEnd(trace, b3_traceCollide, traceBegin);
 }
 
 // b3ParallelFor's block size for itemCount items of at least minRange each over workerCount workers
@@ -305,7 +327,8 @@ unsafe function b3ParallelCollide(context: b3StepContext, contactCount: i32): bo
 		b3ReserveTreesTask(world);
 	}
 
-	Parallel.run(
+	Parallel.runUpTo(
+		s_partLimit,
 		b3ParallelCollideTask,
 		context,
 		contactCount,
@@ -321,6 +344,8 @@ unsafe function b3ParallelCollide(context: b3StepContext, contactCount: i32): bo
 	let stats = b3_parallelStats;
 	stats.collides += 1;
 	stats.contacts += contactCount;
+	let trace = b3TraceRowAt(0);
+	let traceBegin = b3SpanBegin(trace);
 	for (let i = 0; i < world.workerCount; ++i) {
 		let taskContext = world.taskContexts[i];
 		let deferred = taskContext.deferredContacts;
@@ -330,14 +355,18 @@ unsafe function b3ParallelCollide(context: b3StepContext, contactCount: i32): bo
 			b3CollideTask<b3OnMain>(index, index + 1, i, context);
 		}
 	}
+	b3SpanEnd(trace, b3_traceCollide, traceBegin);
 	return true;
 }
 
 @parallel.inplace export unsafe function b3ParallelFinalizeTask(part: Part, context: b3StepContext, bodyCount: i32, blockSize: i32): void {
 	let workerIndex = part.index;
+	let trace = b3TraceRowAt(workerIndex);
+	let traceBegin = b3SpanBegin(trace);
 	for (let start = part.claim(bodyCount, blockSize); start < bodyCount; start = part.claim(bodyCount, blockSize)) {
 		b3FinalizeBodiesTask<b3InParallel>(start, min(start + blockSize, bodyCount), workerIndex, context);
 	}
+	b3SpanEnd(trace, b3_traceFinalize, traceBegin);
 }
 
 unsafe function b3ParallelFinalize(context: b3StepContext, bodyCount: i32): bool {
@@ -356,7 +385,7 @@ unsafe function b3ParallelFinalize(context: b3StepContext, bodyCount: i32): bool
 	}
 	context.parallelContinuous = b3PrepareParallelContinuous(world);
 
-	Parallel.run(b3ParallelFinalizeTask, context, bodyCount, b3ParallelForBlockSize(bodyCount, 8, world.workerCount));
+	Parallel.runUpTo(s_partLimit, b3ParallelFinalizeTask, context, bodyCount, b3ParallelForBlockSize(bodyCount, 8, world.workerCount));
 	b3FinishParallelFinalize(world, context);
 
 	let stats = b3_parallelStats;
@@ -377,14 +406,19 @@ unsafe function b3ParallelFinalize(context: b3StepContext, bodyCount: i32): bool
 	selfBlockSize: i32,
 ): void {
 	let workerIndex = part.index;
+	let trace = b3TraceRowAt(workerIndex);
+	let traceBegin = b3SpanBegin(trace);
 	for (let i = part.claim(crossCount, 1); i < crossCount; i = part.claim(crossCount, 1)) {
 		b3CrossPairsTask<b3InParallel>(i, i + 1, workerIndex, crossContext);
 	}
+	b3SpanEnd(trace, b3_tracePairs, traceBegin);
 	part.sync();
 
+	traceBegin = b3SpanBegin(trace);
 	for (let start = part.claim(selfCount, selfBlockSize); start < selfCount; start = part.claim(selfCount, selfBlockSize)) {
 		b3SelfPairsTask<b3InParallel>(start, min(start + selfBlockSize, selfCount), workerIndex, world);
 	}
+	b3SpanEnd(trace, b3_tracePairs, traceBegin);
 }
 
 // Room for this many new pairs per part, grown after a step that ran out
@@ -397,7 +431,8 @@ function b3ParallelPairs(world: b3World, crossContext: b3CrossContext, crossCoun
 	}
 
 	b3PrepareParallelPairs(world, s_pairKeyCapacity);
-	Parallel.run(
+	Parallel.runUpTo(
+		s_partLimit,
 		b3ParallelPairsTask,
 		world,
 		crossContext,
@@ -434,7 +469,10 @@ function b3ParallelEnqueue(task: b3TaskCallback, taskContext: u64, name: string)
 function b3ParallelFinish(world: b3World, userTask: u64): void {
 	if (userTask == B3_TREES_TASK && s_treesPending) {
 		s_treesPending = false;
+		let trace = b3TraceRowAt(0);
+		let traceBegin = b3SpanBegin(trace);
 		b3UpdateTreesTaskAt<b3OnMain>(world);
+		b3SpanEnd(trace, b3_traceTree, traceBegin);
 	}
 }
 
@@ -489,6 +527,10 @@ class b3ParallelCalls extends b3ParallelBackend {
 
 	override size(): i32 {
 		return Parallel.size();
+	}
+
+	override limit(parts: i32): void {
+		s_partLimit = parts > 0 ? parts : B3_MAX_WORKERS;
 	}
 
 	override report(): string {

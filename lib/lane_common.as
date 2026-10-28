@@ -7,6 +7,7 @@ import { SharedRegion } from "rive/shared";
 
 import { b3CreateBitSet } from "./bitset";
 import { b3TaskContext } from "./physics_world";
+import { b3TraceRow, b3TraceRowAt } from "./trace";
 import { b3WorldId } from "./types";
 
 export const b3_laneBackendJobs: i32 = 1;
@@ -23,6 +24,9 @@ export class b3ParallelBackend {
 	size(): i32 {
 		return 1;
 	}
+
+	// Runs later calls on at most parts parts, 0 on as many as size()
+	limit(parts: i32): void {}
 
 	// Fields for a bench's result line
 	report(): string {
@@ -42,8 +46,7 @@ export function b3GetParallelBackend(): b3ParallelBackend? {
 
 export const B3_MAX_LANES: i32 = 8;
 
-// Jobs and workers have no clock, so only the main lane times its partition: the clock is set there, and a lane
-// sees the initial null.
+// Only the main lane times its partition for the profile: the clock is set there, and a lane sees the initial null.
 export type b3LaneClock = () => f64;
 
 let b3_laneClock: b3LaneClock? = null;
@@ -164,4 +167,62 @@ export function b3MakeLaneTaskContext(): b3TaskContext {
 	taskContext.contactStateBitSet = b3CreateBitSet(1024);
 	taskContext.awakeIslandBitSet = b3CreateBitSet(64);
 	return taskContext;
+}
+
+// A lane's trace spans travel back in a region: whether the main lane traces, the span count, then kind, begin and end
+// per span as f64
+const LANE_TRACE_SPANS: i32 = 128;
+export const B3_LANE_TRACE_BYTES: u32 = 8 + 24 * <u32>LANE_TRACE_SPANS;
+
+const b3_laneTraceRow = new b3TraceRow();
+const b3_laneTracePacked = new Float64Array(3 * LANE_TRACE_SPANS);
+
+// Before a command: whether the lane records into region
+export function b3LaneTraceArm(region: SharedRegion): void {
+	region.atomicStore(4, 0);
+	region.atomicStore(0, b3TraceRowAt(0) != null ? 1 : 0);
+}
+
+// On the lane: its row for this command, or null when the main lane is not tracing
+export function b3LaneTraceOpen(region: SharedRegion): b3TraceRow? {
+	if (region.atomicLoad(0) == 0) {
+		return null;
+	}
+	b3_laneTraceRow.count = 0;
+	return b3_laneTraceRow;
+}
+
+// On the lane, before it signals it is done
+export function b3LaneTraceSend(region: SharedRegion, row: b3TraceRow?): void {
+	if (row == null) {
+		return;
+	}
+	let count = min(row.count, LANE_TRACE_SPANS);
+	let packed = b3_laneTracePacked;
+	for (let i = 0; i < count; ++i) {
+		packed[3 * i] = <f64>row.kinds[i];
+		packed[3 * i + 1] = row.begins[i];
+		packed[3 * i + 2] = row.ends[i];
+	}
+	region.exclusive((view) => {
+		view.writeFrom(8, packed, 0, 3 * count);
+	});
+	region.atomicStore(4, <u32>count);
+}
+
+// After a command: what the lane sent, into the main lane's row rowIndex
+export function b3LaneTraceGather(region: SharedRegion, rowIndex: i32): void {
+	let row = b3TraceRowAt(rowIndex);
+	if (row == null) {
+		return;
+	}
+	let count = <i32>region.atomicLoad(4);
+	let packed = b3_laneTracePacked;
+	region.exclusive((view) => {
+		view.readInto(8, packed, 0, 3 * count);
+	});
+	for (let i = 0; i < count; ++i) {
+		row.add(<i32>packed[3 * i], packed[3 * i + 1], packed[3 * i + 2]);
+	}
+	region.atomicStore(4, 0);
 }

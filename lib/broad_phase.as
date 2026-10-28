@@ -4,6 +4,7 @@
 
 import { B3_ASSERT, B3_ENABLE_VALIDATION, B3_NULL_INDEX, b3OnMain } from "./core";
 import { B3_MAX_TASKS, B3_SHAPE_POWER } from "./constants";
+import { b3SpanBegin, b3SpanEnd, b3TraceRowAt, b3_traceTree } from "./trace";
 import {
 	b3AABB,
 	b3AABB_Overlaps,
@@ -760,7 +761,10 @@ export function b3CrossPairsTask<M>(startIndex: i32, endIndex: i32, workerIndex:
 }
 
 function b3UpdateTreesTask(world: b3World): void {
+	let trace = b3TraceRowAt(0);
+	let traceBegin = b3SpanBegin(trace);
 	b3UpdateTreesTaskAt<b3OnMain>(world);
+	b3SpanEnd(trace, b3_traceTree, traceBegin);
 }
 
 // b3UpdateTreesTask in a parallel part, b3InParallel, between b3ReserveTreesTask and b3FinishTreesTask

@@ -4,13 +4,14 @@
 // carries the world, so the enqueue callback can recognize it by name and send the two trees it rebuilds, and the
 // finish callback copies them back. It runs beside the narrow phase and the solver, as in C.
 
-import { Blob } from "rive/shared";
+import { Blob, SharedRegion } from "rive/shared";
 
 import { b3DynamicTree, b3TreeNode, b3TreeProxy } from "./collision";
 import { b3DynamicTree_Rebuild } from "./dynamic_tree";
 import { b3_dynamicBody, b3_kinematicBody } from "./types";
 import { b3World } from "./physics_world";
-import { b3GrowU8, b3LaneNow, b3LaneWriter, b3ReadI32 } from "./lane_common";
+import { b3GrowU8, b3LaneNow, b3LaneTraceOpen, b3LaneTraceSend, b3LaneWriter, b3ReadI32 } from "./lane_common";
+import { b3SpanBegin, b3SpanEnd, b3_traceTree } from "./trace";
 
 // Scalars of a tree after its three arrays: nodeEnd, nodeCapacity, pairFreeList, proxyCount, proxyCapacity,
 // proxyFreeList, rebuildCapacity, dfsOrdered
@@ -71,7 +72,9 @@ function b3ClearScratch(tree: b3DynamicTree): void {
 	tree.rebuildCapacity = 0;
 }
 
-@job export function b3LaneTreeJob(input: Blob): Blob {
+@job export function b3LaneTreeJob(input: Blob, traceRegion: SharedRegion): Blob {
+	let trace = b3LaneTraceOpen(traceRegion);
+	let traceBegin = b3SpanBegin(trace);
 	let bytes = new Uint8Array(<i32>input.byteLength);
 	input.readInto(0, bytes);
 	let base = bytes.dataStart;
@@ -86,7 +89,10 @@ function b3ClearScratch(tree: b3DynamicTree): void {
 	let w = new b3LaneWriter();
 	b3WriteTree(w, dynamicTree);
 	b3WriteTree(w, kinematicTree);
-	return Blob.fromArray(w.buffer, 0, w.length);
+	let output = Blob.fromArray(w.buffer, 0, w.length);
+	b3SpanEnd(trace, b3_traceTree, traceBegin);
+	b3LaneTraceSend(traceRegion, trace);
+	return output;
 }
 
 export class b3LaneTreeMain {

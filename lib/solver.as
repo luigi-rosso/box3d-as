@@ -186,6 +186,7 @@ import {
 } from "./shape";
 import { B3_PROXY_ID, b3BroadPhase_MarkProxyMoved } from "./broad_phase";
 import { b3ParallelFor } from "./parallel_for";
+import { b3SpanBegin, b3SpanEnd, b3TraceRowAt, b3TraceStageKind } from "./trace";
 import { b3SplitIslandTask } from "./island";
 import { b3FindNameWithDefault } from "./name_cache";
 import { b3TrySleepIsland } from "./solver_set";
@@ -1756,6 +1757,8 @@ function b3ExecuteMainStage(stage: b3SolverStage, context: b3StepContext, syncBi
 	}
 
 	const workerIndex = 0;
+	let trace = b3TraceRowAt(workerIndex);
+	let traceBegin = b3SpanBegin(trace);
 
 	if (blockCount == 1) {
 		b3ExecuteBlock(stage, context, stage.blocks[0].block, workerIndex);
@@ -1775,6 +1778,7 @@ function b3ExecuteMainStage(stage: b3SolverStage, context: b3StepContext, syncBi
 
 		b3AtomicStoreInt(stage.completionCount, 0);
 	}
+	b3SpanEnd(trace, b3TraceStageKind(stage.type), traceBegin);
 }
 
 @inline function b3SyncBits(syncIndex: i32, stageIndex: i32): u32 {

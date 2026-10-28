@@ -4,7 +4,7 @@
 // snapshot blob made once until the shapes change, and each step serializes the contacts' state, their body sims
 // and shape bounds, then copies the updated state back. A worker keeps the shapes it decoded from step to step.
 
-import { Blob } from "rive/shared";
+import { Blob, SharedRegion } from "rive/shared";
 
 import { b3GetLengthUnitsPerMeter, b3OnMain, b3SetLengthUnitsPerMeter } from "./core";
 import { b3AABB, b3Quat, b3Transform, b3Vec3 } from "./math_functions";
@@ -63,6 +63,8 @@ import {
 	b3GrowI32,
 	b3GrowU8,
 	b3LaneNow,
+	b3LaneTraceOpen,
+	b3LaneTraceSend,
 	b3LaneWriter,
 	b3MakeLaneTaskContext,
 	b3ReadF32,
@@ -70,6 +72,7 @@ import {
 	b3ReadU32,
 	b3SplitStart,
 } from "./lane_common";
+import { b3SpanBegin, b3SpanEnd, b3_traceCollide, b3_traceCopy } from "./trace";
 
 const SNAPSHOT_MAGIC: u32 = 0x53533342;
 
@@ -643,7 +646,15 @@ export class b3LaneCollideReplica {
 
 // Runs b3CollideTask over a section on the replica and answers the contacts' updated state as a blob, whose size
 // only the task knows: a mesh contact's manifolds and triangle cache may grow
-export unsafe function b3LaneCollidePartition(r: b3LaneCollideReplica, snapshot: Blob, input: Blob, partition: i32): Blob {
+export unsafe function b3LaneCollidePartition(
+	r: b3LaneCollideReplica,
+	snapshot: Blob,
+	input: Blob,
+	partition: i32,
+	traceRegion: SharedRegion,
+): Blob {
+	let trace = b3LaneTraceOpen(traceRegion);
+	let traceBegin = b3SpanBegin(trace);
 	let length = <i32>input.byteLength;
 	r.input = b3GrowU8(r.input, length);
 	input.readInto(0, r.input, 0, length);
@@ -744,9 +755,13 @@ export unsafe function b3LaneCollidePartition(r: b3LaneCollideReplica, snapshot:
 	}
 
 	r.context.awakeContactIndices = ids;
+	b3SpanEnd(trace, b3_traceCopy, traceBegin);
+	traceBegin = b3SpanBegin(trace);
 	if (contactCount > 0) {
 		b3CollideTask<b3OnMain>(0, contactCount, 0, r.context);
 	}
+	b3SpanEnd(trace, b3_traceCollide, traceBegin);
+	traceBegin = b3SpanBegin(trace);
 
 	// Output: the head, then each contact's state in section order
 	let bytes = O_BYTES;
@@ -766,7 +781,10 @@ export unsafe function b3LaneCollidePartition(r: b3LaneCollideReplica, snapshot:
 	for (let k = 0; k < contactCount; ++k) {
 		write = b3WriteState(write, contacts[ids[k]]);
 	}
-	return Blob.fromArray(r.output, 0, bytes);
+	let answer = Blob.fromArray(r.output, 0, bytes);
+	b3SpanEnd(trace, b3_traceCopy, traceBegin);
+	b3LaneTraceSend(traceRegion, trace);
+	return answer;
 }
 
 // Main lane side
