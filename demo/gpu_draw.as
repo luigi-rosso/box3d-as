@@ -85,10 +85,6 @@ const SLOPE_BIAS: f32 = 1.0;
 const SUN_SIZE: f32 = 0.05;
 // Shadows fade out over the last share of their reach.
 const FADE: f32 = 0.15;
-// What light a surface out of the sun keeps: a little warm.
-const SHADOW_TINT_R: f32 = 1.05;
-const SHADOW_TINT_G: f32 = 0.99;
-const SHADOW_TINT_B: f32 = 0.9;
 
 const MAX_FLAT: i32 = 8192;
 const MAX_ROUND: i32 = 4096;
@@ -785,10 +781,10 @@ export class GpuDraw {
         d[113] = maps ? SHADOW_FILTERS[this.shadowQuality] : 0;
         d[114] = NORMAL_OFFSET;
         d[115] = DEPTH_BIAS;
-        d[116] = maps ? SHADOW_TINT_R : 1;
-        d[117] = maps ? SHADOW_TINT_G : 1;
-        d[118] = maps ? SHADOW_TINT_B : 1;
-        d[119] = maps && isDefined(CSM_DEBUG) ? 1 : 0;
+        d[116] = maps && isDefined(CSM_DEBUG) ? 1 : 0;
+        d[117] = 0;
+        d[118] = 0;
+        d[119] = 0;
         d[120] = cascades.far * (1 - FADE);
         d[121] = BLEND;
         d[122] = SUN_SIZE;

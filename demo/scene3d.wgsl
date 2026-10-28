@@ -25,8 +25,8 @@ struct View {
     texelDepths: vec4f,
     // Atlas texel in uv, filter (0 off, 1 tent 5, 2 tent 7, 3 soft), normal offset and depth bias in texels.
     shadow: vec4f,
-    // Light shadowed surfaces keep, 1 in w to tint each cascade.
-    shadowTint: vec4f,
+    // 1 in x tints each cascade.
+    debug: vec4f,
     // View depth shadows start fading at, blend share between cascades, the sun's angular radius as a
     // tangent, and the view depth the first cascade starts at.
     shadowFade: vec4f,
@@ -62,13 +62,16 @@ fn qrot(q: vec4f, v: vec3f) -> vec3f {
     return v + q.w * t + cross(q.xyz, t);
 }
 
-// Lambert from the sun, as much of it as reaches the surface, plus a little
-// sky, as the vector painter shades; the shadowed side leans warm.
+// Light from a slightly cool sky above, a dimmer bounce below and a slightly warm sun, balanced so a lit top
+// face is neutral and as bright as the painter's, and shade keeps two thirds of it.
+const SKY: vec3f = vec3f(0.65, 0.66, 0.68);
+const BOUNCE: vec3f = vec3f(0.46, 0.46, 0.46);
+const SUN: vec3f = vec3f(0.46, 0.44, 0.41);
+
+// Hemisphere light plus Lambert from the sun, as much of it as reaches the surface.
 fn lit(base: vec3f, n: vec3f, sun: f32) -> vec3f {
     let direct = max(dot(n, view.light.xyz), 0.0) * sun;
-    let s = 0.42 + 0.5 * direct + 0.12 * (0.5 + 0.5 * n.y);
-    let tint = mix(view.shadowTint.rgb, vec3f(1.0), smoothstep(0.0, 0.4, direct));
-    return min(base * s * tint, vec3f(1.0));
+    return min(base * (mix(BOUNCE, SKY, 0.5 + 0.5 * n.y) + SUN * direct), vec3f(1.0));
 }
 
 // Colors arrive as 0xAARRGGBB words read as bytes, so blue first.
@@ -260,7 +263,7 @@ fn cascadeTint(world: vec3f) -> vec3f {
     tint = select(tint, vec3f(0.55, 1.0, 0.55), c == 1);
     tint = select(tint, vec3f(0.55, 0.65, 1.0), c == 2);
     tint = select(tint, vec3f(1.0, 0.9, 0.45), c == 3);
-    return mix(vec3f(1.0), tint, view.shadowTint.w);
+    return mix(vec3f(1.0), tint, view.debug.x);
 }
 
 // ---- faceted solids: boxes, hulls, meshes, height fields ------------------
