@@ -24,6 +24,8 @@ const CASTER_REACH: f32 = 40;
 // Sphere radii and the depths the cascades span come in these steps, so a zoom seldom changes the texel size
 // and bodies moving under a still camera leave the cascades, and the cached static casters, as they are.
 const STEP: f32 = 1.08;
+// The span's ends move inward only once they are this far off, two steps, so bodies coming and going hold them.
+const HOLD: f32 = 1.12;
 
 // The view depths a frame's solids span: small ones by their spheres when
 // in view, large ones by the band of heights they fill, which the view's
@@ -133,8 +135,8 @@ export class ShadowCascades {
                 far = Mathf.max(far, to);
             }
         }
-        near = Mathf.max(stepped(near, false), camera.near);
-        far = Mathf.min(stepped(far, true), reach);
+        near = Mathf.max(held(stepped(near, false), this.near, false), camera.near);
+        far = Mathf.min(held(stepped(far, true), this.far, true), reach);
         if (far <= near) {
             near = camera.near;
             far = reach;
@@ -223,6 +225,12 @@ export class ShadowCascades {
 function stepped(x: f32, up: bool): f32 {
     let e = Mathf.log(Mathf.max(x, 1e-3)) / Mathf.log(STEP);
     return Mathf.pow(STEP, up ? Mathf.ceil(e) : Mathf.floor(e));
+}
+
+// A span end x, kept at last while last covers it and is less than two steps wider.
+function held(x: f32, last: f32, up: bool): f32 {
+    let covered = up ? x <= last && x * HOLD > last : x >= last && x < last * HOLD;
+    return covered ? last : x;
 }
 
 // The farthest corner of the slice from the point t deep on its center line, in camera space.
