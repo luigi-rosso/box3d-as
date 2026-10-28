@@ -537,6 +537,18 @@ From adding cascaded sun shadows to the GPU renderer (`demo/shadows.as`,
   is, so tiles placed with top left origins sample back the same on WebGL2 as
   on Metal; the docs could say the difference only shows on a target with a
   flipped presentation.
+- **No texture copies.** There is no `copyTextureToTexture` (nor a blit),
+  for color or depth, so cached static caster depths cannot be copied into
+  the atlas. They are kept in `r32float` color tiles instead (GLSL cannot
+  read a depth texture raw, as above) and written back by a full tile draw
+  that outputs `frag_depth`: a 4 or 16 MB read and write per tile per frame
+  that a depth to depth copy would do in the copy engine, and a second
+  float texture per tile plus a tile sized scratch depth buffer to draw
+  them through. A depth load op alone does not help, since the atlas also
+  holds last frame's moving casters. Done looks like: `copyTextureToTexture`
+  with depth formats, which WebGPU has for whole depth32float subresources
+  and Metal and Vulkan for regions; on WebGL2 it maps to
+  `blitFramebuffer` with the depth bit.
 - **Every slot filled.** A depth only caster pipeline shares the main
   layout, so its bind groups must still fill the atlas slot; they bind a 1x1
   depth texture, since the atlas cannot be sampled while it is drawn into.

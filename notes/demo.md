@@ -59,8 +59,10 @@ for captures but not for play. The AOT compile takes about a minute.
 `START_SCENE` (1 based) picks the scene at launch. `VECTOR_DRAW` draws with
 the 2D painter instead of the GPU. `NO_SHADOWS` starts the GPU renderer with
 its shadow maps off and blob shadows in their place, and `CSM_DEBUG` tints
-each shadow cascade (red, green, blue, yellow, near to far). `DRAW_LOG` logs the mean and max script
-draw time per 120 frames with the triangle (or, painted, face) count; use it
+each shadow cascade (red, green, blue, yellow, near to far). `SHADOW_QUALITY=n` starts on high (0), soft
+(1) or low (2), and `SHADOW_CACHE` keeps the static shadow casters in cached tiles. `DRAW_LOG` logs the
+mean and max script draw time per 120 frames with the triangle (or, painted, face) count and the static
+tiles drawn so far; use it
 with `--bench`, which draws every frame where captures draw only the last. `STEP_LOG` logs the mean
 and max step time once per simulated second (`console :0 step <scene> s<n>
 mean <ms> max <ms>`), which is how the table below was measured; `--bench`
@@ -531,10 +533,14 @@ and the solids then go to it instead of the painter. Scenes call the same
   tone without shimmer. Round shapes draw their rings (a sphere's two great
   circles, a capsule's two cap seams) from signed distances to those planes,
   and their outline from the facing ratio's own gradient.
-- **Shading.** The painter's Lambert (`0.42 + 0.5 n.l + 0.12 sky`), with
-  `n.l` scaled by how much sun the shadow maps let through, per pixel: with a
-  flat normal on faceted solids, flipped toward the eye for one sided meshes,
-  and an interpolated one on spheres and capsules. State tints (sleeping,
+- **Shading.** A hemisphere light, a slightly cool sky (`0.65, 0.66, 0.68`)
+  from above blending into a gray bounce (`0.46`) from below, plus the
+  sun's Lambert (`0.46, 0.44, 0.41` times `n.l`), with `n.l` scaled by how
+  much sun the shadow maps let through, per pixel: with a flat normal on
+  faceted solids, flipped toward the eye for one sided meshes, and an
+  interpolated one on spheres and capsules. A lit top face comes out neutral
+  and as bright as the painter's `0.42 + 0.5 n.l + 0.12 sky` was under the
+  old, higher sun; one in shade keeps two thirds of that. State tints (sleeping,
   kinematic, selected) and edge inks are worked out on the CPU as before.
 - **Grid.** Drawn on the ground's upward faces in the faceted shader rather
   than as a plane of its own: a plane at y 0 cut through the rain scene's wave
@@ -570,8 +576,9 @@ project's stand in and its rays through the view (`~/Projects/maps-rive`,
   two: 4096 square with 2048 tiles on high and soft, 2048 with 1024 tiles on
   low, which is also the start when `maxTextureSize2D` is under 4096. It is
   made on the first frame that wants it and again when the quality changes
-  its size. One depth only pass clears it and draws every tile, each under
-  its own `setViewport`.
+  its size. One depth only pass clears it and fills every tile, each under
+  its own `setViewport`: the cached static casters first, then the moving
+  ones.
 - **Splits.** `ViewSpan` gathers the view depths the frame's solids reach
   while they are recorded: small ones by their bounding spheres when inside
   the view's side planes, large ones (grounds, walls, the height field and
@@ -581,7 +588,10 @@ project's stand in and its rays through the view (`~/Projects/maps-rive`,
   reach at most two camera distances plus 12 m. Between those depths the
   splits are the practical scheme, 0.6 geometric and 0.4 even, the
   geometric part starting no nearer than a twentieth of the camera
-  distance.
+  distance. The span's ends are rounded outward to powers of 1.08 first, and
+  move inward only once they are two steps off, so bodies moving under a
+  still camera seldom move the cascades (rain falling into view moved the
+  near end every few frames before the hold).
 - **Fit.** Each slice of the view is bound by a sphere, found in camera
   space along the line through the centers of the slice's ends with a
   ternary search over the eight corners (the projection is off center, so
@@ -593,7 +603,8 @@ project's stand in and its rays through the view (`~/Projects/maps-rive`,
   light's two axes across the sun; with the radius fixed, an orbit moves the
   cascade by whole texels and shadow edges hold still. The light depth runs
   from 40 m beyond the sphere toward the sun (casters outside the view, and
-  WebGPU has no depth clamp) to the sphere's far side.
+  WebGPU has no depth clamp) to the sphere's far side; its near end snaps to
+  whole texels too, so a still cascade's matrix stays bit identical.
 - **Casters.** Two depth only pipelines, `vs_flat_cast` and `vs_round_cast`,
   over the same vertex and instance buffers and batches as the main pass;
   their vertex code is the main pass's, split into `flatWorld` and
@@ -601,6 +612,29 @@ project's stand in and its rays through the view (`~/Projects/maps-rive`,
   draws spheres and capsules at their screen level of detail; the others
   draw them all coarse. Casters use `less` and a slope scaled bias of 1,
   without culling, since meshes and height fields are one sided.
+- **Static cache, opt in.** With `SHADOW_CACHE` defined (and
+  `colorBufferFloat`), static bodies (grounds, walls, ramps, the rain mesh,
+  the height field) are drawn once per cascade into an `r32float` tile of their
+  own, the depth plus the slope bias `fs_cache` works out from its
+  derivatives, through a tile sized depth buffer. Each frame
+  `demo/shadow_cache.wgsl` writes every tile back into the atlas as
+  `frag_depth` from a full tile triangle, and only the moving casters draw
+  after it. A tile is drawn again when its cascade's matrix differs in any
+  bit from the one it was drawn with, or the static set's hash does (FNV-1a
+  over each static instance's mesh, transform and scale, and each static
+  round's key, which holds its level of detail); a new atlas size (low
+  against high and soft) makes the tiles again. So an orbit, a zoom, a pan, a
+  new scene and a quality change each redraw what they move, and a still
+  camera over settling bodies stops redrawing within a second or two (the
+  height field: 31 tile draws while its bodies settle, then none; rain,
+  whose drops keep entering the view, about one tile every fifteen frames).
+  `DRAW_LOG` prints the tile draws so far, and `SHADOW_QUALITY` (0 high, 1
+  soft, 2 low) picks the starting quality for benches. It is off by default
+  because it does not pay here (timings below): writing a tile back reads
+  and writes every texel, which costs more GPU time than drawing this
+  demo's few thousand static triangles again, and the API has no depth copy that
+  would make the write back cheap (notes/findings.md). Without it every
+  caster draws into the atlas each frame, as before.
 - **Bindings.** One layout from the shader for group 0: the view uniforms,
   a 64 byte caster block holding one cascade's matrix, the atlas as
   `texture_depth_2d` (a `depthOnly` view) and a `less` comparison sampler.
@@ -629,9 +663,8 @@ project's stand in and its rays through the view (`~/Projects/maps-rive`,
   uniform, so the filters use only the `Level` sampling variants, and the
   fragment shaders take their derivatives before calling them.
 - **Receivers.** Every solid and the ground. A shadowed surface keeps the
-  ambient and sky terms and its light leans warm (`1.05, 0.99, 0.9`, mixed
-  in as the direct light falls under 0.4), so shadows sit at about 60% of
-  the lit ground, never black. The grid is shaded with the ground it lies
+  sky and bounce light, so shadows sit at about two thirds of the lit
+  ground, never black, and slightly cool against the neutral lit faces. The grid is shaded with the ground it lies
   on; edges and rings mix in after the light, so they stay crisp over
   shadows. Blob shadows are not recorded while the maps are on, so the
   vector painter alone keeps them.
@@ -679,6 +712,46 @@ frames, two runs: Threads 1.5 to 3.0 ms on high, 4.7 to 4.8 on soft, 1.1 to
 1.4 on low, 1.1 to 1.2 off; the pyramid 0.7 to 1.1 ms on every quality. So
 the 2048 body pit's four cascades cost well under a millisecond on high,
 and soft, 48 comparisons a pixel over a screen of balls, about three.
+
+The static cache against redrawing the static casters, release AOT bake at
+1280 by 800, Apple M5 Max, two interleaved rounds (cache, no cache, each
+quality, then off, per scene) on a machine shared with other builds (load
+average near 200). GPU is the frame's GPU busy time, read from a 2 second
+Metal trace (`xctrace record --instrument GPU --attach`) of an open ended
+`--bench`, the union of the process's vertex, fragment and compute
+intervals over the frames in it: the lower of the two rounds, the higher in
+parentheses. Script is `DRAW_LOG`'s lowest window mean and frame the
+`--bench` render p50 (3000 frames, Threads 900), both CPU and both noisy at
+that load.
+
+| Scene | Shadows | GPU, cache | GPU, redraw | Script, cache | Script, redraw | Frame, cache | Frame, redraw |
+|---|---|---|---|---|---|---|---|
+| 4 Rain | high | 0.47 (0.54) ms | 0.35 (0.46) ms | 0.122 ms | 0.033 ms | 0.67 ms | 0.48 ms |
+| 4 Rain | soft | 0.53 (0.88) | 0.50 (0.59) | 0.168 | 0.135 | 0.66 | 0.72 |
+| 4 Rain | low | 0.34 (0.36) | 0.30 (0.34) | 0.091 | 0.045 | 0.47 | 0.33 |
+| 4 Rain | off | 0.21 (0.25) | | 0.023 | | 0.16 | |
+| 5 Height field | high | 0.34 (0.60) | 0.29 (0.34) | 0.014 | 0.068 | 0.43 | 0.45 |
+| 5 Height field | soft | 0.40 (0.49) | 0.35 (0.42) | 0.062 | 0.058 | 0.60 | 0.58 |
+| 5 Height field | low | 0.24 (0.33) | 0.27 (0.31) | 0.053 | 0.062 | 0.49 | 0.55 |
+| 5 Height field | off | 0.18 (0.31) | | 0.060 | | 0.55 | |
+| 8 Threads | high | 1.16 (1.45) | 1.27 (1.29) | 0.336 | 0.396 | 1.25 | 1.32 |
+| 8 Threads | soft | 1.55 (1.92) | 1.81 (1.82) | 0.300 | 0.343 | 1.23 | 1.28 |
+| 8 Threads | low | 0.89 (1.58) | 0.88 (1.32) | 0.332 | 0.331 | 1.30 | 1.27 |
+| 8 Threads | off | 0.66 (0.70) | | 0.301 | | 1.17 | |
+
+The cache does not pay. On rain and the height field it costs 0.03 to 0.12
+ms of GPU on high and soft: the static set there is a ground box and a few
+thousand triangles, which a depth only pass rasterizes almost for free,
+while the write back reads 16 MB and writes 16 MB a tile on high. Threads
+reads better with it on high and soft, but by less than the spread between
+rounds, and a pit of walls should save nothing. The CPU columns move both
+ways by more than the cache could change them (it saves at most a dozen
+draw calls and adds a hash over the static instances). Rain also keeps
+redrawing tiles (202 in 3000 frames) as drops enter the view; the height
+field and Threads settle after 31 and 8. So it stays behind
+`SHADOW_CACHE`. The same traces put the shadow maps' own GPU cost natively
+at 0.11 to 0.15 ms on high for rain and the height field and 0.6 ms for
+the Threads pit (1.2 on soft).
 
 The script now spends its draw on reading body transforms and writing 12 or
 14 floats per body. In headless Chrome on the published `@rive-app/webgl2`
@@ -734,8 +807,6 @@ faces). The interpreter is roughly ten times slower.
   other; the GPU renderer has none.
 - The painter's shadows over uneven ground are lifted discs, not draped on
   the terrain; the GPU renderer's shadow maps have no such limit.
-- Static casters are drawn into every cascade every frame; their tiles could
-  be kept while the camera and the sun hold still.
 - The mover ignores `MoverShapeUserData` (no soft planes, no allies on
   category 2) and has no third person camera or mouse look.
 - `SceneStats.shapes` is gathered but not shown.
@@ -824,6 +895,27 @@ defines to the mirror only):
   `webperf.mjs` is `webcheck.mjs` with vsync and the frame rate limit off, for the GPU timings above
 - `perf.log`, `perf2.log` the bench rounds; `manifest_<quality>.json` the `--gpu-manifest` per quality,
   which Dawn's null backend (`tools/webgpu_validate`) accepts: 1 shader, 5 pipelines, 6 bind groups (5 off)
+
+The ambient and the static cache, 1280 by 800, interpreted, 150 frames, in
+`/private/tmp/claude-501/-Users-luigi-Projects-rive/65e4f28b-1249-4d28-8600-bb5fb40b325a/scratchpad/shadowpolish/`
+(`cap.sh` as above, `sheet.py` the sheets, `stats.py` the view's mean brightness and red minus blue):
+
+- `ambient_before_after.png` all eight scenes: before the shadows (bbf209d, the old framing), main at
+  de2c899 on high, this branch on high and with `NO_SHADOWS`. The view's mean brightness on high went from
+  38.7 to 41.7 (card house), 61.6 to 66.1 (rain), 61.1 to 65.5 (height field), 49.1 to 54.3 (bullets),
+  58.5 to 62.7 (Threads), back to or past the pre shadow 42.1, 65.6, 66.1, 56.4; the bullets' red minus
+  blue from 7.2 back to 4.7 (5.2 before the shadows). `closeup_card.png` the card house on each quality
+- `testpatch.py` renders 24 frames along a camera path (or another scene, or other qualities) before the
+  captured one, without compositing them, so the cache sees the frames a headless capture skips; `diff.py`
+  compares the view. With and without the cache, after an orbit with a zoom and a pan, a pan, a scene change
+  (height field to card house, height field to character), high to low and back, and low to high and back,
+  the views match to the pixel (`shots/t_*`, `shots/u_*`); with the matrix and hash checks removed, the same
+  runs differ in 80000 to 180000 pixels
+- `web_vs_native.png`, `web_bullets_crop.png` the cache on WebGL2: a tools build of the webgl2 runtime
+  (`wjs/`, `web/`) in headless Chrome, the bullet and character scenes' static shadows where native puts
+  them, and `DRAW_LOG` counting the tile draws; `manifest_q0.json`, `manifest_q2.json` pass Dawn's null
+  backend with the cache on: 2 shaders, 8 pipelines, 10 bind groups
+- `gputime.sh`, `gpuparse.py`, `perf.sh`, `perf.log`, `summarize.py` the timings below
 
 ## Host API notes
 
