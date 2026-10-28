@@ -485,3 +485,12 @@ a switch from compact to medium (a window widened past 720) laid it out at the l
 and the scene list. Repro headless: `--viewport=914x800 --advance=10 --data=layoutClass=2 --advance=10
 --data=layoutClass=1 --advance=10`. Workaround: author it absolute and key only its display. Done looks like: the
 insets apply whichever frame the position type changes in.
+
+## The heap growth warning fires while a large world is first built
+
+rive master CLI, the demo's Threads scene (2048 bodies, about 11600 contacts once settled), `--aot --bench=3000`. In
+the first 300 frames the CLI warns twice: `script heap grew 8MB over 147 frames; at this rate every frame traps in
+roughly 17 minutes; the collector is running, so something is accumulating references`. Nothing is: the bench
+reports 760 to 968 wasm pages (+208) over 3000 frames and the same +208 over 8000, so the heap stops growing once
+the contacts and their manifolds have settled, and the warning does not come back. Done looks like: the warning
+waits for growth that outlasts a warm up, or says the rate is an early one.

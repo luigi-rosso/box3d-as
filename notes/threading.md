@@ -176,7 +176,9 @@ function f(w: W, x: f32): f32 { return w.cb(x); }
    atomically and reports overflow, would replace raw stores into std's `Array` fields.
 7. **`Parallel.run` with at most n parts**, and a default that stays on the performance cores. The part count can only be
    chosen by restarting with `--job-threads`, so benching 2 and 4 parts needs a run each, and 8 parts on this machine
-   lands on the second core cluster.
+   lands on the second core cluster. `Parallel.runUpTo` (on the branch at b9685d0884) caps it at run time; the
+   backend's calls now go through it, at `b3ParallelBackend.limit` parts (every part by default), which the demo's
+   Threads scene sets.
 8. **The monotonic clock in parallel code.** C times each solver stage on the main thread; here those profile fields
    read 0 on the parallel path. Fixed at dc5083bc5a; part 0 now times the stages.
 9. **Document `atomic.*` on heap addresses in unsafe `@parallel.inplace` code.** It works and is what C's atomics on
@@ -185,6 +187,28 @@ function f(w: W, x: f32): f32 { return w.cb(x); }
     checked; nothing about it was confusing.
 11. A combined result from `Parallel.run` was not missed: Box3D reduces per worker task contexts on the main lane, as C
     does.
+
+## Tracing (2026-10-27)
+
+`lib/trace.as` records when each task ran on each worker over a step, for the demo's Threads scene
+(notes/demo.md). `b3EnableTrace(true)` turns it on, `b3TraceBegin` and `b3TraceEnd` bracket a step, and
+`b3GetTraceRow(i)` holds worker i's spans: a kind, and begin and end on `clock()`. Off, a traced task makes one null
+check (`b3TraceRowAt` answers null), so nothing else changes and the gates run with it compiled in.
+
+| path | what records a span, on which row |
+|---|---|
+| serial | `b3ParallelFor`'s trampoline, one span per task by its name (collide, cross and self pairs, ccd as finalize, bullets, sensors); `b3ExecuteMainStage`, one per solver stage; `b3UpdateTreesTask`, the tree rebuild; all on row 0 |
+| parallel calls | each part on its own row (`part.index`): one span per solver stage in `b3RunStage` (the claim loop, not the wait at the sync), the narrow phase, the tree rebuild on the last part, finalize, cross and self pairs; the deferred contacts and the tree fallback on row 0 |
+| lanes | row 0: the main lane's partition by stage type (`b3LaneSolveStages`), its narrow phase share, and the copying (packing, applying, the tree's pack and apply) as `b3_traceCopy`; row p: lane p's setup, stages and output, and its narrow phase share between two copies; row `lanes`: the tree job |
+
+A lane has its own memory, so it records into a row of its own and sends the spans back through a small region per
+lane (`b3LaneTraceArm`, `b3LaneTraceOpen`, `b3LaneTraceSend`, `b3LaneTraceGather` in lane_common.as): the main lane
+arms it before the command, and gathers it after the join or the done word. Lanes, parts and the main lane read one
+clock natively; in Chrome, parallel parts' first spans land within 0.1 ms of the step's start, so their clocks agree
+there too.
+
+`b3World_EnableLanes` now also releases a jobs backend's regions when it is turned off or replaced, which a scene
+that switches backends often would otherwise leak; workers may still read theirs as they quit, so theirs stay.
 
 ## Lanes results (2026-10-24)
 
