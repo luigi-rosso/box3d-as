@@ -5,6 +5,7 @@
 import { PropertyBoolean, PropertyNumber, PropertyString, PropertyTrigger, ViewModel } from "rive/data";
 import { formatFixed } from "rive/format";
 import { SceneStats, PROFILE_COUNT } from "./scene";
+import { BACKEND_LANES, BACKEND_PARALLEL, THREAD_CHOICES, ThreadsState } from "./threads";
 
 const COUNT_NAMES: StaticArray<string> = ["bodies", "awake", "contacts", "joints", "islands", "faces"];
 const PROFILE_NAMES: StaticArray<string> = ["profilePairs", "profileCollide", "profileSolver", "profileUpdate",
@@ -55,6 +56,16 @@ export class Shell {
     clear: Array<PropertyNumber> = new Array<PropertyNumber>();
     counts: Array<PropertyNumber> = new Array<PropertyNumber>();
     profile: Array<PropertyNumber> = new Array<PropertyNumber>();
+    // The Threads scene's panel, and the backend and threads last written to it
+    threadsOpen: PropertyBoolean;
+    backend: PropertyNumber;
+    threads: PropertyNumber;
+    threadsNote: PropertyString;
+    okLanes: PropertyBoolean;
+    okParallel: PropertyBoolean;
+    okThreads: Array<PropertyBoolean> = new Array<PropertyBoolean>();
+    shownBackend: i32 = -1;
+    shownThreads: i32 = -1;
 
     constructor(vm: ViewModel, sceneNames: Array<string>) {
         this.scene = vm.getNumber("scene")!;
@@ -85,6 +96,43 @@ export class Shell {
         for (let i = 0; i < sceneNames.length; i++) {
             vm.getString("sceneName" + i.toString())!.value = sceneNames[i];
         }
+        this.threadsOpen = vm.getBoolean("threadsOpen")!;
+        this.backend = vm.getNumber("backend")!;
+        this.threads = vm.getNumber("threads")!;
+        this.threadsNote = vm.getString("threadsNote")!;
+        this.okLanes = vm.getBoolean("_okLanes")!;
+        this.okParallel = vm.getBoolean("_okParallel")!;
+        for (let i = 1; i < THREAD_CHOICES.length; i++) {
+            this.okThreads.push(vm.getBoolean("_okThreads" + THREAD_CHOICES[i].toString())!);
+        }
+    }
+
+    // Takes the panel's clicks as requests, then shows what the scene steps on.
+    syncThreads(t: ThreadsState): void {
+        this.threadsOpen.value = t.open;
+        if (!t.open) {
+            return;
+        }
+        let backend = <i32>this.backend.value;
+        if (backend != this.shownBackend && this.shownBackend >= 0) {
+            t.wantBackend = backend;
+        }
+        let threads = <i32>this.threads.value;
+        if (threads != this.shownThreads && this.shownThreads >= 0) {
+            t.wantThreads = threads;
+        }
+        backend = t.targetBackend();
+        threads = t.threadsFor(backend, t.wantThreads);
+        this.shownBackend = backend;
+        this.shownThreads = threads;
+        this.backend.value = <f64>backend;
+        this.threads.value = <f64>threads;
+        this.okLanes.value = t.available(BACKEND_LANES);
+        this.okParallel.value = t.available(BACKEND_PARALLEL);
+        for (let i = 1; i < THREAD_CHOICES.length; i++) {
+            this.okThreads[i - 1].value = THREAD_CHOICES[i] <= t.maxThreads(backend);
+        }
+        this.threadsNote.value = t.note(backend);
     }
 
     // Picks the size class and scale for a window size.
