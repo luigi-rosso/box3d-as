@@ -19,3 +19,6 @@ output:
 logs:
   file: build/rive.log
   problems: build/problems.log
+pages:
+  teamId: 40887
+  name: "box3d-demo"
