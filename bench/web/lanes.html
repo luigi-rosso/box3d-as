@@ -4,7 +4,7 @@
 <script type="module">
 // lanes.mjs on a page: librive's web scripting page harness loads a bench/threads bake and runs frames until
 // the script logs its BENCH RESULT, yielding to the event loop between frames as a page does. jobThreads sizes the
-// job pool before the file loads, and so a parallel call's parts with the page's own; parallelSafe runs every
+// job pool and parts a parallel call's parts, the page's own included, before the file loads; parallelSafe runs every
 // parallel call as one part; until names the log line that ends the run. Each HASH line a HASHLOG bake logs comes
 // back in hashes.
 // A task of its own between frames, so worker messages run; a timer chain can be throttled to one wake a minute
@@ -15,7 +15,7 @@ const nextTask = () => new Promise( ( settle ) =>
 	channel.port2.postMessage( 0 );
 } );
 
-window.runRiv = async ( name, seconds, { jobThreads, parallelSafe, until = 'BENCH RESULT' } = {} ) =>
+window.runRiv = async ( name, seconds, { jobThreads, parts, parallelSafe, until = 'BENCH RESULT' } = {} ) =>
 {
 	const lines = [];
 	const hashes = [];
@@ -44,6 +44,10 @@ window.runRiv = async ( name, seconds, { jobThreads, parallelSafe, until = 'BENC
 	if ( jobThreads !== undefined )
 	{
 		Module._harness_job_threads( jobThreads );
+	}
+	if ( parts !== undefined )
+	{
+		Module.riveScripting.parallelParts = parts;
 	}
 	if ( parallelSafe )
 	{

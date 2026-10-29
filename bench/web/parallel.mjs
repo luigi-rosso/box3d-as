@@ -11,7 +11,7 @@
 //   MODE=stages STAGE_RIV=<rive>/packages/runtime/tests/web_scripting/fixture/parallel_bench.riv runs rive's web stage
 //     benchmark on the same page at 8 parts and prints what an empty call and a sync cost.
 //   node bench/web/parallel.mjs --table=a.jsonl[,b.jsonl] prints min over rounds of each run's median ms per step.
-// PARTS="1 2 4 8 default": 1 is parallelSafe, n is n - 1 job threads, default leaves the pool to librive.
+// PARTS="1 2 4 8 default": 1 is parallelSafe, n sets Module.riveScripting.parallelParts, default leaves it to librive.
 // BROWSER=chromium (Chrome), firefox or webkit; the last two come from npx playwright-core install.
 
 import { appendFileSync, copyFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
@@ -68,7 +68,7 @@ const reference = ( scene ) =>
 	const path = join( root, 'verify', 'scenes', 'out', `${scene}_scalar_w1.bin` );
 	return existsSync( path ) ? recordingHashes( readFileSync( path ) ) : [];
 };
-const hostOptions = ( p ) => p === '1' ? { parallelSafe: true } : p === 'default' ? {} : { jobThreads: Number( p ) - 1 };
+const hostOptions = ( p ) => p === '1' ? { parallelSafe: true } : p === 'default' ? {} : { parts: Number( p ) };
 
 // Runs fn on a fresh page, giving up after seconds; a page that never answers reports its last console lines
 async function onPage( origin, page, fn, arg, seconds = 240 )
