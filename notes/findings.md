@@ -539,7 +539,7 @@ From adding cascaded sun shadows to the GPU renderer (`demo/shadows.as`,
   flipped presentation.
 - **No texture copies.** There is no `copyTextureToTexture` (nor a blit),
   for color or depth, so cached static caster depths cannot be copied into
-  the atlas. They are kept in `r32float` color tiles instead (GLSL cannot
+  the atlas. A cache (tried at 8f80b05, then removed for not paying) kept them in `r32float` color tiles instead (GLSL cannot
   read a depth texture raw, as above) and written back by a full tile draw
   that outputs `frag_depth`: a 4 or 16 MB read and write per tile per frame
   that a depth to depth copy would do in the copy engine, and a second

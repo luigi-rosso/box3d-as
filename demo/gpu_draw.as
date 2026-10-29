@@ -57,7 +57,6 @@ import { BLEND, CASCADES, ShadowCascades, ViewSpan } from "./shadows";
 
 const DEPTH_FORMAT: TextureFormat = TextureFormat.depth32float;
 const SHADER: string = "demo/scene3d";
-const CACHE_SHADER: string = "demo/shadow_cache";
 
 const VERTEX_WORDS: i32 = 9;
 const FLAT_WORDS: i32 = 12;
@@ -101,14 +100,11 @@ const COARSE_SEGMENTS: i32 = 16;
 const COARSE_RINGS: i32 = 4;
 const DETAIL_PIXELS: f32 = 14;
 
-let meshIds: u32 = 0;
-
 // A geometry in a vertex buffer: position, normal and edge distances per
 // vertex, three vertices per triangle.
 export class GpuMesh {
     buffer: GPUBuffer;
     vertices: u32;
-    id: u32 = meshIds++;
     // Local bounds, for fitting the shadow cascades.
     center: Vec3 = Vec3(0, 0, 0);
     half: Vec3 = Vec3(0, 0, 0);
@@ -317,24 +313,6 @@ export class GpuDraw {
     private atlasSize: u32 = 0;
     private shadowDesc: GPUPassDesc = new GPUPassDesc();
     private shadowPass: GPURenderPass? = null;
-
-    // With SHADOW_CACHE, static casters kept per cascade in float tiles while its fit and the static set hold,
-    // then written into the atlas every frame under the moving casters. Null otherwise.
-    private blitPipeline: GPUPipeline? = null;
-    private cacheFlat: GPUPipeline? = null;
-    private cacheRound: GPUPipeline? = null;
-    private cacheTiles: Array<GPUTexture> = new Array<GPUTexture>();
-    private cacheDescs: Array<GPUPassDesc> = new Array<GPUPassDesc>();
-    private blitGroups: Array<GPUBindGroup> = new Array<GPUBindGroup>();
-    private cacheScratch: GPUTexture? = null;
-    private cachePass: GPURenderPass? = null;
-    // What each tile was drawn with: the cascade's matrix and the static set's hash.
-    private cacheMatrices: Float32Array = new Float32Array(16 * CASCADES);
-    private cacheHashes: StaticArray<u32> = new StaticArray<u32>(CASCADES);
-    private cacheValid: StaticArray<bool> = new StaticArray<bool>(CASCADES);
-    private staticHash: u32 = 0;
-    // Static tiles drawn since the start, for DRAW_LOG.
-    cacheFills: i32 = 0;
     private sampler: ImageSampler = ImageSampler(ImageWrap.clamp, ImageWrap.clamp, ImageFilter.bilinear);
 
     // Null when the host has no GPU canvas or the shader is missing.
@@ -353,13 +331,10 @@ export class GpuDraw {
         if (samples < 1) {
             samples = 1;
         }
-        // Opt in: writing the tiles back costs more GPU time than drawing this demo's static casters again.
-        let cache = isDefined(SHADOW_CACHE) && features.colorBufferFloat ? context.shader(CACHE_SHADER) : null;
-        return new GpuDraw(canvas, shader, layout, samples, features.maxTextureSize2D, cache);
+        return new GpuDraw(canvas, shader, layout, samples, features.maxTextureSize2D);
     }
 
-    constructor(canvas: GPUCanvas, shader: GPUShaderModule, layout: GPUBindGroupLayout, samples: u32, maxSize: u32,
-        cache: GPUShaderModule?) {
+    constructor(canvas: GPUCanvas, shader: GPUShaderModule, layout: GPUBindGroupLayout, samples: u32, maxSize: u32) {
         this.canvas = canvas;
         this.image = canvas.image;
         this.samples = samples;
@@ -397,13 +372,8 @@ export class GpuDraw {
             attribute(VertexFormat.float4, 1, 16),
         ]);
         this.shadowPipeline = this.pipeline(shader, layout, format, "vs_shadow", "fs_shadow", [shadowInstance], false);
-        this.flatCaster = caster(shader, layout, "vs_flat_cast", [perVertex, flatInstance], false);
-        this.roundCaster = caster(shader, layout, "vs_round_cast", [roundVertex, roundInstance], false);
-        if (cache != null) {
-            this.cacheFlat = caster(shader, layout, "vs_flat_cast", [perVertex, flatInstance], true);
-            this.cacheRound = caster(shader, layout, "vs_round_cast", [roundVertex, roundInstance], true);
-            this.blitPipeline = blitter(cache);
-        }
+        this.flatCaster = caster(shader, layout, "vs_flat_cast", [perVertex, flatInstance]);
+        this.roundCaster = caster(shader, layout, "vs_round_cast", [roundVertex, roundInstance]);
 
         this.layout = layout;
         this.standInView = this.standIn.view(depthOnly());
@@ -473,49 +443,6 @@ export class GpuDraw {
         this.atlasSize = size;
         this.shadowDesc.depthView = atlas.view();
         this.group = this.bindGroup(this.casterBuffers[0], atlas.view(depthOnly()));
-        let blit = this.blitPipeline;
-        if (blit != null) {
-            this.prepareCache(blit, size / 2);
-        }
-    }
-
-    // Static caster tiles for every cascade, all invalid until drawn.
-    private prepareCache(blit: GPUPipeline, tile: u32): void {
-        for (let c = 0; c < this.cacheTiles.length; c++) {
-            this.cacheTiles[c].release();
-        }
-        let old = this.cacheScratch;
-        if (old != null) {
-            old.release();
-        }
-        this.cacheTiles.length = 0;
-        this.cacheDescs.length = 0;
-        this.blitGroups.length = 0;
-        let scratch = new GPUTexture(depthDesc(tile));
-        this.cacheScratch = scratch;
-        let depth = scratch.view();
-        let layout = blit.getBindGroupLayout(0);
-        for (let c = 0; c < CASCADES; c++) {
-            let desc = new GPUTextureDesc();
-            desc.width = tile;
-            desc.height = tile;
-            desc.format = TextureFormat.r32float;
-            desc.renderTarget = true;
-            let texture = new GPUTexture(desc);
-            let view = texture.view();
-            let color = new GPUColorAttachment();
-            color.view = view;
-            color.clearR = 1;
-            let pass = new GPUPassDesc();
-            pass.color = [color];
-            pass.depthView = depth;
-            pass.depthClearValue = 1;
-            pass.label = "static shadows";
-            this.cacheTiles.push(texture);
-            this.cacheDescs.push(pass);
-            this.blitGroups.push(new GPUBindGroup(layout, [], [new GPUBindGroupTexture(0, view)], []));
-            this.cacheValid[c] = false;
-        }
     }
 
     private pipeline(shader: GPUShaderModule, layout: GPUBindGroupLayout, format: TextureFormat, vertex: string,
@@ -553,16 +480,6 @@ export class GpuDraw {
         this.dropped = 0;
         this.gridOn = false;
         this.span.reset(camera);
-        this.staticHash = 2166136261;
-    }
-
-    // Folds a static caster's words into the static set's hash, FNV-1a.
-    private hashStatic(id: u32, d: Float32Array, o: i32, n: i32): void {
-        let h = (this.staticHash ^ id) * 16777619;
-        for (let i = 0; i < n; i++) {
-            h = (h ^ reinterpret<u32>(d[o + i])) * 16777619;
-        }
-        this.staticHash = h;
     }
 
     // ---- recording ----------------------------------------------------------
@@ -610,9 +527,6 @@ export class GpuDraw {
         d[o + 9] = scale.z;
         d[o + 10] = reinterpret<f32>(fill);
         d[o + 11] = reinterpret<f32>(edge);
-        if (still && this.blitPipeline != null) {
-            this.hashStatic(mesh.id, d, o, 10);
-        }
     }
 
     // A capsule between two world points, or a sphere when they coincide;
@@ -647,9 +561,6 @@ export class GpuDraw {
         d[o + 11] = q.w;
         d[o + 12] = reinterpret<f32>(fill);
         d[o + 13] = reinterpret<f32>(edge);
-        if (still && this.blitPipeline != null) {
-            this.hashStatic(<u32>this.roundKeys[i], d, o, 12);
-        }
     }
 
     // A soft disc on the ground at p, lifted toward the eye by lift.
@@ -758,74 +669,26 @@ export class GpuDraw {
         return p < this.maxSize ? p : this.maxSize;
     }
 
-    // Every solid into each cascade's tile of the atlas, the static ones
-    // from their cached tiles when there are any.
+    // Every solid into each cascade's tile of the atlas.
     private drawCasters(canvas: GPUCanvas): void {
         let matrices = this.cascades.matrices.buffer;
         for (let c = 0; c < CASCADES; c++) {
             this.casterBuffers[c].update(0, matrices, <u32>(CASTER_WORDS * 4), <u32>(c * CASTER_WORDS * 4));
-        }
-        let blit = this.blitPipeline;
-        if (blit != null) {
-            for (let c = 0; c < CASCADES; c++) {
-                if (!this.cacheHolds(c)) {
-                    this.fillCache(canvas, c);
-                }
-            }
         }
         let pass = canvas.beginRenderPass(this.shadowDesc, this.shadowPass);
         this.shadowPass = pass;
         let tile = <f32>(this.atlasSize / 2);
         for (let c = 0; c < CASCADES; c++) {
             pass.setViewport(<f32>(c & 1) * tile, <f32>(c >> 1) * tile, tile, tile);
-            if (blit != null) {
-                pass.setPipeline(blit);
-                pass.setBindGroup(0, this.blitGroups[c]);
-                pass.draw(3, 1);
-            }
             pass.setBindGroup(0, this.casterGroups[c]);
-            for (let layer = blit != null ? 1 : 0; layer < 2; layer++) {
-                this.drawCasterLayer(pass, c, layer, this.flatCaster, this.roundCaster);
+            for (let layer = 0; layer < 2; layer++) {
+                this.drawFlats(pass, layer, this.flatCaster);
+                // Past the first cascade a texel spans more than the fine mesh's facets.
+                this.drawRound(pass, 2 * layer, this.coarseRound, this.roundCaster);
+                this.drawRound(pass, 2 * layer + 1, c == 0 ? this.fineRound : this.coarseRound, this.roundCaster);
             }
         }
         pass.finish();
-    }
-
-    private drawCasterLayer(pass: GPURenderPass, c: i32, layer: i32, flat: GPUPipeline, round: GPUPipeline): void {
-        this.drawFlats(pass, layer, flat);
-        // Past the first cascade a texel spans more than the fine mesh's facets.
-        this.drawRound(pass, 2 * layer, this.coarseRound, round);
-        this.drawRound(pass, 2 * layer + 1, c == 0 ? this.fineRound : this.coarseRound, round);
-    }
-
-    // True when cascade c's tile was drawn with its current matrix from the current static set.
-    private cacheHolds(c: i32): bool {
-        if (!this.cacheValid[c] || this.cacheHashes[c] != this.staticHash) {
-            return false;
-        }
-        let m = this.cascades.matrices;
-        let k = this.cacheMatrices;
-        for (let i = c * 16; i < c * 16 + 16; i++) {
-            if (m[i] != k[i]) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private fillCache(canvas: GPUCanvas, c: i32): void {
-        let pass = canvas.beginRenderPass(this.cacheDescs[c], this.cachePass);
-        this.cachePass = pass;
-        pass.setBindGroup(0, this.casterGroups[c]);
-        this.drawCasterLayer(pass, c, 0, this.cacheFlat!, this.cacheRound!);
-        pass.finish();
-        let m = this.cascades.matrices;
-        for (let i = c * 16; i < c * 16 + 16; i++) {
-            this.cacheMatrices[i] = m[i];
-        }
-        this.cacheHashes[c] = this.staticHash;
-        this.cacheValid[c] = true;
-        this.cacheFills++;
     }
 
     private drawFlats(pass: GPURenderPass, layer: i32, pipeline: GPUPipeline): void {
@@ -957,43 +820,19 @@ function depthOnly(): GPUTextureViewDesc {
     return desc;
 }
 
-// A depth only pipeline drawing into one cascade's tile, sloped faces pushed back so lit faces do not shadow
-// themselves; or, for the static cache, one that writes that pushed back depth into a float tile.
+// A depth only pipeline drawing into one cascade's tile, sloped faces pushed back so lit faces do not shadow themselves.
 function caster(shader: GPUShaderModule, layout: GPUBindGroupLayout, vertex: string,
-    buffers: Array<GPUVertexBufferLayout>, cache: bool): GPUPipeline {
+    buffers: Array<GPUVertexBufferLayout>): GPUPipeline {
     let depth = new GPUDepthStencilDesc();
     depth.format = DEPTH_FORMAT;
     depth.compare = CompareFunction.less;
     depth.write = true;
+    depth.depthBiasSlopeScale = SLOPE_BIAS;
     let desc = new GPUPipelineDesc();
     desc.vertexModule = shader;
     desc.vertexEntryPoint = vertex;
     desc.vertexBuffers = buffers;
     desc.bindGroupLayouts = [layout];
-    desc.depthStencil = depth;
-    if (cache) {
-        let target = new GPUColorTargetDesc();
-        target.format = TextureFormat.r32float;
-        desc.colorTargets = [target];
-        desc.fragmentModule = shader;
-        desc.fragmentEntryPoint = "fs_cache";
-    } else {
-        depth.depthBiasSlopeScale = SLOPE_BIAS;
-    }
-    return new GPUPipeline(desc);
-}
-
-// Writes a cascade's cached static depths into its tile.
-function blitter(shader: GPUShaderModule): GPUPipeline {
-    let depth = new GPUDepthStencilDesc();
-    depth.format = DEPTH_FORMAT;
-    depth.compare = CompareFunction.always;
-    depth.write = true;
-    let desc = new GPUPipelineDesc();
-    desc.vertexModule = shader;
-    desc.vertexEntryPoint = "vs_blit";
-    desc.fragmentModule = shader;
-    desc.fragmentEntryPoint = "fs_blit";
     desc.depthStencil = depth;
     return new GPUPipeline(desc);
 }

@@ -60,9 +60,8 @@ for captures but not for play. The AOT compile takes about a minute.
 the 2D painter instead of the GPU. `NO_SHADOWS` starts the GPU renderer with
 its shadow maps off and blob shadows in their place, and `CSM_DEBUG` tints
 each shadow cascade (red, green, blue, yellow, near to far). `SHADOW_QUALITY=n` starts on high (0), soft
-(1) or low (2), and `SHADOW_CACHE` keeps the static shadow casters in cached tiles. `DRAW_LOG` logs the
-mean and max script draw time per 120 frames with the triangle (or, painted, face) count and the static
-tiles drawn so far; use it
+(1) or low (2). `DRAW_LOG` logs the
+mean and max script draw time per 120 frames with the triangle (or, painted, face) count; use it
 with `--bench`, which draws every frame where captures draw only the last. `STEP_LOG` logs the mean
 and max step time once per simulated second (`console :0 step <scene> s<n>
 mean <ms> max <ms>`), which is how the table below was measured; `--bench`
@@ -577,8 +576,7 @@ project's stand in and its rays through the view (`~/Projects/maps-rive`,
   low, which is also the start when `maxTextureSize2D` is under 4096. It is
   made on the first frame that wants it and again when the quality changes
   its size. One depth only pass clears it and fills every tile, each under
-  its own `setViewport`: the cached static casters first, then the moving
-  ones.
+  its own `setViewport`.
 - **Splits.** `ViewSpan` gathers the view depths the frame's solids reach
   while they are recorded: small ones by their bounding spheres when inside
   the view's side planes, large ones (grounds, walls, the height field and
@@ -612,29 +610,13 @@ project's stand in and its rays through the view (`~/Projects/maps-rive`,
   draws spheres and capsules at their screen level of detail; the others
   draw them all coarse. Casters use `less` and a slope scaled bias of 1,
   without culling, since meshes and height fields are one sided.
-- **Static cache, opt in.** With `SHADOW_CACHE` defined (and
-  `colorBufferFloat`), static bodies (grounds, walls, ramps, the rain mesh,
-  the height field) are drawn once per cascade into an `r32float` tile of their
-  own, the depth plus the slope bias `fs_cache` works out from its
-  derivatives, through a tile sized depth buffer. Each frame
-  `demo/shadow_cache.wgsl` writes every tile back into the atlas as
-  `frag_depth` from a full tile triangle, and only the moving casters draw
-  after it. A tile is drawn again when its cascade's matrix differs in any
-  bit from the one it was drawn with, or the static set's hash does (FNV-1a
-  over each static instance's mesh, transform and scale, and each static
-  round's key, which holds its level of detail); a new atlas size (low
-  against high and soft) makes the tiles again. So an orbit, a zoom, a pan, a
-  new scene and a quality change each redraw what they move, and a still
-  camera over settling bodies stops redrawing within a second or two (the
-  height field: 31 tile draws while its bodies settle, then none; rain,
-  whose drops keep entering the view, about one tile every fifteen frames).
-  `DRAW_LOG` prints the tile draws so far, and `SHADOW_QUALITY` (0 high, 1
-  soft, 2 low) picks the starting quality for benches. It is off by default
-  because it does not pay here (timings below): writing a tile back reads
-  and writes every texel, which costs more GPU time than drawing this
-  demo's few thousand static triangles again, and the API has no depth copy that
-  would make the write back cheap (notes/findings.md). Without it every
-  caster draws into the atlas each frame, as before.
+- **No static cache.** Static casters draw into the atlas every frame. A
+  cache was tried (at 8f80b05): static casters kept per cascade in
+  `r32float` tiles, redrawn only when the cascade's matrix or the static
+  set changed, and written back each frame as `frag_depth`. It matched the
+  redraw to the pixel but cost more GPU time than it saved (timings below),
+  since the API has no depth copy to make the write back cheap
+  (notes/findings.md), so it was removed. The steadier fit it needed stays.
 - **Bindings.** One layout from the shader for group 0: the view uniforms,
   a 64 byte caster block holding one cascade's matrix, the atlas as
   `texture_depth_2d` (a `depthOnly` view) and a `less` comparison sampler.
@@ -713,7 +695,7 @@ frames, two runs: Threads 1.5 to 3.0 ms on high, 4.7 to 4.8 on soft, 1.1 to
 the 2048 body pit's four cascades cost well under a millisecond on high,
 and soft, 48 comparisons a pixel over a screen of balls, about three.
 
-The static cache against redrawing the static casters, release AOT bake at
+The static cache (since removed) against redrawing the static casters, release AOT bake at
 1280 by 800, Apple M5 Max, two interleaved rounds (cache, no cache, each
 quality, then off, per scene) on a machine shared with other builds (load
 average near 200). GPU is the frame's GPU busy time, read from a 2 second
@@ -748,8 +730,7 @@ rounds, and a pit of walls should save nothing. The CPU columns move both
 ways by more than the cache could change them (it saves at most a dozen
 draw calls and adds a hash over the static instances). Rain also keeps
 redrawing tiles (202 in 3000 frames) as drops enter the view; the height
-field and Threads settle after 31 and 8. So it stays behind
-`SHADOW_CACHE`. The same traces put the shadow maps' own GPU cost natively
+field and Threads settle after 31 and 8. So it was removed. The same traces put the shadow maps' own GPU cost natively
 at 0.11 to 0.15 ms on high for rain and the height field and 0.6 ms for
 the Threads pit (1.2 on soft).
 

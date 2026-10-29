@@ -316,8 +316,7 @@ export class Main extends Layout {
         this.drawCount++;
         if (this.drawCount == 120) {
             this.context!.log("draw " + this.scenes[this.current].name() + " mean " + formatFixed(this.drawSum / 120, 3) +
-                " max " + formatFixed(this.drawMax, 3) + " prims " + formatInt(<f64>this.dd.primCount) +
-                " static tiles " + formatInt(<f64>(this.dd.gpu != null ? this.dd.gpu!.cacheFills : 0)));
+                " max " + formatFixed(this.drawMax, 3) + " prims " + formatInt(<f64>this.dd.primCount));
             this.drawSum = 0;
             this.drawMax = 0;
             this.drawCount = 0;

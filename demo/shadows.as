@@ -22,7 +22,7 @@ export const BLEND: f32 = 0.12;
 // Casters this far beyond a cascade's sphere toward the sun still cast into it.
 const CASTER_REACH: f32 = 40;
 // Sphere radii and the depths the cascades span come in these steps, so a zoom seldom changes the texel size
-// and bodies moving under a still camera leave the cascades, and the cached static casters, as they are.
+// and bodies moving under a still camera leave the cascades as they are.
 const STEP: f32 = 1.08;
 // The span's ends move inward only once they are this far off, two steps, so bodies coming and going hold them.
 const HOLD: f32 = 1.12;
