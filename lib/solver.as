@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 // AnimaScript port of src/solver.c
 
+import { Parallel } from "rive/parallel";
 // Solver work is partitioned into fixed-size blocks that worker threads claim
 // in parallel via atomic CAS on a per-block syncIndex. The port runs one worker,
 // but keeps the block and stage structure so the solve order matches C.
@@ -20,8 +21,6 @@ import {
 	b3GetMillisecondsAndReset,
 	b3GetTicks,
 	b3Log,
-	b3InParallel,
-	b3OnMain,
 	b3Ticks,
 } from "./core";
 import {
@@ -831,7 +830,7 @@ function b3MakeShapeId(index1: i32, world0: u16, generation: u16): b3ShapeId {
 }
 
 // This is called from b3DynamicTree_Query for continuous collision
-function b3ContinuousQueryCallback<M>(proxyId: i32, userData: u64, continuousContext: b3ContinuousContext, workerIndex: i32): bool {
+function b3ContinuousQueryCallback(proxyId: i32, userData: u64, continuousContext: b3ContinuousContext, workerIndex: i32): bool {
 	let shapeId = <i32>userData;
 
 	let world = continuousContext.world!;
@@ -882,7 +881,7 @@ function b3ContinuousQueryCallback<M>(proxyId: i32, userData: u64, continuousCon
 	}
 
 	// Custom user filtering; parallel parts run only without a custom filter
-	if (!isBoolean<M>()) {
+	if (!Parallel.inPart()) {
 		if ((shape.flags & b3_enableCustomFiltering) != 0 || (fastShape.flags & b3_enableCustomFiltering) != 0) {
 			let customFilterFcn = world.customFilterFcn;
 			if (customFilterFcn != null) {
@@ -900,7 +899,7 @@ function b3ContinuousQueryCallback<M>(proxyId: i32, userData: u64, continuousCon
 	let sweepA = b3MakeRelativeSweepAt(bodySim, continuousContext.base);
 
 	// Time of impact versus shape. Supports all shape types
-	let output = b3ShapeTimeOfImpactAt<M>(shape, fastShape, sweepA, continuousContext.sweep, continuousContext.fraction, workerIndex);
+	let output = b3ShapeTimeOfImpactAt(shape, fastShape, sweepA, continuousContext.sweep, continuousContext.fraction, workerIndex);
 	if (isSensor) {
 		// Only accept a sensor hit that is sooner than the current solid hit.
 		if (output.fraction <= continuousContext.fraction && continuousContext.sensorCount < B2_MAX_CONTINUOUS_SENSOR_HITS) {
@@ -917,7 +916,7 @@ function b3ContinuousQueryCallback<M>(proxyId: i32, userData: u64, continuousCon
 		let didHit = true;
 
 		// Parallel parts run only without a pre-solve callback
-		if (!isBoolean<M>()) {
+		if (!Parallel.inPart()) {
 			if (didHit && ((shape.flags & b3_enablePreSolveEvents) != 0 || (fastShape.flags & b3_enablePreSolveEvents) != 0)) {
 				let shapeIdA = b3MakeShapeId(shape.id + 1, world.worldId, shape.generation);
 				let shapeIdB = b3MakeShapeId(fastShape.id + 1, world.worldId, fastShape.generation);
@@ -942,7 +941,7 @@ const s_continuousContext = new b3ContinuousContext();
 
 // The tree callback of b3SolveContinuous, which does not nest
 function b3ContinuousTreeCallback(proxyId: i32, userData: u64): bool {
-	return b3ContinuousQueryCallback<b3OnMain>(proxyId, userData, s_continuousContext, 0);
+	return b3ContinuousQueryCallback(proxyId, userData, s_continuousContext, 0);
 }
 
 // The continuous context, tree query stack and visitor of each worker, for parallel parts
@@ -956,7 +955,7 @@ class b3ContinuousScratch {
 	}
 
 	visit(proxyId: i32, userData: u64): bool {
-		return b3ContinuousQueryCallback<b3InParallel>(proxyId, userData, this.context, this.workerIndex);
+		return b3ContinuousQueryCallback(proxyId, userData, this.context, this.workerIndex);
 	}
 }
 
@@ -968,7 +967,8 @@ function b3MakeContinuousScratch(): StaticArray<b3ContinuousScratch> {
 	return scratch;
 }
 
-const s_continuousScratch = b3MakeContinuousScratch();
+// One per worker, and each part uses its worker's
+@parallel.shared const s_continuousScratch = b3MakeContinuousScratch();
 
 // Whether parallel parts can sweep world's fast bodies: they cannot call its filter or pre-solve callbacks, or push sensor
 // hits. Points each worker's continuous context at world.
@@ -1014,7 +1014,7 @@ function b3IsShapeFast(shape: b3Shape, centroid1: b3Vec3, centroid2: b3Vec3, rot
 }
 
 // Continuous collision of dynamic versus static
-unsafe function b3SolveContinuous<M>(world: b3World, bodySimIndex: i32, taskContext: b3TaskContext, dt: f32, workerIndex: i32): void {
+unsafe function b3SolveContinuous(world: b3World, bodySimIndex: i32, taskContext: b3TaskContext, dt: f32, workerIndex: i32): void {
 	let awakeSet = world.solverSets[b3_awakeSet];
 	let fastBodySim = b3ArrayData(awakeSet.bodySims) + <usize>bodySimIndex * sizeof<b3BodySim>();
 	B3_ASSERT((load<u32>(fastBodySim + FSIM_FLAGS) & b3_isFast) != 0);
@@ -1042,7 +1042,7 @@ unsafe function b3SolveContinuous<M>(world: b3World, bodySimIndex: i32, taskCont
 	// points at world.
 	let scratch = s_continuousScratch[workerIndex];
 	let context = scratch.context;
-	if (!isBoolean<M>()) {
+	if (!Parallel.inPart()) {
 		context = s_continuousContext;
 		context.world = world;
 	}
@@ -1096,7 +1096,7 @@ unsafe function b3SolveContinuous<M>(world: b3World, bodySimIndex: i32, taskCont
 		}
 
 		let sweptBox = b3AABB_Union(box1, box2);
-		if (isBoolean<M>()) {
+		if (Parallel.inPart()) {
 			b3DynamicTree_QueryVisitor<b3ContinuousScratch>(staticTree, sweptBox, B3_DEFAULT_MASK_BITS, false, scratch, scratch.stack);
 
 			if (isBullet) {
@@ -1161,7 +1161,7 @@ unsafe function b3SolveContinuous<M>(world: b3World, bodySimIndex: i32, taskCont
 				// Regular bodies mark the hierarchy as moved using atomic operations.
 				// Bullets are handled separately at a later stage.
 				if (isBullet == false) {
-					b3BroadPhase_MarkProxyMoved<M>(world.broadPhase, shape.proxyKey, world.fatAABBs[shapeId]);
+					b3BroadPhase_MarkProxyMoved(world.broadPhase, shape.proxyKey, world.fatAABBs[shapeId]);
 				} else {
 					store<u32>(fastBodySim + FSIM_FLAGS, load<u32>(fastBodySim + FSIM_FLAGS) | b3_enlargeBulletBounds);
 				}
@@ -1187,7 +1187,7 @@ unsafe function b3SolveContinuous<M>(world: b3World, bodySimIndex: i32, taskCont
 				world.fatAABBs[shapeId] = b3AABB_Inflate(shape.aabb, shape.aabbMargin);
 
 				if (isBullet == false) {
-					b3BroadPhase_MarkProxyMoved<M>(world.broadPhase, shape.proxyKey, world.fatAABBs[shapeId]);
+					b3BroadPhase_MarkProxyMoved(world.broadPhase, shape.proxyKey, world.fatAABBs[shapeId]);
 				} else {
 					store<u32>(fastBodySim + FSIM_FLAGS, load<u32>(fastBodySim + FSIM_FLAGS) | b3_enlargeBulletBounds);
 				}
@@ -1198,7 +1198,7 @@ unsafe function b3SolveContinuous<M>(world: b3World, bodySimIndex: i32, taskCont
 	}
 
 	// Push sensor hits on the the task context for serial processing. Parallel parts run only without sensors.
-	if (!isBoolean<M>()) {
+	if (!Parallel.inPart()) {
 		for (let i = 0; i < context.sensorCount; ++i) {
 			// Skip any sensor hits that occurred after a solid hit
 			if (context.sensorFractions[i] < context.fraction) {
@@ -1269,7 +1269,7 @@ export unsafe function b3FinishParallelFinalize(world: b3World, stepContext: b3S
 		let deferred = taskContext.deferredBodies;
 		for (let k = 0; k < taskContext.deferredBodyCount; ++k) {
 			let simIndex = deferred[k];
-			b3SolveContinuous<b3OnMain>(world, simIndex, taskContext, stepContext.dt, i);
+			b3SolveContinuous(world, simIndex, taskContext, stepContext.dt, i);
 			b3UpdateWorldInertia(sims + <usize>simIndex * sizeof<b3BodySim>());
 		}
 		unstableCount += taskContext.unstableCount;
@@ -1286,7 +1286,7 @@ export unsafe function b3FinishParallelFinalize(world: b3World, stepContext: b3S
 	}
 }
 
-export unsafe function b3FinalizeBodiesTask<M>(startIndex: i32, endIndex: i32, workerIndex: i32, stepContext: b3StepContext): void {
+export unsafe function b3FinalizeBodiesTask(startIndex: i32, endIndex: i32, workerIndex: i32, stepContext: b3StepContext): void {
 	let world = stepContext.world;
 	let bodies = b3ArrayData(world.bodies);
 	let sims = b3ArrayData(stepContext.sims);
@@ -1323,7 +1323,7 @@ export unsafe function b3FinalizeBodiesTask<M>(startIndex: i32, endIndex: i32, w
 		let bodyId = load<i32>(sim + FSIM_BODYID);
 
 		if (b3IsValidVec3(v) == false || b3IsValidVec3(w) == false) {
-			if (isBoolean<M>()) {
+			if (Parallel.inPart()) {
 				taskContext.unstableCount += 1;
 			} else {
 				b3LogUnstableBody(world, bodyId);
@@ -1411,23 +1411,23 @@ export unsafe function b3FinalizeBodiesTask<M>(startIndex: i32, endIndex: i32, w
 				// This is deterministic because the order of TOI sweeps doesn't matter
 				if ((simFlags & b3_isBullet) != 0) {
 					let bulletIndex: i32;
-					if (isBoolean<M>()) {
+					if (Parallel.inPart()) {
 						let count = changetype<usize>(stepContext) + offsetof<b3StepContext>("bulletBodyCount");
 						bulletIndex = atomic.add<i32>(count + offsetof<b3AtomicInt>("value"), 1);
 					} else {
 						bulletIndex = b3AtomicFetchAddInt(stepContext.bulletBodyCount, 1);
 					}
 					stepContext.bulletBodies[bulletIndex] = simIndex;
-				} else if (isBoolean<M>()) {
+				} else if (Parallel.inPart()) {
 					if (parallelContinuous) {
-						b3SolveContinuous<M>(world, simIndex, taskContext, timeStep, workerIndex);
+						b3SolveContinuous(world, simIndex, taskContext, timeStep, workerIndex);
 					} else {
 						// The main lane sweeps it after the parts, then updates its inertia, b3FinishParallelFinalize
 						taskContext.deferredBodies[taskContext.deferredBodyCount] = simIndex;
 						taskContext.deferredBodyCount += 1;
 					}
 				} else {
-					b3SolveContinuous<M>(world, simIndex, taskContext, timeStep, workerIndex);
+					b3SolveContinuous(world, simIndex, taskContext, timeStep, workerIndex);
 				}
 			} else {
 				// Body is safe to advance
@@ -1484,7 +1484,7 @@ export unsafe function b3FinalizeBodiesTask<M>(startIndex: i32, endIndex: i32, w
 					world.fatAABBs[shapeId] = b3AABB_Inflate(aabb, shape.aabbMargin);
 
 					// Mark the hierarchy as moved using atomic operations.
-					b3BroadPhase_MarkProxyMoved<M>(world.broadPhase, shape.proxyKey, world.fatAABBs[shapeId]);
+					b3BroadPhase_MarkProxyMoved(world.broadPhase, shape.proxyKey, world.fatAABBs[shapeId]);
 				}
 
 				shapeId = shape.nextShapeId;
@@ -2019,7 +2019,7 @@ function b3BulletBodyTask(startIndex: i32, endIndex: i32, workerIndex: i32, step
 
 	for (let i = startIndex; i < endIndex; ++i) {
 		let simIndex = stepContext.bulletBodies[i];
-		b3SolveContinuous<b3OnMain>(stepContext.world, simIndex, taskContext, stepContext.dt, workerIndex);
+		b3SolveContinuous(stepContext.world, simIndex, taskContext, stepContext.dt, workerIndex);
 	}
 }
 
@@ -2733,7 +2733,7 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 			b3ParallelFor(
 				world,
 				(startIndex: i32, endIndex: i32, workerIndex: i32): void =>
-					b3FinalizeBodiesTask<b3OnMain>(startIndex, endIndex, workerIndex, stepContext),
+					b3FinalizeBodiesTask(startIndex, endIndex, workerIndex, stepContext),
 				awakeBodyCount,
 				8,
 				"ccd"

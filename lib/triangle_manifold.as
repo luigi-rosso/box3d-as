@@ -124,7 +124,8 @@ function b3MakeTriangleScratch(): StaticArray<b3TriangleScratch> {
 	return scratch;
 }
 
-const s_triangleScratch = b3MakeTriangleScratch();
+// One per worker, and each part uses its worker's
+@parallel.shared const s_triangleScratch = b3MakeTriangleScratch();
 
 function b3GetTriangleFeature(cache: b3SimplexCache): b3TriangleFeature {
 	let count = <i32>cache.count;

@@ -6,7 +6,7 @@
 
 import { Blob, SharedRegion } from "rive/shared";
 
-import { b3GetLengthUnitsPerMeter, b3OnMain, b3SetLengthUnitsPerMeter } from "./core";
+import { b3GetLengthUnitsPerMeter, b3SetLengthUnitsPerMeter } from "./core";
 import { b3AABB, b3Quat, b3Transform, b3Vec3 } from "./math_functions";
 import {
 	b3Capsule,
@@ -758,7 +758,7 @@ export unsafe function b3LaneCollidePartition(
 	b3SpanEnd(trace, b3_traceCopy, traceBegin);
 	traceBegin = b3SpanBegin(trace);
 	if (contactCount > 0) {
-		b3CollideTask<b3OnMain>(0, contactCount, 0, r.context);
+		b3CollideTask(0, contactCount, 0, r.context);
 	}
 	b3SpanEnd(trace, b3_traceCollide, traceBegin);
 	traceBegin = b3SpanBegin(trace);

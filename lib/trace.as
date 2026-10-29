@@ -52,7 +52,8 @@ function b3MakeTraceRows(): StaticArray<b3TraceRow> {
 	return rows;
 }
 
-const b3_traceRows = b3MakeTraceRows();
+// A row per worker, and each part writes its own
+@parallel.shared const b3_traceRows = b3MakeTraceRows();
 let b3_traceOn = false;
 let b3_traceBegin: f64 = 0;
 let b3_traceEnd: f64 = 0;

@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: MIT
 // AnimaScript port of src/mesh_contact.c
 
-import { B3_ASSERT, B3_ASSERT_ENABLED, B3_NULL_INDEX, FLT_MAX, b3Log, b3OnMain } from "./core";
+import { Parallel } from "rive/parallel";
+import { B3_ASSERT, B3_ASSERT_ENABLED, B3_NULL_INDEX, FLT_MAX, b3Log } from "./core";
 import {
 	B3_LINEAR_SLOP,
 	B3_MAX_AABB_MARGIN,
@@ -175,7 +176,7 @@ function b3QueryCacheTriangles(meshContact: b3MeshContact, shapeA: b3Shape, xfA:
 }
 
 // The second half: the new query bounds, and the new cache matched with the old one
-unsafe function b3SaveCacheTriangles<M>(meshContact: b3MeshContact, shapeA: b3Shape, triangleCount: i32, scratch: b3MeshScratch): void {
+unsafe function b3SaveCacheTriangles(meshContact: b3MeshContact, shapeA: b3Shape, triangleCount: i32, scratch: b3MeshScratch): void {
 	let triangleCache = meshContact.triangleCache;
 	let triangleIndices = scratch.triangleQuery.indices;
 	meshContact.queryBounds = scratch.refreshBounds;
@@ -199,7 +200,7 @@ unsafe function b3SaveCacheTriangles<M>(meshContact: b3MeshContact, shapeA: b3Sh
 	}
 
 	// Save new cache. A parallel part only refreshes a cache with the capacity, b3MeshContactFitsPart.
-	if (isBoolean<M>()) {
+	if (Parallel.inPart()) {
 		b3SetTriangleCacheLength(triangleCache, triangleCount);
 	} else {
 		triangleCache.length = triangleCount;
@@ -252,7 +253,7 @@ unsafe function b3RefreshCache(contact: b3Contact, shapeA: b3Shape, xfA: b3World
 		}
 	}
 
-	b3SaveCacheTriangles<b3OnMain>(meshContact, shapeA, triangleCount, scratch);
+	b3SaveCacheTriangles(meshContact, shapeA, triangleCount, scratch);
 }
 
 struct b3TentativeTriangle {
@@ -633,7 +634,8 @@ function b3MakeMeshScratch(): StaticArray<b3MeshScratch> {
 	return scratch;
 }
 
-const s_meshScratch = b3MakeMeshScratch();
+// One per worker, and each part uses its worker's
+@parallel.shared const s_meshScratch = b3MakeMeshScratch();
 
 // The most triangles any mesh contact's cache has held, which sizes every worker's scratch before a parallel collide
 let s_meshTriangleHighWater = 0;
@@ -954,13 +956,13 @@ export unsafe function b3ComputeMeshManifolds(
 	xfB: b3WorldTransform,
 	isFast: bool,
 ): bool {
-	return b3ComputeMeshManifoldsAt<b3OnMain>(world, workerIndex, contact, shapeA, materialMap, xfA, shapeB, xfB, isFast);
+	return b3ComputeMeshManifoldsAt(world, workerIndex, contact, shapeA, materialMap, xfA, shapeB, xfB, isFast);
 }
 
-// M is b3InParallel for the instantiation parallel parts run. Unchecked: its scratch covers the counts its loops are
+// Unchecked: its scratch covers the counts its loops are
 // bounded by (notes/perf_collide.md, change 7); reads of shape supplied data stay checked through helpers.
 @unchecked
-export unsafe function b3ComputeMeshManifoldsAt<M>(
+export unsafe function b3ComputeMeshManifoldsAt(
 	world: b3World,
 	workerIndex: i32,
 	contact: b3Contact,
@@ -977,10 +979,10 @@ export unsafe function b3ComputeMeshManifoldsAt<M>(
 	let scratch = s_meshScratch[workerIndex];
 
 	// A parallel part saves the refresh b3MeshContactFitsPart queried, if any
-	if (isBoolean<M>()) {
+	if (Parallel.inPart()) {
 		if (scratch.refreshReady) {
 			scratch.refreshReady = false;
-			b3SaveCacheTriangles<M>(contact.meshContact, shapeA, scratch.refreshCount, scratch);
+			b3SaveCacheTriangles(contact.meshContact, shapeA, scratch.refreshCount, scratch);
 		}
 	} else {
 		b3RefreshCache(contact, shapeA, xfA, shapeB.aabb, scratch);
@@ -992,7 +994,7 @@ export unsafe function b3ComputeMeshManifoldsAt<M>(
 
 	// C's pointer arrays become indices into the manifold buffer. The contact's manifold storage holds one per cached
 	// triangle, at least as many as there can be clusters, so a parallel part never grows it.
-	if (!isBoolean<M>()) {
+	if (!Parallel.inPart()) {
 		b3ReserveMeshScratch(scratch, b3MaxInt(triangleCount, contact.manifoldCount));
 		if (contact.manifolds.length < triangleCount) {
 			let manifolds = b3AllocateManifolds(world, triangleCount);
@@ -1530,8 +1532,8 @@ export unsafe function b3ComputeMeshManifoldsAt<M>(
 
 				materialIndex = b3ClampInt(materialIndex, 0, shapeA.materialCount - 1);
 				let material = b3SurfaceMaterialAt(materialsA, materialIndex);
-				friction += b3MixFriction<M>(world, material.friction, material.userMaterialId, materialB.friction, materialB.userMaterialId);
-				restitution += b3MixRestitution<M>(
+				friction += b3MixFriction(world, material.friction, material.userMaterialId, materialB.friction, materialB.userMaterialId);
+				restitution += b3MixRestitution(
 					world,
 					material.restitution,
 					material.userMaterialId,
@@ -1556,14 +1558,14 @@ export unsafe function b3ComputeMeshManifoldsAt<M>(
 		if (B3_ASSERT_ENABLED) B3_ASSERT(b3IsValidFloat(contact.restitution) && contact.restitution >= 0.0);
 	} else {
 		// Keep these updated in case the values on the shapes are modified
-		contact.friction = b3MixFriction<M>(
+		contact.friction = b3MixFriction(
 			world,
 			b3SurfaceMaterialAt(materialsA, 0).friction,
 			b3SurfaceMaterialAt(materialsA, 0).userMaterialId,
 			materialB.friction,
 			materialB.userMaterialId,
 		);
-		contact.restitution = b3MixRestitution<M>(
+		contact.restitution = b3MixRestitution(
 			world,
 			b3SurfaceMaterialAt(materialsA, 0).restitution,
 			b3SurfaceMaterialAt(materialsA, 0).userMaterialId,

@@ -1,17 +1,15 @@
 // SPDX-FileCopyrightText: 2026 Erin Catto
 // SPDX-License-Identifier: MIT
 // Box3D's threaded step on parallel calls: the solver stages and the narrow phase run as parts of one call over the
-// world's own memory, as C's workers do. notes/threading.md has the design and the costs. Opt in: a project that
-// includes this directory registers it as the lanes backend b3_laneBackendParallel, and needs the parallel-calls
-// toolchain.
+// world's own memory, as C's workers do. notes/threading.md has the design and the costs.
 
 import { Parallel, Part } from "rive/parallel";
 import { formatFixed } from "rive/format";
 
-import { b3GetMillisecondsAndReset, b3GetTicks, b3InParallel, b3OnMain, b3Ticks } from "../core";
-import { b3SetBitCountAndClear } from "../bitset";
-import { b3GetIdCapacity } from "../id_pool";
-import { B3_OVERFLOW_INDEX } from "../constraint_graph";
+import { b3GetMillisecondsAndReset, b3GetTicks, b3Ticks } from "./core";
+import { b3SetBitCountAndClear } from "./bitset";
+import { b3GetIdCapacity } from "./id_pool";
+import { B3_OVERFLOW_INDEX } from "./constraint_graph";
 import {
 	b3PrepareContacts_Overflow,
 	b3WarmStartContacts_Overflow,
@@ -19,14 +17,14 @@ import {
 	b3SolveContacts_Overflow,
 	b3ApplyRestitution_Overflow,
 	b3StoreImpulses_Overflow,
-} from "../contact_solver";
+} from "./contact_solver";
 import {
 	b3PrepareJoints_Overflow,
 	b3WarmStartJoints_Overflow,
 	b3SolveJoints_Overflow,
-} from "../joint";
-import { b3PrepareCompoundContacts } from "../contact";
-import { b3ReserveMeshScratchForWorkers } from "../mesh_contact";
+} from "./joint";
+import { b3PrepareCompoundContacts } from "./contact";
+import { b3ReserveMeshScratchForWorkers } from "./mesh_contact";
 import {
 	b3ExecuteBlock,
 	b3FinalizeBodiesTask,
@@ -36,7 +34,7 @@ import {
 	b3SetLaneSolve,
 	b3SolverStage,
 	b3StepContext,
-} from "../solver";
+} from "./solver";
 import {
 	b3CollectParallelPairs,
 	b3CrossContext,
@@ -47,7 +45,7 @@ import {
 	b3SelfPairsTask,
 	b3SetLanePairs,
 	b3UpdateTreesTaskAt,
-} from "../broad_phase";
+} from "./broad_phase";
 import {
 	b3CollideTask,
 	b3DefaultFrictionCallback,
@@ -56,10 +54,9 @@ import {
 	b3SetLaneCollide,
 	b3World,
 	b3World_SetWorkerCount,
-} from "../physics_world";
-import { b3EnqueueTaskCallback, b3FinishTaskCallback, b3TaskCallback, b3WorldId } from "../types";
-import { b3ParallelBackend, b3SetParallelBackend } from "../lane_common";
-import { B3_MAX_WORKERS } from "../constants";
+} from "./physics_world";
+import { b3EnqueueTaskCallback, b3FinishTaskCallback, b3TaskCallback, b3WorldId } from "./types";
+import { B3_MAX_WORKERS } from "./constants";
 import {
 	b3SpanBegin,
 	b3SpanEnd,
@@ -69,7 +66,7 @@ import {
 	b3_traceFinalize,
 	b3_tracePairs,
 	b3_traceTree,
-} from "../trace";
+} from "./trace";
 
 export const b3_parallelCollide: i32 = 1;
 export const b3_parallelSolve: i32 = 2;
@@ -284,13 +281,13 @@ function b3ParallelSolve(context: b3StepContext): bool {
 	let trace = b3TraceRowAt(workerIndex);
 	let traceBegin = b3SpanBegin(trace);
 	if (rebuildTrees && part.index == part.count - 1) {
-		b3UpdateTreesTaskAt<b3InParallel>(context.world);
+		b3UpdateTreesTaskAt(context.world);
 		b3SpanEnd(trace, b3_traceTree, traceBegin);
 		traceBegin = b3SpanBegin(trace);
 	}
 
 	for (let start = part.claim(contactCount, blockSize); start < contactCount; start = part.claim(contactCount, blockSize)) {
-		b3CollideTask<b3InParallel>(start, min(start + blockSize, contactCount), workerIndex, context);
+		b3CollideTask(start, min(start + blockSize, contactCount), workerIndex, context);
 	}
 	b3SpanEnd(trace, b3_traceCollide, traceBegin);
 }
@@ -352,7 +349,7 @@ unsafe function b3ParallelCollide(context: b3StepContext, contactCount: i32): bo
 		stats.deferredContacts += taskContext.deferredCount;
 		for (let k = 0; k < taskContext.deferredCount; ++k) {
 			let index = deferred[k];
-			b3CollideTask<b3OnMain>(index, index + 1, i, context);
+			b3CollideTask(index, index + 1, i, context);
 		}
 	}
 	b3SpanEnd(trace, b3_traceCollide, traceBegin);
@@ -364,7 +361,7 @@ unsafe function b3ParallelCollide(context: b3StepContext, contactCount: i32): bo
 	let trace = b3TraceRowAt(workerIndex);
 	let traceBegin = b3SpanBegin(trace);
 	for (let start = part.claim(bodyCount, blockSize); start < bodyCount; start = part.claim(bodyCount, blockSize)) {
-		b3FinalizeBodiesTask<b3InParallel>(start, min(start + blockSize, bodyCount), workerIndex, context);
+		b3FinalizeBodiesTask(start, min(start + blockSize, bodyCount), workerIndex, context);
 	}
 	b3SpanEnd(trace, b3_traceFinalize, traceBegin);
 }
@@ -409,14 +406,14 @@ unsafe function b3ParallelFinalize(context: b3StepContext, bodyCount: i32): bool
 	let trace = b3TraceRowAt(workerIndex);
 	let traceBegin = b3SpanBegin(trace);
 	for (let i = part.claim(crossCount, 1); i < crossCount; i = part.claim(crossCount, 1)) {
-		b3CrossPairsTask<b3InParallel>(i, i + 1, workerIndex, crossContext);
+		b3CrossPairsTask(i, i + 1, workerIndex, crossContext);
 	}
 	b3SpanEnd(trace, b3_tracePairs, traceBegin);
 	part.sync();
 
 	traceBegin = b3SpanBegin(trace);
 	for (let start = part.claim(selfCount, selfBlockSize); start < selfCount; start = part.claim(selfCount, selfBlockSize)) {
-		b3SelfPairsTask<b3InParallel>(start, min(start + selfBlockSize, selfCount), workerIndex, world);
+		b3SelfPairsTask(start, min(start + selfBlockSize, selfCount), workerIndex, world);
 	}
 	b3SpanEnd(trace, b3_tracePairs, traceBegin);
 }
@@ -471,7 +468,7 @@ function b3ParallelFinish(world: b3World, userTask: u64): void {
 		s_treesPending = false;
 		let trace = b3TraceRowAt(0);
 		let traceBegin = b3SpanBegin(trace);
-		b3UpdateTreesTaskAt<b3OnMain>(world);
+		b3UpdateTreesTaskAt(world);
 		b3SpanEnd(trace, b3_traceTree, traceBegin);
 	}
 }
@@ -520,27 +517,17 @@ export function b3World_EnableParallel(worldId: b3WorldId, tasks: i32): void {
 	}
 }
 
-class b3ParallelCalls extends b3ParallelBackend {
-	override enable(worldId: b3WorldId, tasks: i32): void {
-		b3World_EnableParallel(worldId, tasks);
-	}
-
-	override size(): i32 {
-		return Parallel.size();
-	}
-
-	override limit(parts: i32): void {
-		s_partLimit = parts > 0 ? parts : B3_MAX_WORKERS;
-	}
-
-	override report(): string {
-		let ps = b3_parallelStats;
-		return " parts=" + Parallel.size().toString() + " parSolves=" + ps.solves.toString() + " parCollides=" +
-			ps.collides.toString() + " parFinalizes=" + ps.finalizes.toString() + " parContacts=" +
-			formatFixed(<f64>ps.contacts / <f64>max(1, ps.collides), 1) + " parDeferredContacts=" +
-			formatFixed(<f64>ps.deferredContacts / <f64>max(1, ps.collides), 1) + " parDeferredBodies=" +
-			formatFixed(<f64>ps.deferredBodies / <f64>max(1, ps.finalizes), 1);
-	}
+// Runs later calls on at most parts parts, 0 on as many as Parallel.size()
+export function b3SetParallelLimit(parts: i32): void {
+	s_partLimit = parts > 0 ? parts : B3_MAX_WORKERS;
 }
 
-b3SetParallelBackend(new b3ParallelCalls());
+// Fields for a bench's result line
+export function b3ParallelReport(): string {
+	let ps = b3_parallelStats;
+	return " parts=" + Parallel.size().toString() + " parSolves=" + ps.solves.toString() + " parCollides=" +
+		ps.collides.toString() + " parFinalizes=" + ps.finalizes.toString() + " parContacts=" +
+		formatFixed(<f64>ps.contacts / <f64>max(1, ps.collides), 1) + " parDeferredContacts=" +
+		formatFixed(<f64>ps.deferredContacts / <f64>max(1, ps.collides), 1) + " parDeferredBodies=" +
+		formatFixed(<f64>ps.deferredBodies / <f64>max(1, ps.finalizes), 1);
+}

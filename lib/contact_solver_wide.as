@@ -61,7 +61,7 @@ import {
 
 // C points empty lanes at zeroed statics. Nothing writes to these.
 const b3_zeroContact = new b3Contact();
-const b3_zeroManifolds = new StaticArray<b3Manifold>(1);
+@parallel.shared const b3_zeroManifolds = new StaticArray<b3Manifold>(1);
 
 // Never read: the convex paths have a fixed manifold count.
 const b3_noManifoldStarts = new Int32Array(0);

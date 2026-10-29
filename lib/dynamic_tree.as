@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: MIT
 // AnimaScript port of src/dynamic_tree.c
 
-import { B3_ASSERT, B3_ASSERT_ENABLED, B3_ENABLE_VALIDATION, B3_NULL_INDEX, FLT_MAX, b3OnMain } from "./core";
+import { Parallel } from "rive/parallel";
+import { B3_ASSERT, B3_ASSERT_ENABLED, B3_ENABLE_VALIDATION, B3_NULL_INDEX, FLT_MAX } from "./core";
 import {
 	b3AABB,
 	b3AABB_Center,
@@ -1775,10 +1776,11 @@ struct b3CopyItem {
 	}
 }
 
-// The rebuild, refit and moved flag walks never call out, so they share static stacks.
-const b3_rebuildStack = new StaticArray<b3RebuildItem>(B3_TREE_STACK_SIZE);
-const b3_copyStack = new StaticArray<b3CopyItem>(B3_TREE_STACK_SIZE);
-const b3_walkStack = new StaticArray<i32>(B3_TREE_STACK_SIZE);
+// The rebuild, refit and moved flag walks never call out, so they share static stacks. In a parallel call only the part
+// that rebuilds the trees walks them.
+@parallel.shared const b3_rebuildStack = new StaticArray<b3RebuildItem>(B3_TREE_STACK_SIZE);
+@parallel.shared const b3_copyStack = new StaticArray<b3CopyItem>(B3_TREE_STACK_SIZE);
+@parallel.shared const b3_walkStack = new StaticArray<i32>(B3_TREE_STACK_SIZE);
 
 // Bump allocate a pair of sibling nodes. Returns index to the first one.
 @inline function b3BumpPair(tree: b3DynamicTree, parent: i32): i32 {
@@ -1946,7 +1948,7 @@ function b3BuildTree(tree: b3DynamicTree, leafCount: i32): void {
 // refitting much faster. This is done async with threading, so the cost is hidden.
 // Not safe to access tree during this operation.
 export function b3DynamicTree_Rebuild(tree: b3DynamicTree, fullBuild: bool): i32 {
-	return b3DynamicTree_RebuildAt<b3OnMain>(tree, fullBuild);
+	return b3DynamicTree_RebuildAt(tree, fullBuild);
 }
 
 // Allocates what a rebuild of the tree needs, so a parallel part can run it
@@ -1988,9 +1990,9 @@ function b3SwapRebuiltNodes(tree: b3DynamicTree, fullBuild: bool): void {
 	}
 }
 
-// A parallel part, b3InParallel, runs it after b3DynamicTree_ReserveRebuild and leaves the swap to
+// A parallel part runs it after b3DynamicTree_ReserveRebuild and leaves the swap to
 // b3DynamicTree_FinishRebuild
-export function b3DynamicTree_RebuildAt<M>(tree: b3DynamicTree, fullBuild: bool): i32 {
+export function b3DynamicTree_RebuildAt(tree: b3DynamicTree, fullBuild: bool): i32 {
 	let proxyCount = tree.proxyCount;
 	if (proxyCount == 0) {
 		return 0;
@@ -2004,7 +2006,7 @@ export function b3DynamicTree_RebuildAt<M>(tree: b3DynamicTree, fullBuild: bool)
 		return 0;
 	}
 
-	if (!isBoolean<M>()) {
+	if (!Parallel.inPart()) {
 		b3DynamicTree_ReserveRebuild(tree);
 	}
 
@@ -2056,7 +2058,7 @@ export function b3DynamicTree_RebuildAt<M>(tree: b3DynamicTree, fullBuild: bool)
 
 	b3BuildTree(tree, leafCount);
 
-	if (isBoolean<M>()) {
+	if (Parallel.inPart()) {
 		tree.swapPending = true;
 	} else {
 		b3SwapRebuiltNodes(tree, fullBuild);
@@ -2078,9 +2080,9 @@ export function b3DynamicTree_MarkProxyMovedSerial(tree: b3DynamicTree, proxyId:
 	}
 }
 
-// Update a proxy AABB and flag the ancestors as moved. Thread-safe using atomics in the b3InParallel instantiation,
-// which parallel parts run as they finalize bodies.
-export unsafe function b3DynamicTree_MarkProxyMoved<M>(tree: b3DynamicTree, proxyId: i32, aabb: b3AABB): void {
+// Update a proxy AABB and flag the ancestors as moved. Thread-safe using atomics in the parallel copy, which parts
+// run as they finalize bodies.
+export unsafe function b3DynamicTree_MarkProxyMoved(tree: b3DynamicTree, proxyId: i32, aabb: b3AABB): void {
 	let nodes = tree.nodes;
 	let parents = tree.parents;
 
@@ -2102,7 +2104,7 @@ export unsafe function b3DynamicTree_MarkProxyMoved<M>(tree: b3DynamicTree, prox
 		}
 
 		let previousFlags: u32;
-		if (isBoolean<M>()) {
+		if (Parallel.inPart()) {
 			previousFlags = atomic.or<u32>(flagIndex, B3_MOVED_NODE);
 		} else {
 			previousFlags = load<u32>(flagIndex);

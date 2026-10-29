@@ -8,41 +8,11 @@ import { SharedRegion } from "rive/shared";
 import { b3CreateBitSet } from "./bitset";
 import { b3TaskContext } from "./physics_world";
 import { b3TraceRow, b3TraceRowAt } from "./trace";
-import { b3WorldId } from "./types";
 
 export const b3_laneBackendJobs: i32 = 1;
 export const b3_laneBackendWorkers: i32 = 2;
-// Parallel calls over the world's own memory, from lib/parallel/ when a project includes it
+// Parallel calls over the world's own memory, parallel_step.as
 export const b3_laneBackendParallel: i32 = 3;
-
-// What lib/parallel/parallel_step.as registers when a project includes it. Parallel calls need the parallel-calls
-// toolchain, so the core lib reaches them only through this.
-export class b3ParallelBackend {
-	enable(worldId: b3WorldId, tasks: i32): void {}
-
-	// Parts a run gets
-	size(): i32 {
-		return 1;
-	}
-
-	// Runs later calls on at most parts parts, 0 on as many as size()
-	limit(parts: i32): void {}
-
-	// Fields for a bench's result line
-	report(): string {
-		return "";
-	}
-}
-
-let b3_parallelBackend: b3ParallelBackend? = null;
-
-export function b3SetParallelBackend(backend: b3ParallelBackend?): void {
-	b3_parallelBackend = backend;
-}
-
-export function b3GetParallelBackend(): b3ParallelBackend? {
-	return b3_parallelBackend;
-}
 
 export const B3_MAX_LANES: i32 = 8;
 

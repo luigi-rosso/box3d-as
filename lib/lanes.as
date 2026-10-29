@@ -9,14 +9,13 @@ import { Worker } from "rive/workers";
 import { Blob, SharedRegion, Signal } from "rive/shared";
 import { Lanes } from "rive/lanes";
 
-import { b3GetTicks, b3GetLengthUnitsPerMeter, b3OnMain, b3SetLengthUnitsPerMeter } from "./core";
+import { b3GetTicks, b3GetLengthUnitsPerMeter, b3SetLengthUnitsPerMeter } from "./core";
 import {
 	B3_LANE_TRACE_BYTES,
 	B3_MAX_LANES,
 	b3_laneBackendJobs,
 	b3_laneBackendParallel,
 	b3_laneBackendWorkers,
-	b3GetParallelBackend,
 	b3GrowI32,
 	b3GrowU32,
 	b3GrowU8,
@@ -36,6 +35,7 @@ import {
 	b3SetLaneClock,
 	b3SplitStart,
 } from "./lane_common";
+import { b3World_EnableParallel } from "./parallel_step";
 import {
 	b3LaneCollideApply,
 	b3LaneCollideBegin,
@@ -1695,7 +1695,7 @@ unsafe function b3LaneCollide(t: b3LaneTasks, context: b3StepContext, contactCou
 
 	let ticks = b3LaneNow();
 	traceBegin = b3SpanBegin(trace);
-	b3CollideTask<b3OnMain>(m.ranges[0], m.ranges[1], 0, context);
+	b3CollideTask(m.ranges[0], m.ranges[1], 0, context);
 	m.partition0 += b3LaneNow() - ticks;
 	b3SpanEnd(trace, b3_traceCollide, traceBegin);
 
@@ -1802,13 +1802,7 @@ export function b3World_EnableLanes(worldId: b3WorldId, lanes: i32, backend: i32
 		return null;
 	}
 	if (backend == b3_laneBackendParallel) {
-		let parallel = b3GetParallelBackend();
-		if (parallel == null) {
-			console.log("b3World_EnableLanes: parallel calls need lib/parallel/ in the project and the parallel-calls " +
-				"toolchain");
-		} else {
-			parallel.enable(worldId, tasks & (b3_laneCollide | b3_laneSolve));
-		}
+		b3World_EnableParallel(worldId, tasks & (b3_laneCollide | b3_laneSolve));
 		return null;
 	}
 	b3SetLaneClock((): f64 => <f64>b3GetTicks() * 1e-6);

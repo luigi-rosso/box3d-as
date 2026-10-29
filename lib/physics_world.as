@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 // AnimaScript port of src/physics_world.c
 
+import { Parallel } from "rive/parallel";
 import {
 	B3_ASSERT,
 	B3_NULL_INDEX,
@@ -12,7 +13,6 @@ import {
 	b3GetMilliseconds,
 	b3GetTicks,
 	b3Log,
-	b3OnMain,
 } from "./core";
 import {
 	B3_CONTACT_MANIFOLD_COUNT_BUCKETS,
@@ -550,15 +550,15 @@ export function b3DefaultRestitutionCallback(restitutionA: f32, materialA: u64, 
 }
 
 // The world's friction and restitution callbacks; parallel parts run only with the defaults
-export function b3MixFriction<M>(world: b3World, frictionA: f32, materialA: u64, frictionB: f32, materialB: u64): f32 {
-	if (isBoolean<M>()) {
+export function b3MixFriction(world: b3World, frictionA: f32, materialA: u64, frictionB: f32, materialB: u64): f32 {
+	if (Parallel.inPart()) {
 		return b3DefaultFrictionCallback(frictionA, materialA, frictionB, materialB);
 	}
 	return world.frictionCallback!(frictionA, materialA, frictionB, materialB);
 }
 
-export function b3MixRestitution<M>(world: b3World, restitutionA: f32, materialA: u64, restitutionB: f32, materialB: u64): f32 {
-	if (isBoolean<M>()) {
+export function b3MixRestitution(world: b3World, restitutionA: f32, materialA: u64, restitutionB: f32, materialB: u64): f32 {
+	if (Parallel.inPart()) {
 		return b3DefaultRestitutionCallback(restitutionA, materialA, restitutionB, materialB);
 	}
 	return world.restitutionCallback!(restitutionA, materialA, restitutionB, materialB);
@@ -804,7 +804,7 @@ export function b3SetLaneCollide(fcn: b3LaneCollideFcn?): void {
 	b3_laneCollide = fcn;
 }
 
-export function b3CollideTask<M>(startIndex: i32, endIndex: i32, workerIndex: i32, stepContext: b3StepContext): void {
+export function b3CollideTask(startIndex: i32, endIndex: i32, workerIndex: i32, stepContext: b3StepContext): void {
 	let world = stepContext.world;
 	let graph = world.constraintGraph;
 	let taskContext = world.taskContexts[workerIndex];
@@ -950,7 +950,7 @@ export function b3CollideTask<M>(startIndex: i32, endIndex: i32, workerIndex: i3
 		}
 
 		// A part leaves to the main lane the contacts whose update would allocate, before it changes them
-		if (isBoolean<M>()) {
+		if (Parallel.inPart()) {
 			let fits: bool;
 			if ((contact.flags & b3_simMeshContact) != 0) {
 				fits = b3MeshContactFitsPart(contact, shapeA, transformA, shapeB.aabb, workerIndex);
@@ -974,7 +974,7 @@ export function b3CollideTask<M>(startIndex: i32, endIndex: i32, workerIndex: i3
 		contact.flags |= b3_relativeTransformValid;
 
 		// This updates solid contacts
-		let touching = b3UpdateContact<M>(
+		let touching = b3UpdateContact(
 			world,
 			workerIndex,
 			contact,
@@ -1128,7 +1128,7 @@ function b3Collide(context: b3StepContext): void {
 		b3ParallelFor(
 			world,
 			(startIndex: i32, endIndex: i32, workerIndex: i32): void =>
-				b3CollideTask<b3OnMain>(startIndex, endIndex, workerIndex, context),
+				b3CollideTask(startIndex, endIndex, workerIndex, context),
 			contactCount,
 			minRange,
 			"collide",

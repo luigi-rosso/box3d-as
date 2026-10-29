@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 // AnimaScript port of src/contact.c
 
+import { Parallel } from "rive/parallel";
 import { B3_ASSERT, B3_ASSERT_ENABLED, B3_NULL_INDEX, UINT32_MAX } from "./core";
 import { B3_MAX_MANIFOLD_POINTS, B3_MAX_WORKERS } from "./constants";
 import {
@@ -731,7 +732,8 @@ function b3MakeConvexContactScratch(): StaticArray<b3ConvexContactScratch> {
 	return scratch;
 }
 
-const s_convexContactScratch = b3MakeConvexContactScratch();
+// One per worker, and each part uses its worker's
+@parallel.shared const s_convexContactScratch = b3MakeConvexContactScratch();
 
 // Temporary child shape to match existing function signatures. C copies the whole shape; the paths below read only its
 // identity, flags, type, materials and the child geometry, so those are what is copied. childMaterials holds a convex
@@ -850,8 +852,7 @@ const s_contactChildMaterial = new Uint16Array(1);
 const s_contactChildShape = new b3Shape();
 const s_contactChildMaterials = new StaticArray<b3SurfaceMaterial>(1);
 
-// M is b3InParallel for the instantiation parallel parts run, b3OnMain otherwise
-unsafe function b3ComputeConvexManifold<M>(
+unsafe function b3ComputeConvexManifold(
 	world: b3World,
 	workerIndex: i32,
 	contact: b3Contact,
@@ -933,7 +934,7 @@ unsafe function b3ComputeConvexManifold<M>(
 	let oldCount = 0;
 
 	if (contact.manifoldCount == 0) {
-		if (!isBoolean<M>()) {
+		if (!Parallel.inPart()) {
 			if (contact.manifolds.length == 0) {
 				contact.manifolds = b3AllocateManifolds(world, 1);
 			}
@@ -988,7 +989,7 @@ unsafe function b3ComputeConvexManifold<M>(
 	return true;
 }
 
-unsafe function b3UpdateConvexContact<M>(
+unsafe function b3UpdateConvexContact(
 	world: b3World,
 	workerIndex: i32,
 	contact: b3Contact,
@@ -999,7 +1000,7 @@ unsafe function b3UpdateConvexContact<M>(
 	flip: bool,
 ): bool {
 	// Compute new manifold
-	let touching = b3ComputeConvexManifold<M>(world, workerIndex, contact, shapeA, xfA, shapeB, xfB);
+	let touching = b3ComputeConvexManifold(world, workerIndex, contact, shapeA, xfA, shapeB, xfB);
 
 	if (touching == false) {
 		if (B3_ASSERT_ENABLED) B3_ASSERT(contact.manifoldCount == 0);
@@ -1025,8 +1026,8 @@ unsafe function b3UpdateConvexContact<M>(
 	let materialB = b3GetShapeMaterials(shapeB)[0];
 
 	// Keep these updated in case the values on the shapes are modified
-	contact.friction = b3MixFriction<M>(world, materialA.friction, materialA.userMaterialId, materialB.friction, materialB.userMaterialId);
-	contact.restitution = b3MixRestitution<M>(
+	contact.friction = b3MixFriction(world, materialA.friction, materialA.userMaterialId, materialB.friction, materialB.userMaterialId);
+	contact.restitution = b3MixRestitution(
 		world,
 		materialA.restitution,
 		materialA.userMaterialId,
@@ -1067,7 +1068,7 @@ unsafe function b3UpdateConvexContact<M>(
 	contact.tangentVelocity = b3Sub(tangentVelocityA, tangentVelocityB);
 
 	// Parallel parts run only without a pre-solve callback
-	if (!isBoolean<M>()) {
+	if (!Parallel.inPart()) {
 		let preSolveFcn = world.preSolveFcn;
 		if (preSolveFcn != null && (contact.flags & b3_simEnablePreSolveEvents) != 0) {
 			let shapeIdA = b3MakeShapeIdInternal(shapeA.id + 1, world.worldId, shapeA.generation);
@@ -1099,7 +1100,7 @@ unsafe function b3UpdateConvexContact<M>(
 
 // Update the contact manifold and touching status.
 // Note: do not assume the shape AABBs are overlapping or are valid.
-export unsafe function b3UpdateContact<M>(
+export unsafe function b3UpdateContact(
 	world: b3World,
 	workerIndex: i32,
 	contact: b3Contact,
@@ -1119,7 +1120,7 @@ export unsafe function b3UpdateContact<M>(
 		let childIndex = contact.childIndex;
 		let child = s_contactChild;
 		let childShapeA = s_contactChildShape;
-		if (isBoolean<M>()) {
+		if (Parallel.inPart()) {
 			// The main lane built these before the parallel call, b3PrepareCompoundContacts
 			child = shapeA.compoundChildren![childIndex];
 			childShapeA = shapeA.compoundChildShapes![childIndex];
@@ -1132,19 +1133,19 @@ export unsafe function b3UpdateContact<M>(
 			if (shapeB.type == b3_hullShape) {
 				// Flip
 				let flip = true;
-				touching = b3UpdateConvexContact<M>(world, workerIndex, contact, shapeB, xfB, childShapeA, xfA, flip);
+				touching = b3UpdateConvexContact(world, workerIndex, contact, shapeB, xfB, childShapeA, xfA, flip);
 			} else {
 				let flip = false;
-				touching = b3UpdateConvexContact<M>(world, workerIndex, contact, childShapeA, xfA, shapeB, xfB, flip);
+				touching = b3UpdateConvexContact(world, workerIndex, contact, childShapeA, xfA, shapeB, xfB, flip);
 			}
 		} else if (child.type == b3_hullShape) {
 			let xfChild = b3MulWorldTransforms(xfA, child.transform);
 			let flip = false;
-			touching = b3UpdateConvexContact<M>(world, workerIndex, contact, childShapeA, xfChild, shapeB, xfB, flip);
+			touching = b3UpdateConvexContact(world, workerIndex, contact, childShapeA, xfChild, shapeB, xfB, flip);
 		} else if (child.type == b3_meshShape) {
 			let xfChild = b3MulWorldTransforms(xfA, child.transform);
 
-			touching = b3ComputeMeshManifoldsAt<M>(
+			touching = b3ComputeMeshManifoldsAt(
 				world,
 				workerIndex,
 				contact,
@@ -1169,10 +1170,10 @@ export unsafe function b3UpdateContact<M>(
 			if (shapeB.type == b3_capsuleShape || shapeB.type == b3_hullShape) {
 				// Flip
 				let flip = true;
-				touching = b3UpdateConvexContact<M>(world, workerIndex, contact, shapeB, xfB, childShapeA, xfA, flip);
+				touching = b3UpdateConvexContact(world, workerIndex, contact, shapeB, xfB, childShapeA, xfA, flip);
 			} else {
 				let flip = false;
-				touching = b3UpdateConvexContact<M>(world, workerIndex, contact, childShapeA, xfA, shapeB, xfB, flip);
+				touching = b3UpdateConvexContact(world, workerIndex, contact, childShapeA, xfA, shapeB, xfB, flip);
 			}
 		}
 
@@ -1192,7 +1193,7 @@ export unsafe function b3UpdateContact<M>(
 		// Does this contact touch a mesh or height-field?
 
 		// Compute mesh manifolds
-		touching = b3ComputeMeshManifoldsAt<M>(world, workerIndex, contact, shapeA, null, xfA, shapeB, xfB, isFast);
+		touching = b3ComputeMeshManifoldsAt(world, workerIndex, contact, shapeA, null, xfA, shapeB, xfB, isFast);
 
 		if (touching && ((shapeA.flags & b3_enableHitEvents) != 0 || (shapeB.flags & b3_enableHitEvents) != 0)) {
 			contact.flags |= b3_simEnableHitEvent;
@@ -1204,7 +1205,7 @@ export unsafe function b3UpdateContact<M>(
 	} else {
 		// Convex-vs-convex
 		let flip = false;
-		touching = b3UpdateConvexContact<M>(world, workerIndex, contact, shapeA, xfA, shapeB, xfB, flip);
+		touching = b3UpdateConvexContact(world, workerIndex, contact, shapeA, xfA, shapeB, xfB, flip);
 	}
 
 	if (touching) {

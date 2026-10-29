@@ -195,7 +195,8 @@ function b3MakeConvexScratch(): StaticArray<b3ConvexScratch> {
 	return scratch;
 }
 
-const s_convexScratch = b3MakeConvexScratch();
+// One per worker, and each part uses its worker's
+@parallel.shared const s_convexScratch = b3MakeConvexScratch();
 
 function b3CopyHullPoints(dst: StaticArray<b3Vec3>, hull: b3HullData): void {
 	let points = b3GetHullPoints(hull);

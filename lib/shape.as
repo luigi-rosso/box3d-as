@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: MIT
 // AnimaScript port of src/shape.c
 
-import { B3_ASSERT, B3_ASSERT_ENABLED, B3_NULL_INDEX, B3_SECRET_COOKIE, FLT_EPSILON, b3GetLengthUnitsPerMeter, b3InParallel, b3OnMain } from "./core";
+import { Parallel } from "rive/parallel";
+import { B3_ASSERT, B3_ASSERT_ENABLED, B3_NULL_INDEX, B3_SECRET_COOKIE, FLT_EPSILON, b3GetLengthUnitsPerMeter } from "./core";
 import {
 	B3_AABB_MARGIN_FRACTION,
 	B3_LINEAR_SLOP,
@@ -2273,9 +2274,9 @@ function b3CopyTOIInput(copy: b3TOIInput, input: b3TOIInput): b3TOIInput {
 }
 
 // A parallel part's context keeps its proxies, which own their points
-function b3ResetMeshImpactContext<M>(context: b3MeshImpactContext): b3MeshImpactContext {
+function b3ResetMeshImpactContext(context: b3MeshImpactContext): b3MeshImpactContext {
 	let input = context.toiInput;
-	if (isBoolean<M>()) {
+	if (Parallel.inPart()) {
 		input.proxyA.count = 0;
 		input.proxyA.radius = 0.0;
 		input.proxyB.count = 0;
@@ -2349,7 +2350,7 @@ class b3CompoundImpactVisitor {
 
 	visit(proxyId: i32, userData: u64): bool {
 		let shape = this.world!.shapes[this.shapeId];
-		return b3CompoundTimeOfImpactFcn<b3InParallel>(shape.compoundChildren![<i32>userData], this.context, this.workerIndex);
+		return b3CompoundTimeOfImpactFcn(shape.compoundChildren![<i32>userData], this.context, this.workerIndex);
 	}
 }
 
@@ -2370,7 +2371,7 @@ class b3MeshImpactVisitor {
 	}
 
 	visit(a: b3Vec3, b: b3Vec3, c: b3Vec3, triangleIndex: i32): bool {
-		return b3MeshTimeOfImpactFcn<b3InParallel>(a, b, c, triangleIndex, this.context, this.workerIndex);
+		return b3MeshTimeOfImpactFcn(a, b, c, triangleIndex, this.context, this.workerIndex);
 	}
 }
 
@@ -2382,13 +2383,14 @@ function b3MakeImpactScratch(): StaticArray<b3ImpactScratch> {
 	return scratch;
 }
 
-const s_impactScratch = b3MakeImpactScratch();
+// One per worker, and each part uses its worker's
+@parallel.shared const s_impactScratch = b3MakeImpactScratch();
 
 function b3MeshTimeOfImpactCallback(a: b3Vec3, b: b3Vec3, c: b3Vec3, triangleIndex: i32): bool {
-	return b3MeshTimeOfImpactFcn<b3OnMain>(a, b, c, triangleIndex, s_meshImpactContext, 0);
+	return b3MeshTimeOfImpactFcn(a, b, c, triangleIndex, s_meshImpactContext, 0);
 }
 
-function b3MeshTimeOfImpactFcn<M>(
+function b3MeshTimeOfImpactFcn(
 	a: b3Vec3,
 	b: b3Vec3,
 	c: b3Vec3,
@@ -2418,12 +2420,12 @@ function b3MeshTimeOfImpactFcn<M>(
 	triangle[0] = a;
 	triangle[1] = b;
 	triangle[2] = c;
-	if (!isBoolean<M>()) {
+	if (!Parallel.inPart()) {
 		toiContext.toiInput.proxyA.points = triangle;
 	}
 	toiContext.toiInput.proxyA.count = 3;
 
-	let output = b3TimeOfImpactAt<M>(toiContext.toiInput, workerIndex);
+	let output = b3TimeOfImpactAt(toiContext.toiInput, workerIndex);
 
 	// It is possible for a hit at fraction == 0
 
@@ -2433,7 +2435,7 @@ function b3MeshTimeOfImpactFcn<M>(
 	} else if (0.0 == output.fraction) {
 		// fallback to TOI of a small circle around the fast shape centroid
 		let fallbackInput = s_fallbackInput;
-		if (isBoolean<M>()) {
+		if (Parallel.inPart()) {
 			// Its proxies already point at the context's triangle and its own centroid
 			let scratch = s_impactScratch[workerIndex];
 			fallbackInput = scratch.fallbackInput;
@@ -2452,7 +2454,7 @@ function b3MeshTimeOfImpactFcn<M>(
 			centroid[0] = toiContext.localCentroidB;
 			b3SetProxy(fallbackInput.proxyB, centroid, 1, toiContext.fallbackRadius + B3_LINEAR_SLOP());
 		}
-		output = b3TimeOfImpactAt<M>(fallbackInput, workerIndex);
+		output = b3TimeOfImpactAt(fallbackInput, workerIndex);
 
 		if (0.0 < output.fraction && output.fraction < toiContext.toiInput.maxFraction) {
 			toiContext.toiOutput = output;
@@ -2484,18 +2486,18 @@ const s_compoundImpactContext = new b3CompoundImpactContext();
 function b3CompoundTimeOfImpactCallback(compound: b3CompoundData, childIndex: i32): bool {
 	let child = s_impactChild;
 	b3GetCompoundChildInto(compound, childIndex, child, s_impactChildMaterial);
-	return b3CompoundTimeOfImpactFcn<b3OnMain>(child, s_compoundImpactContext, 0);
+	return b3CompoundTimeOfImpactFcn(child, s_compoundImpactContext, 0);
 }
 
 // A parallel part's context has proxies that own their points
-function b3CompoundTimeOfImpactFcn<M>(child: b3ChildShape, toiContext: b3CompoundImpactContext, workerIndex: i32): bool {
+function b3CompoundTimeOfImpactFcn(child: b3ChildShape, toiContext: b3CompoundImpactContext, workerIndex: i32): bool {
 	let output = b3TOIOutput();
 	toiContext.toiInput.sweepA = b3MakeCompoundChildSweep(toiContext.compoundTransform, child.transform);
 
 	switch (child.type) {
 		case b3_capsuleShape: {
 			let points = toiContext.toiInput.proxyA.points;
-			if (!isBoolean<M>()) {
+			if (!Parallel.inPart()) {
 				points = s_impactPointsA;
 				toiContext.toiInput.proxyA.points = points;
 			}
@@ -2503,29 +2505,29 @@ function b3CompoundTimeOfImpactFcn<M>(child: b3ChildShape, toiContext: b3Compoun
 			points[1] = child.capsule.center2;
 			toiContext.toiInput.proxyA.count = 2;
 			toiContext.toiInput.proxyA.radius = child.capsule.radius;
-			output = b3TimeOfImpactAt<M>(toiContext.toiInput, workerIndex);
+			output = b3TimeOfImpactAt(toiContext.toiInput, workerIndex);
 			break;
 		}
 
 		case b3_hullShape: {
 			let hull = child.hull!;
-			if (isBoolean<M>()) {
+			if (Parallel.inPart()) {
 				b3CopyProxy(toiContext.toiInput.proxyA, b3GetHullPoints(hull), hull.vertexCount, 0.0);
 			} else {
 				toiContext.toiInput.proxyA.points = b3GetHullPoints(hull);
 				toiContext.toiInput.proxyA.count = hull.vertexCount;
 				toiContext.toiInput.proxyA.radius = 0.0;
 			}
-			output = b3TimeOfImpactAt<M>(toiContext.toiInput, workerIndex);
+			output = b3TimeOfImpactAt(toiContext.toiInput, workerIndex);
 			break;
 		}
 
 		case b3_meshShape: {
 			let scratch = s_impactScratch[workerIndex];
 			let meshContext = s_meshImpactContext;
-			if (isBoolean<M>()) {
+			if (Parallel.inPart()) {
 				// The mesh context's proxy A already points at its triangle
-				meshContext = b3ResetMeshImpactContext<M>(scratch.meshContext);
+				meshContext = b3ResetMeshImpactContext(scratch.meshContext);
 				let input = toiContext.toiInput;
 				let meshInput = meshContext.toiInput;
 				meshInput.proxyA.count = input.proxyA.count;
@@ -2535,7 +2537,7 @@ function b3CompoundTimeOfImpactFcn<M>(child: b3ChildShape, toiContext: b3Compoun
 				meshInput.sweepB = input.sweepB;
 				meshInput.maxFraction = input.maxFraction;
 			} else {
-				b3ResetMeshImpactContext<M>(meshContext);
+				b3ResetMeshImpactContext(meshContext);
 				b3CopyTOIInput(meshContext.toiInput, toiContext.toiInput);
 			}
 			meshContext.isSensor = false;
@@ -2555,7 +2557,7 @@ function b3CompoundTimeOfImpactFcn<M>(child: b3ChildShape, toiContext: b3Compoun
 			// Bounds local to mesh
 			let localBounds = b3AABB_Transform(b3InvertTransform(child.transform), toiContext.localSweepBoundsB);
 
-			if (isBoolean<M>()) {
+			if (Parallel.inPart()) {
 				b3QueryMeshVisitor<b3MeshImpactVisitor>(child.mesh!, localBounds, scratch.visitor, scratch.meshStack);
 			} else {
 				b3QueryMesh(child.mesh!, localBounds, b3MeshTimeOfImpactCallback);
@@ -2567,14 +2569,14 @@ function b3CompoundTimeOfImpactFcn<M>(child: b3ChildShape, toiContext: b3Compoun
 
 		case b3_sphereShape: {
 			let points = toiContext.toiInput.proxyA.points;
-			if (!isBoolean<M>()) {
+			if (!Parallel.inPart()) {
 				points = s_impactPointsA;
 				toiContext.toiInput.proxyA.points = points;
 			}
 			points[0] = child.sphere.center;
 			toiContext.toiInput.proxyA.count = 1;
 			toiContext.toiInput.proxyA.radius = child.sphere.radius;
-			output = b3TimeOfImpactAt<M>(toiContext.toiInput, workerIndex);
+			output = b3TimeOfImpactAt(toiContext.toiInput, workerIndex);
 			break;
 		}
 
@@ -2589,7 +2591,7 @@ function b3CompoundTimeOfImpactFcn<M>(child: b3ChildShape, toiContext: b3Compoun
 	}
 
 	// Clear this to be safe
-	if (isBoolean<M>()) {
+	if (Parallel.inPart()) {
 		toiContext.toiInput.proxyA.count = 0;
 		toiContext.toiInput.proxyA.radius = 0.0;
 	} else {
@@ -2601,11 +2603,11 @@ function b3CompoundTimeOfImpactFcn<M>(child: b3ChildShape, toiContext: b3Compoun
 }
 
 export function b3ShapeTimeOfImpact(shapeA: b3Shape, shapeB: b3Shape, sweepA: b3Sweep, sweepB: b3Sweep, maxFraction: f32): b3TOIOutput {
-	return b3ShapeTimeOfImpactAt<b3OnMain>(shapeA, shapeB, sweepA, sweepB, maxFraction, 0);
+	return b3ShapeTimeOfImpactAt(shapeA, shapeB, sweepA, sweepB, maxFraction, 0);
 }
 
 // b3ShapeTimeOfImpact for worker workerIndex
-export function b3ShapeTimeOfImpactAt<M>(
+export function b3ShapeTimeOfImpactAt(
 	shapeA: b3Shape,
 	shapeB: b3Shape,
 	sweepA: b3Sweep,
@@ -2620,7 +2622,7 @@ export function b3ShapeTimeOfImpactAt<M>(
 	if (typeA == b3_compoundShape) {
 		// todo implement b3CompoundTimeOfImpact
 		let context = s_compoundImpactContext;
-		if (isBoolean<M>()) {
+		if (Parallel.inPart()) {
 			context = scratch.compoundContext;
 			context.toiInput.proxyA.count = 0;
 			context.toiInput.proxyA.radius = 0.0;
@@ -2649,7 +2651,7 @@ export function b3ShapeTimeOfImpactAt<M>(
 		let localBounds = b3AABB_Transform(b3InvertTransform(context.compoundTransform), bounds);
 		context.localSweepBoundsB = localBounds;
 
-		if (isBoolean<M>()) {
+		if (Parallel.inPart()) {
 			// The main lane built the compound's children, b3PrepareCompoundContacts
 			scratch.compoundVisitor.shapeId = shapeA.id;
 			let compound = shapeA.compound!;
@@ -2666,11 +2668,11 @@ export function b3ShapeTimeOfImpactAt<M>(
 		// Note: assuming mesh is static
 
 		let context = s_meshImpactContext;
-		if (isBoolean<M>()) {
-			context = b3ResetMeshImpactContext<M>(scratch.meshContext);
+		if (Parallel.inPart()) {
+			context = b3ResetMeshImpactContext(scratch.meshContext);
 			b3CopyShapeProxy(context.toiInput.proxyB, shapeB);
 		} else {
-			b3ResetMeshImpactContext<M>(context);
+			b3ResetMeshImpactContext(context);
 			b3SetShapeProxy(context.toiInput.proxyB, shapeB, s_impactPointsB);
 		}
 		context.toiInput.sweepA = sweepA;
@@ -2702,7 +2704,7 @@ export function b3ShapeTimeOfImpactAt<M>(
 		// Bounds local to mesh
 		let localBounds = b3AABB_Transform(b3InvertTransform(xfA), bounds);
 
-		if (isBoolean<M>()) {
+		if (Parallel.inPart()) {
 			if (typeA == b3_meshShape) {
 				b3QueryMeshVisitor<b3MeshImpactVisitor>(shapeA.mesh!, localBounds, scratch.visitor, scratch.meshStack);
 			} else if (typeA == b3_heightShape) {
@@ -2721,7 +2723,7 @@ export function b3ShapeTimeOfImpactAt<M>(
 		B3_ASSERT(shapeB.type != b3_compoundShape && shapeB.type != b3_meshShape && shapeB.type != b3_heightShape);
 
 	let input = s_impactInput;
-	if (isBoolean<M>()) {
+	if (Parallel.inPart()) {
 		input = scratch.impactInput;
 		b3CopyShapeProxy(input.proxyA, shapeA);
 		b3CopyShapeProxy(input.proxyB, shapeB);
@@ -2733,7 +2735,7 @@ export function b3ShapeTimeOfImpactAt<M>(
 	input.sweepB = sweepB;
 	input.maxFraction = maxFraction;
 
-	let output = b3TimeOfImpactAt<M>(input, workerIndex);
+	let output = b3TimeOfImpactAt(input, workerIndex);
 
 	return output;
 }

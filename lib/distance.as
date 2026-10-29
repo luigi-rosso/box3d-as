@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: MIT
 // AnimaScript port of src/distance.c
 
+import { Parallel } from "rive/parallel";
 // Dirk Gregorius contributed portions of this code
 
-import { B3_ASSERT, B3_ASSERT_ENABLED, FLT_EPSILON, FLT_MAX, FLT_MIN, B3_NULL_INDEX, b3Log, b3OnMain } from "./core";
+import { B3_ASSERT, B3_ASSERT_ENABLED, FLT_EPSILON, FLT_MAX, FLT_MIN, B3_NULL_INDEX, b3Log } from "./core";
 import { B3_LINEAR_SLOP, B3_MAX_SHAPE_CAST_POINTS, B3_MAX_WORKERS } from "./constants";
 import {
 	b3AbsFloat,
@@ -702,7 +703,7 @@ function b3SolveSimplex4(simplex: ref b3Simplex): bool {
 // parallel parts run it at once.
 const B3_GJK_SIMPLEX: i32 = 0;
 const B3_GJK_BACKUP: i32 = 1;
-const s_gjkSimplexes = new StaticArray<b3Simplex>(2 * B3_MAX_WORKERS);
+@parallel.shared const s_gjkSimplexes = new StaticArray<b3Simplex>(2 * B3_MAX_WORKERS);
 
 unsafe function b3ZeroGJKSimplexes(base: i32): void {
 	memory.fill(changetype<usize>(s_gjkSimplexes) + <usize>base * sizeof<b3Simplex>(), 0, 2 * sizeof<b3Simplex>());
@@ -1311,10 +1312,11 @@ function b3MakeTOIScratch(): StaticArray<b3TOIScratch> {
 	return scratch;
 }
 
-const s_toiScratch = b3MakeTOIScratch();
+// One per worker, and each part uses its worker's
+@parallel.shared const s_toiScratch = b3MakeTOIScratch();
 
 // A parallel part passes its own proxies, which its separation function already holds
-function b3MakeSeparationFunction<M>(
+function b3MakeSeparationFunction(
 	cache: b3SimplexCache,
 	proxyA: b3ShapeProxy,
 	sweepA: b3Sweep,
@@ -1328,7 +1330,7 @@ function b3MakeSeparationFunction<M>(
 
 	// C's stack value; one object per worker serves every call, since b3TimeOfImpact does not nest
 	let fcn = s_toiScratch[workerIndex].separation;
-	if (!isBoolean<M>()) {
+	if (!Parallel.inPart()) {
 		fcn = s_separationFunction;
 		fcn.proxyA = proxyA;
 		fcn.proxyB = proxyB;
@@ -1684,11 +1686,11 @@ function b3ForceFixedAxis(fcn: b3SeparationFunction, beta: f32): void {
 const s_toiDistanceInput = new b3DistanceInput();
 
 export function b3TimeOfImpact(input: b3TOIInput): b3TOIOutput {
-	return b3TimeOfImpactAt<b3OnMain>(input, 0);
+	return b3TimeOfImpactAt(input, 0);
 }
 
-// b3TimeOfImpact for worker workerIndex; M is b3InParallel for the instantiation parallel parts run
-export function b3TimeOfImpactAt<M>(input: b3TOIInput, workerIndex: i32): b3TOIOutput {
+// b3TimeOfImpact for worker workerIndex
+export function b3TimeOfImpactAt(input: b3TOIInput, workerIndex: i32): b3TOIOutput {
 	let output = b3TOIOutput();
 
 	// Set these to invalid values so they can be validated on exit
@@ -1725,7 +1727,7 @@ export function b3TimeOfImpactAt<M>(input: b3TOIInput, workerIndex: i32): b3TOIO
 	// Prepare input for distance query. C's stack value; b3TimeOfImpact does not nest.
 	let cache = b3SimplexCache();
 	let distanceInput = s_toiScratch[workerIndex].distanceInput;
-	if (isBoolean<M>()) {
+	if (Parallel.inPart()) {
 		// Parallel parts may not point the distance input at the input's proxies, so they copy them
 		proxyA = b3CopyProxy(distanceInput.proxyA, proxyA.points, proxyA.count, proxyA.radius);
 		proxyB = b3CopyProxy(distanceInput.proxyB, proxyB.points, proxyB.count, proxyB.radius);
@@ -1799,7 +1801,7 @@ export function b3TimeOfImpactAt<M>(input: b3TOIInput, workerIndex: i32): b3TOIO
 		}
 
 		// Initialize the separating axis.
-		let fcn = b3MakeSeparationFunction<M>(cache, proxyA, sweepA, proxyB, sweepB, worldNormal, t1, workerIndex);
+		let fcn = b3MakeSeparationFunction(cache, proxyA, sweepA, proxyB, sweepB, worldNormal, t1, workerIndex);
 
 		// Compute the TOI on the separating axis. We do this by successively resolving the deepest point.
 		let done = false;
