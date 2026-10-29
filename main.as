@@ -97,6 +97,7 @@ export class Main extends Layout {
 
     override init(context: Context): bool {
         this.context = context;
+        g_threads.probe();
         let font = context.font("InterVariable");
         if (font != null) {
             this.dd.setFont(light(font));

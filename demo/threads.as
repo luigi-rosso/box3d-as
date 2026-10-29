@@ -1,8 +1,10 @@
 // What the Threads scene steps on and what its panel shows, shared by the scene, the shell and the graph script.
 
-import { Jobs } from "rive/jobs";
+import { Job, Jobs } from "rive/jobs";
+import { clock } from "rive/os";
+import { Parallel } from "rive/parallel";
 import { b3World_EnableLanes, b3_laneBackendJobs, b3_laneCollide, b3_laneSolve, b3_laneTree } from "../lib/lanes";
-import { b3GetParallelBackend } from "../lib/lane_common";
+import { b3SetParallelLimit, b3World_EnableParallel } from "../lib/parallel_step";
 import { b3WorldId, b3World_IsValid, b3World_SetWorkerCount } from "../lib/box3d";
 
 export const BACKEND_SERIAL: i32 = 0;
@@ -16,6 +18,11 @@ export const THREAD_CHOICES: StaticArray<i32> = [1, 2, 4, 8];
 export const HISTORY: i32 = 300;
 
 const NO_THREADS = "This runtime has no threads.";
+const CHECKING = "Checking for parallel calls.";
+
+@job export function threadsClock(): f64 {
+    return clock();
+}
 
 export class ThreadsState {
     // The Threads scene is open
@@ -32,6 +39,13 @@ export class ThreadsState {
     parallelMax: i32 = 1;
     lanesReason: string = "";
     parallelReason: string = "";
+
+    // Parallel.size() traps on runtimes from before parallel calls, which give a script no way to ask. The threaded web
+    // runtimes released before them (2.47.0 to 2.48.0) also ran a job's clock from its pool thread's start, hundreds of
+    // ms behind the page's, so a job that reads behind the main lane marks one. Read with peek, since a join could run
+    // the job here.
+    clockJob: Job<f64>? = null;
+    clockAsked: f64 = 0;
 
     // Step milliseconds, oldest first from head once count reaches HISTORY
     history: Float64Array = new Float64Array(HISTORY);
@@ -53,19 +67,31 @@ export class ThreadsState {
         }
     }
 
+    // Starts the job detect reads, early so it is done by the time the scene opens
+    probe(): void {
+        if (this.clockJob == null && Jobs.threads() > 0) {
+            this.clockAsked = clock();
+            this.clockJob = Jobs.run(threadsClock);
+        }
+    }
+
     // Parallel.size() answers 1 in top level code, so this runs when the scene opens
     detect(): void {
+        this.probe();
         let jobThreads = <i32>Jobs.threads();
         // A lane per job thread plus the main one
         this.lanesMax = min(8, jobThreads + 1);
         this.lanesReason = jobThreads == 0 ? NO_THREADS : "";
-        let parallel = b3GetParallelBackend();
-        this.parallelMax = parallel != null ? min(8, parallel.size()) : 1;
+        this.parallelMax = 1;
+        let clocked = this.clockJob != null ? this.clockJob!.peek() : null;
         if (jobThreads == 0) {
             this.parallelReason = NO_THREADS;
-        } else if (parallel == null) {
-            this.parallelReason = "Parallel needs the parallel-calls toolchain and lib/parallel.";
+        } else if (clocked == null) {
+            this.parallelReason = CHECKING;
+        } else if (!clocked.ok || clocked.value < this.clockAsked - 0.005) {
+            this.parallelReason = "This runtime has no parallel calls.";
         } else {
+            this.parallelMax = min(8, Parallel.size());
             this.parallelReason = this.parallelMax == 1 ? "Parallel calls get one part here." : "";
         }
     }
@@ -109,6 +135,9 @@ export class ThreadsState {
 
     // Puts the world on the backend asked for, between steps
     apply(worldId: b3WorldId): void {
+        if (this.parallelReason == CHECKING) {
+            this.detect();
+        }
         let backend = this.targetBackend();
         let threads = this.threadsFor(backend, this.wantThreads);
         if (this.applied && backend == this.backend && threads == this.threads) {
@@ -118,9 +147,8 @@ export class ThreadsState {
         if (backend == BACKEND_LANES) {
             b3World_EnableLanes(worldId, threads, b3_laneBackendJobs, b3_laneCollide | b3_laneSolve | b3_laneTree);
         } else if (backend == BACKEND_PARALLEL) {
-            let parallel = b3GetParallelBackend()!;
-            parallel.limit(threads);
-            parallel.enable(worldId, b3_laneCollide | b3_laneSolve);
+            b3SetParallelLimit(threads);
+            b3World_EnableParallel(worldId, b3_laneCollide | b3_laneSolve);
         }
         this.backend = backend;
         this.threads = threads;
@@ -134,11 +162,8 @@ export class ThreadsState {
         if (!b3World_IsValid(worldId)) {
             return;
         }
-        let parallel = b3GetParallelBackend();
-        if (parallel != null) {
-            parallel.enable(worldId, 0);
-            parallel.limit(0);
-        }
+        b3World_EnableParallel(worldId, 0);
+        b3SetParallelLimit(0);
         b3World_EnableLanes(worldId, 0, b3_laneBackendJobs, 0);
         b3World_SetWorkerCount(worldId, 1);
     }
