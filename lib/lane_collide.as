@@ -198,8 +198,7 @@ unsafe function b3ReadState(at: usize, contact: b3Contact): usize {
 
 // Shape snapshot
 
-// Sections of struct arrays copy as raw bytes behind their length. Generic over the array, since a struct cannot
-// be a generic argument (notes/findings.md), so the element size comes from the caller.
+// Sections of struct arrays copy as raw bytes behind their length, at the element size the caller passes.
 @inline unsafe function b3WriteSection<A>(w: b3LaneWriter, a: A, elementSize: usize): void {
 	w.i32(a.length);
 	w.bytes(changetype<usize>(a), a.length * <i32>elementSize);

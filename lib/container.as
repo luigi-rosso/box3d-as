@@ -3,8 +3,8 @@
 // AnimaScript port of src/container.h
 
 // b3Array(T) is the builtin Array<T>. These are the helpers that are more than
-// a builtin member. They are generic over the array type, which rasc accepts
-// for arrays of structs even though a struct cannot be a generic argument.
+// a builtin member. They are generic over the array type, so one helper serves
+// arrays of numbers and of structs.
 // Growing through length zero fills, where C leaves new elements uninitialized.
 
 import { B3_ASSERT, B3_NULL_INDEX } from "./core";

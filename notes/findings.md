@@ -27,6 +27,8 @@ let a = new Arr<V>(); // error: value classes cannot be generic arguments yet
 Builtin `Array<V>` and `StaticArray<V>` work, so C's `b3Array(T)` maps to
 `Array<T>` with per type helpers.
 
+Fixed by #15247: our own generic classes and functions take struct type arguments. std generics other than `Array`, `StaticArray`, `Map` and `Set` still refuse them by name, which also stops `[1, 2, 3].map<P>(...)` from returning garbage. The port keeps `Array<T>` with helpers generic over the array, as C's `b3Array(T)` is.
+
 ## `--runtime minimal` and `incremental` reject arrays of structs
 
 `new Array<V>()` with a struct `V` fails with "Array needs a runtime; use
@@ -57,6 +59,8 @@ export function f(): i32 {
 
 A struct leaf works. Either the docs should say only struct leaves, or the
 message should not name locals and fields.
+
+Fixed by #15247: a number or bool field of an object takes a ref. A number local, param or global still does not, now with an error that says so, so `B3_SWAP` stays inline and `b3Ticks` stays a struct.
 
 ## A type alias of a struct is not callable as its constructor
 
@@ -111,6 +115,8 @@ Workaround: `<f32>0.0`. The same loss happens to a single ternary nested in
 an f32 expression: `let x: f32 = a + (c ? 0.0 : 20.0);` fails while
 `let x: f32 = c ? 5.0 : 15.0;` compiles.
 
+Fixed by #15247: a nested ternary's float literals take the float context their arms reach, as asc types them, and an f64 context keeps them f64.
+
 ## Whole struct store through a call result is refused
 
 `getM(s)[0] = m` is refused, while a leaf store `getM(s)[0].x = 1` through the
@@ -135,10 +141,14 @@ export function f(n: i32): f32 {
 `fromArray` of an array of class references works. Workaround: a `new StaticArray<P>(a.length)` and
 an element copy loop (verify/scenes/scenes.as, the village compound defs).
 
+Fixed by #15247: `fromArray` sizes its copy by `sizeof<T>()`. The village compound defs call it for every def array again.
+
 ## `shift()` is refused on arrays of structs
 
 `E3001: 'shift' is not supported on value class arrays yet`; `push`, `pop`
 and `length` work.
+
+Fixed by #15247: `shift()` on an array of structs moves the rest down with one memory copy, and traps on an empty array as `pop` does.
 
 ## WAMR's fast interpreter traps on a v128 local past the first 256 frame cells
 
@@ -190,6 +200,8 @@ Fixed by #15091: `@inline` and `@noinline` reach binaryen as code annotations. `
 `arr.dataStart` on an `Array<V>` of structs is "not supported on value class arrays yet", although the
 array keeps the usual header. Raw code reads it as `load<usize>(changetype<usize>(arr) +
 offsetof<Array<i32>>("dataStart"))`.
+
+Fixed by #15247: `dataStart` reads on struct arrays as on any array. `b3ArrayData`, `b3StatesData` and `b3SimsData` read it directly.
 
 ## `isFloat<T>()` folds per instance but is not documented
 
