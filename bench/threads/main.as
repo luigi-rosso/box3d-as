@@ -14,6 +14,7 @@
 import { Layout, Context } from "rive/host";
 import { clock } from "rive/os";
 import { formatFixed } from "rive/format";
+import { Parallel } from "rive/parallel";
 import {
 	b3BodyId,
 	b3CreateBody,
@@ -40,7 +41,7 @@ import {
 // run.sh copies verify/scenes/scenes.as here, the mirror of the native bench's scenes.c
 import { Scene, Scene_Create, Scene_Step, SCENE_QUERY_KIND_COUNT } from "./scenes/scenes";
 import { b3LaneTasks, b3World_EnableLanes, b3_laneBackendParallel, b3_laneBackendWorkers, b3_laneCollide, b3_laneSolve, T_COUNT } from "./lib/lanes";
-import { b3GetParallelBackend } from "./lib/lane_common";
+import { b3ParallelReport } from "./lib/parallel_step";
 
 const LANE_TIME_NAMES: StaticArray<string> = [
 	"setup", "prepare", "integrateVelocities", "warmStart", "solve", "integratePositions", "relax", "restitution",
@@ -366,9 +367,8 @@ export class Main extends Layout {
 				lanes.replicaOnMain = replicaOnMain();
 			}
 		}
-		let parallel = b3GetParallelBackend();
-		if (laneCount() > 0 && laneBackend() == b3_laneBackendParallel && parallel != null) {
-			console.log("BENCH parallel size=" + parallel.size().toString());
+		if (laneCount() > 0 && laneBackend() == b3_laneBackendParallel) {
+			console.log("BENCH parallel size=" + Parallel.size().toString());
 		}
 		console.log("BENCH start scene=" + sceneName(this.scene) + " steps=" + this.steps.toString() +
 			" create=" + formatFixed(this.createMs, 2) + "ms");
@@ -462,10 +462,7 @@ export class Main extends Layout {
 			}
 		}
 		line += " hash=" + stateHash(this.hashBodies()).toString();
-		let parallel = b3GetParallelBackend();
-		if (parallel != null) {
-			line += parallel.report();
-		}
+		line += b3ParallelReport();
 		line += " lanes=" + laneCount().toString() + " backend=" + laneBackend().toString() + " tasks=" + laneTasks().toString();
 		let lanes = this.lanes;
 		if (lanes != null) {

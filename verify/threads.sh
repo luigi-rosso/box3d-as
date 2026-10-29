@@ -6,15 +6,15 @@
 #   verify/threads.sh                 every scene except large_pyramid, many_bodies, mesh_drop and village
 #   verify/threads.sh --large         all scenes
 #   verify/threads.sh chains village  only those
-# LANES="1 2 4 8" BACKENDS="2 1" (2 workers, 1 jobs, 3 parallel calls) TASKS=3 (1 collide, 2 solve, 3 both) pick the
+# LANES="1 2 4 8" BACKENDS="3 2 1" (3 parallel calls, 2 workers, 1 jobs) TASKS=3 (1 collide, 2 solve, 3 both) pick the
 # runs; LANES=1 also runs the main lane's partition through the serialized replica path. Parallel calls take their
 # part count from the job pool, so backend 3 runs PARTS="1 2 4 8" instead, 1 being --parallel-safe, plus the default
-# pool, and needs the parallel-calls toolchain, as it brings in lib/parallel/. WASM_SIMD=off takes the scalar artifact.
+# pool. WASM_SIMD=off takes the scalar artifact.
 here="$(cd "$(dirname "$0")" && pwd)"
 project="$here/../bench/threads"
 lanes=${LANES:-1 2 4 8}
 parts=${PARTS:-1 2 4 8 default}
-backends=${BACKENDS:-2 1}
+backends=${BACKENDS:-3 2 1}
 tasks=${TASKS:-3}
 
 scenes=()
@@ -35,7 +35,6 @@ scene_define() {
 	esac
 }
 
-case " $backends " in *" 3 "*) export PARALLEL=1 ;; esac
 "$project/sync.sh"
 run_dir="$project"
 if [ "${WASM_SIMD:-on}" = off ]; then
