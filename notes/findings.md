@@ -404,12 +404,36 @@ and vertex arrays everywhere (hulls, meshes, proxies), so this is the first thin
 
 ## Atomics are only on the parallel-calls toolchain
 
-Not a bug, a dependency: rive master's rasc has no `atomic.*` builtins (std declares them, codegen does not know them:
-`unknown function 'or' in namespace`); they arrive with #15105. The parallel backend's finalize marks tree ancestors
-with `atomic.or`, so `b3DynamicTree_MarkProxyMoved` takes the mode type argument and only its `b3InParallel`
-instantiation uses the atomic, which keeps main building on master.
+Resolved: #15105 landed on master as 4a861ff147, with atomics. Before, rive master's rasc had no `atomic.*` builtins
+(`unknown function 'or' in namespace`), so only the parallel instantiation of `b3DynamicTree_MarkProxyMoved` used one;
+it now does so under `Parallel.inPart()`.
+
+## A script cannot ask whether its runtime has parallel calls
+
+Every runtime from before 4a861ff147 fills `rive_parallel_v1` with stubs that throw ("failed to call unlinked import
+function rive_parallel_v1.size"), so the first `Parallel.size()` or `Parallel.run` traps, and the script it traps in
+stops for good. That includes the published `@rive-app/webgl2-threads` 2.47.0 to 2.48.0, which have threads, so
+`Jobs.threads() > 0` does not tell them apart. A bake made on master loads and runs there; only the call traps.
+
+```as
+export class Probe extends Layout {
+    override advance(seconds: f64): bool {
+        console.log(Parallel.size().toString()); // webgl2-threads 2.48.0: traps, and advance is never called again
+        return true;
+    }
+}
+```
+
+The demo's Threads scene gets around it with a side effect of the same release: those runtimes ran a job's `clock()`
+from its pool thread's start, hundreds of ms behind the page's, until #15189. A job that reads the clock behind when
+it was asked marks one (demo/threads.as, `ThreadsState.probe`). That holds only for the runtimes released so far; a
+host capability a script can read without trapping (an import every host since a version links, answering which
+`rive_*_v` modules it has) would let the next feature degrade without a trick like this.
 
 ## In WebKit a parallel call can hang the page
+
+Fixed on master (4a861ff147): team threads use 2 ms timed waits on WebKit and a call whose thread never starts fails
+within its budget. On master's runtime no WebKit run hung (notes/web.md); WebKit now scales only to 2 parts.
 
 rive `parallel-calls` at b9685d0884, librive's threads build, Playwright's WebKit 27.2 on an isolated page
 (`BROWSER=webkit MODE=parity node bench/web/parallel.mjs`, notes/web.md). Every 1 part run finishes and matches
@@ -423,6 +447,9 @@ choose timed waits only through `RIVE_PARALLEL_TIMED_WAITS`, which only node rea
 
 ## librive's threads build never finishes loading on a page without isolation
 
+Fixed on master: the threads factory rejects at once on a page without isolation, and the JS runtime loads its build
+without threads there.
+
 The emscripten factory of `web_scripting_page.mjs` built with `--web_threads` waits on "loading-workers" forever when
 the page is not cross origin isolated: the browser refuses to post the memory to a worker (Chrome: "SharedArrayBuffer
 transfer requires self.crossOriginIsolated"; Firefox: "The WebAssembly.Memory object cannot be serialized"; WebKit:
@@ -430,6 +457,9 @@ transfer requires self.crossOriginIsolated"; Firefox: "The WebAssembly.Memory ob
 `self.crossOriginIsolated` itself; that build runs parallel calls serially and bit exact, as the docs say.
 
 ## A web host cannot size the team or turn parallel calls off
+
+Fixed on master: `RuntimeLoader.setParallelParts(n)`, `RiveNative.parallelParts` and
+`Module.riveScripting.parallelParts`, before the first file loads; the default is one part per reported core, up to 8.
 
 The page's team takes the job pool's size, `ScriptingLimits::jobThreads`, else `min(cores - 1, 6)`, and
 `parallelSafeMode` runs every call as one part. Both are C++ limits; on the web only the test harness exports
@@ -561,3 +591,11 @@ roughly 17 minutes; the collector is running, so something is accumulating refer
 reports 760 to 968 wasm pages (+208) over 3000 frames and the same +208 over 8000, so the heap stops growing once
 the contacts and their manifolds have settled, and the warning does not come back. Done looks like: the warning
 waits for growth that outlasts a warm up, or says the rate is an early one.
+
+## W3010 names a global the parts only read
+
+rive master at 4a861ff147. `b3_zeroManifolds` (lib/contact_solver_wide.as) is C's zeroed static that empty SIMD lanes
+point at. The warned store (line 862, a manifold point's normal velocity) is behind `pointIndex < pointCount`, and
+the zeroed manifold's count is 0, so it never runs on it; the check cannot see that through raw addresses. The
+runtime side listed it as a false positive on 2026-10-27; it is marked `@parallel.shared` until the check follows
+the read.

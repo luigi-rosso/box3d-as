@@ -7,11 +7,67 @@ inputs and outputs can be serialized onto jobs and workers, keeps every result b
 native at any lane count, and measures what it costs.
 
 
+## Parallel calls on master (2026-10-28)
+
+Parallel calls landed on rive master as 4a861ff147 (#15105), so the backend is now part of lib and of every build:
+`lib/parallel_step.as`, `b3World_EnableParallel(worldId, tasks)`, also reached as the lanes backend
+`b3_laneBackendParallel` (`BACKEND=3`). The `lib/parallel/` opt in, the root and bench `rive.yaml` exclusions and the
+`PARALLEL=1` and `BACKENDS=3` switches are gone; `verify/threads.sh` runs parallel calls, workers and jobs by default.
+
+What changed from the branch at b9685d0884, and what the port did about it:
+
+| landed | the port |
+|---|---|
+| `Parallel.run`, `runUpTo`, `runParts`, `size`, `Part`, `SharedArray` and atomics, as on the branch | nothing to change |
+| `Parallel.inPart()`, a constant in each function's parallel copy (gap 4 below) | replaces the `<M>` mode type argument (`b3InParallel`, `b3OnMain`) and its `isBoolean<M>()` branches: 130 `<M>` and 50 `b3InParallel` and `b3OnMain` uses gone across 12 files |
+| W3010, a warning for writes in `@parallel.inplace` code into an object a module global holds (gap 1) | 87 warnings over 13 globals, every one a per worker scratch set indexed by worker index, the trace rows (one per part), the tree stacks only the rebuilding part walks, or `b3_zeroManifolds`, which nothing writes; all are marked `@parallel.shared`, and the build has none |
+| `PerPart<T>` | not used: C's per worker contexts are indexed by worker index on the serial path too |
+| `@parallel` function types (gap 5) | not used yet: the visitor queries and the serial fallback for custom callbacks stay |
+| web: `RuntimeLoader.setParallelParts(n)`, one part per core up to 8 by default, WebKit's timed waits | nothing to change |
+| rive-cli: `--once` removed; only `--publish` writes a `.riv`, and dev builds keep `--unsigned-riv` | `bench/web/lanes_bake.sh` bakes with `--unsigned-riv` |
+
+Every gate passes on master's toolchain (rasc, rive-cli and wamrc at 4a861ff147): verify/run.sh 29 of 29 and
+verify/traj.sh 13 of 13 on the scalar and SIMD artifacts, verify/threads.sh --large 195 of 195 (13 scenes on parallel
+calls at 1, 2, 4 and 8 parts and the default, and on lanes at 1, 1 serialized, 2, 4 and 8 on workers and on jobs, AOT),
+and examples/check.sh 8 of 8 interpreted and on AOT, its threading case checking serial, four lanes and parallel calls
+end bit for bit the same.
+
+Whole step, ms per step on master's CLI (bench/threads/run.sh, session `bench/threads/out/session_20261028_195227.log`,
+AOT -O3 with software bounds as before, SIMD artifact, Apple M5 Max, 3 rounds interleaved with native SIMD at the same
+worker count, min over rounds, 1 minute load 10 to 14 in parentheses; x is AS serial over the cell, and the last
+column is AS parallel over native at 1 / 2 / 4 / 8):
+
+| scene | impl | 1 | 2 | 4 | 8 | parallel / native |
+|---|---|---|---|---|---|---|
+| large_pyramid | native simd | 3.441 (14) | 1.806 (13) | 1.057 (13) | 1.001 (12) | |
+| large_pyramid | AS serial | **3.960** (13) | | | | |
+| large_pyramid | AS parallel | 3.977 (13, x1.00) | 2.163 (12, x1.83) | 1.310 (12, x3.02) | 1.107 (11, x3.58) | 1.16 / 1.20 / 1.24 / 1.11 |
+| many_bodies | native simd | 7.492 (13) | 3.794 (13) | 2.133 (13) | 1.609 (13) | |
+| many_bodies | AS serial | **9.330** (12) | | | | |
+| many_bodies | AS parallel | 9.490 (14, x0.98) | 4.703 (13, x1.98) | 2.647 (14, x3.52) | 1.859 (11, x5.02) | 1.27 / 1.24 / 1.24 / 1.16 |
+| mesh_drop | native simd | 4.912 (13) | 2.617 (13) | 1.558 (12) | 1.179 (11) | |
+| mesh_drop | AS serial | **6.022** (12) | | | | |
+| mesh_drop | AS parallel | 5.905 (12, x1.02) | 3.221 (10, x1.87) | 1.957 (12, x3.08) | 1.492 (12, x4.04) | 1.20 / 1.23 / 1.26 / 1.27 |
+| village | native simd | 2.122 (13) | 1.340 (13) | 0.939 (13) | 0.922 (13) | |
+| village | AS serial | **2.544** (13) | | | | |
+| village | AS parallel | 2.546 (13, x1.00) | 1.624 (13, x1.57) | 1.146 (11, x2.22) | 1.161 (12, x2.19) | 1.20 / 1.21 / 1.22 / 1.26 |
+
+- **1.11 to 1.27x native at every part count**, where the branch measured 1.2 to 1.45x: the single core pass merged
+  since (notes/perf_4.md) shows through every part. From 1 to 8 parts the step gets 3.6x (large_pyramid), 5.1x
+  (many_bodies), 4.0x (mesh_drop) and 2.2x (village), against native's 3.4, 4.7, 4.2 and 2.3x.
+- **The solver stages and the narrow phase scale like native's**: the stages 3.5, 4.7, 4.6 and 2.3x at 8 parts
+  (native 3.5, 4.7, 4.3, 2.4x), collide 3.0 to 6.3x (native 3.3 to 4.8x).
+- **The parts leave the same work to the main lane** as on the branch: 162 of 5373 contacts a step on mesh_drop,
+  4 of 7860 on village, none elsewhere, and no bodies.
+- `Parallel.inPart()` in place of `<M>` changed nothing measurable: one part runs at 0.98 to 1.02x the serial path
+  of the same bake, as on the branch.
+
 ## Parallel calls (2026-10-26)
 
 Parallel calls (rive draft PR #15105, branch `parallel-calls`) run one `@parallel` function on several threads at once
-over the main module's own memory. The threaded step now runs on them as a third backend, `b3_laneBackendParallel`
-(`BACKEND=3`), beside workers and jobs: `lib/parallel/parallel_step.as` (opt in: a project includes `lib/parallel/`), `b3World_EnableParallel(worldId, tasks)`.
+over the main module's own memory. The threaded step runs on them as a third backend, `b3_laneBackendParallel`
+(`BACKEND=3`), beside workers and jobs, `b3World_EnableParallel(worldId, tasks)`; this section measured it on the
+branch at b9685d0884, when it was opt in under `lib/parallel/`.
 
 ### Results
 
@@ -107,9 +163,10 @@ in C, since each contact's update writes only its own state and its worker's tas
   output. A part reaches its set by worker index, passed down where C passes a pointer to stack memory.
 - **Proxies that own their points.** A distance or time of impact proxy pointing at a hull's points is a reference store,
   so on the parallel path proxies keep their own buffers and the points are copied in (8 for a box).
-- **A mode type argument.** The functions both paths run take `<M>`, `b3InParallel` (bool) or `b3OnMain` (i32), and
-  `if (isBoolean<M>())` branches leave the callbacks, allocations and reference stores out of the parallel
-  instantiation: callbacks become C's defaults (`b3MixFriction<M>`), allocations become checks done before the call.
+- **A mode type argument.** The functions both paths run took `<M>`, `b3InParallel` (bool) or `b3OnMain` (i32), and
+  `if (isBoolean<M>())` branches left the callbacks, allocations and reference stores out of the parallel
+  instantiation: callbacks become C's defaults (`b3MixFriction`), allocations become checks done before the call.
+  On master, `if (Parallel.inPart())` does the same with no type argument.
 - **Visitor queries.** The tree, mesh, height field and compound node queries gained `...Visitor<V>` variants that call
   `visit` on a class directly, since a part cannot call the callbacks the C API takes.
 - **Storage that does not grow in a part.** A convex contact keeps one manifold from creation, a mesh contact one per
@@ -158,6 +215,9 @@ function f(w: W, x: f32): f32 { return w.cb(x); }
 ```
 
 ### API gaps worth fixing before release
+
+Status on master at 4a861ff147: 1 landed as W3010 and `@parallel.shared`, 2, 3, 7, 8 and 9 landed, 4 landed as
+`Parallel.inPart()` (the port uses it), 5 landed as `@parallel` function types (not used yet), 6 is open.
 
 1. **Report races through objects reachable from globals**, at least as a warning: a write in `@parallel.inplace` code to
    an object a module global holds is a write every part shares. It would have named all 70 scratch sites and the one
@@ -684,6 +744,6 @@ change the outcome of this port.
 | lib/lanes.as | the solver partitions, workers, jobs, the hooks, `b3World_EnableLanes(worldId, lanes, backend, tasks)` |
 | lib/lane_collide.as | the shape snapshot, the collide replica, packing and applying |
 | lib/lane_tree.as | the tree rebuild job |
-| lib/parallel/parallel_step.as | the parallel calls backend, opt in: solver stages, narrow phase with the tree rebuild, finalize, pair finding, `b3World_EnableParallel(worldId, tasks)` |
+| lib/parallel_step.as | the parallel calls backend: solver stages, narrow phase with the tree rebuild, finalize, pair finding, `b3World_EnableParallel(worldId, tasks)`, `b3SetParallelLimit(parts)` |
 | bench/threads/ | the bench project (`main.as`, `run.sh`, `run1.sh`, `table.py`) and `micro/`, the lane primitive costs |
 | verify/threads.sh, threads.mjs | the threaded parity gate |

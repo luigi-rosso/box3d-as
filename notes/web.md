@@ -9,6 +9,59 @@ headless Chrome 155.0.8059.86 (playwright-core 1.64.1, Chrome channel, cross ori
 shared: the 1 minute load was 4 to 8 in the single threaded sessions and 4 to 15 in the threaded ones. Every
 session interleaves its implementations and takes the min over rounds.
 
+## Parallel calls on master (2026-10-28)
+
+Parallel calls landed on rive master as 4a861ff147 (#15105), with the WebKit, team size and isolation fixes the
+branch sessions below asked for. Everything here is built from that master: rive-cli and rasc, librive's web scripting
+harness (`out/wasm_threads_release`, as below), and the JS runtime's `webgl2_threads` and `webgl2_advanced` flavors
+(`packages/runtime_wasm/wasm/build_flavor.sh`, `-m` being the threads flag), packed as `@rive-app/webgl2-threads`
+with `js/build.sh -s -r webgl2,webgl2-threads`. C's pthreads build is emsdk 4.0.23's (the tables below used 6.0.13).
+Headless Chrome 156, Firefox 157 and WebKit 27.2, Apple M5 Max, load 7 to 8.
+
+One change to the harness page: master sizes a page's team with `Module.riveScripting.parallelParts` (the JS runtime's
+`RuntimeLoader.setParallelParts`), one part per core up to 8 by default, and no longer from the job pool, so
+`lanes.html` takes `parts` and `parallel.mjs` passes the part count there. With `jobThreads` alone every call ran on 8.
+
+ms per step in Chrome, median from step 1, min over 3 rounds interleaved with C's pthreads build at the same worker
+count, a fresh page per run; 108 of 108 runs matched native on their final hash (`parallel.mjs`, log
+`parallel_bench_chromium_20261029T030440.jsonl`):
+
+| scene | parts | C pthreads | AS parallel calls | AS / C | C speed up | AS speed up |
+|---|---|---|---|---|---|---|
+| large_pyramid | 1 | 3.700 | 3.805 | 1.03 | 1.00x | 1.00x |
+| large_pyramid | 2 | 1.970 | 2.050 | 1.04 | 1.88x | 1.86x |
+| large_pyramid | 4 | 1.115 | 1.250 | 1.12 | 3.32x | 3.04x |
+| large_pyramid | 8 | 0.975 | 1.100 | 1.13 | 3.79x | 3.46x |
+| many_bodies | 1 | 7.895 | 8.385 | 1.06 | 1.00x | 1.00x |
+| many_bodies | 2 | 3.930 | 4.240 | 1.08 | 2.01x | 1.98x |
+| many_bodies | 4 | 2.150 | 2.450 | 1.14 | 3.67x | 3.42x |
+| many_bodies | 8 | 1.595 | 1.825 | 1.14 | 4.95x | 4.59x |
+| mesh_drop | 1 | 4.815 | 5.715 | 1.19 | 1.00x | 1.00x |
+| mesh_drop | 2 | 2.585 | 3.200 | 1.24 | 1.86x | 1.79x |
+| mesh_drop | 4 | 1.505 | 1.880 | 1.25 | 3.20x | 3.04x |
+| mesh_drop | 8 | 1.230 | 1.560 | 1.27 | 3.91x | 3.66x |
+| village | 1 | 2.825 | 3.160 | 1.12 | 1.00x | 1.00x |
+| village | 2 | 1.720 | 2.010 | 1.17 | 1.64x | 1.57x |
+| village | 4 | 1.125 | 1.360 | 1.21 | 2.51x | 2.32x |
+| village | 8 | 1.090 | 1.375 | 1.26 | 2.59x | 2.30x |
+
+The default, 8 parts on this machine, ran within 5% of 8.
+
+- **At C's speed on the solver heavy scenes**: 1.03 to 1.14x C's pthreads build at every count on large_pyramid and
+  many_bodies (1.06 to 1.16x on the branch), 3.5 and 4.6x at 8 parts. mesh_drop and village keep their 1.2 to 1.3x,
+  the port's own parallel step, as natively.
+- **Parity, every step against the native recording** (`MODE=parity`, HASHLOG bakes, 1, 2, 4, 8 parts and the
+  default): Chrome 20 of 20, Firefox 20 of 20, WebKit 20 of 20. On a page without isolation the threads build now
+  fails at once: "this build runs threads, which need shared memory, and the page is not cross origin isolated; load
+  the build without threads".
+- **WebKit no longer hangs.** Every run finished, where the branch hung in 9 of 24. It scales to 4 parts and loses
+  past them (large_pyramid 3.88, 2.32, 1.44, 2.26 ms at 1, 2, 4, 8; mesh_drop 5.78, 3.44, 2.46, 2.62), consistent
+  with team threads that wake from WebKit's 2 ms timed waits. Firefox scales to 8 (large_pyramid 4.12 to 1.26 ms).
+
+The whole demo on a local copy of the hosted page, on this runtime and on the published 2.48.0 ones, is in
+notes/demo.md (The Threads scene): every scene loads in Chrome, Firefox and WebKit, every backend and count steps,
+lane rows line up since #15189, and the 2.48.0 runtimes run the master bake with Parallel off.
+
 ## Results
 
 ### Single threaded
@@ -436,8 +489,9 @@ The same module runs within 10% on V8 and on WAMR AOT, though the two lose time 
   `RIVE_OUT=out/wasm_threads_release build_rive.sh wasm release --with_rive_scripting --scripting_vm=wasm
   --with_rive_layout --with_rive_tools --web_threads -- web_scripting_harness web_scripting_page` in
   `packages/runtime/tests/web_scripting`. `bench/web/lanes.mjs` drives the node harness, `lanes.html` the page one.
-  The bakes are bench/threads through `bench/web/lanes_bake.sh` (`rive --once --release`, the options blob holding
-  SCENE, STEPS, LANES, TASKS, BACKEND, IDLEFRAMES).
+  The bakes are bench/threads through `bench/web/lanes_bake.sh` (`rive --unsigned-riv --release` on a dev build of
+  rive-cli, `--once` before master dropped it, the options blob holding SCENE, STEPS, LANES, TASKS, BACKEND,
+  IDLEFRAMES).
 - **Parallel calls in a browser**: rive `parallel-calls` at b9685d0884, the web scripting harness built in
   `packages/runtime/tests/web_scripting` with emsdk 4.0.23 into two out dirs, the threads build for isolated pages
   and the plain one for pages without isolation:

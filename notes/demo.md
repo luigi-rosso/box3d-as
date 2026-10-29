@@ -12,7 +12,7 @@ bound to a view model the script writes.
 
 | File | What it holds |
 |---|---|
-| `rive.yaml` | project; `main: Box3D`, `scripting: wasm`, `dangerouslyFast: true`; compiles `lib/`, excludes `demo/gen`, `lib/parallel`, `verify`, `bench`, `notes` |
+| `rive.yaml` | project; `main: Box3D`, `scripting: wasm`, `dangerouslyFast: true`; compiles `lib/`, excludes `demo/gen`, `verify`, `bench`, `notes` |
 | `main.as` | the `Main` layout: steps and draws the scene, camera and pointer input, keys, follows the view model |
 | `demo/shell.rml` | generated, do not edit: the `Box3D` artboard, its panels, state machine and the `Demo` view model |
 | `demo/gen/shell.py` | writes `demo/shell.rml`: theme, layout, icons, controls, the view model |
@@ -30,7 +30,7 @@ bound to a view model the script writes.
 | `demo/human.as` | `createHuman`, the ragdoll from shared/human.c via verify/scenes/scenes.as |
 | `demo/mover.as` | `CharacterMover`, samples/mover.cpp |
 | `demo/scenes.as` | the eight scenes and `makeScenes()`, the registry the shell reads |
-| `demo/threads.as` | `ThreadsState` (`g_threads`): which backends and thread counts this runtime has, putting the Threads scene's world on one, the step history |
+| `demo/threads.as` | `ThreadsState` (`g_threads`): which backends and thread counts this runtime has, putting the Threads scene's world on one, the step history, `threadsClock`, the job that tells runtimes without parallel calls |
 | `demo/threads_graph.as` | `ThreadsGraph`, the script in the Threads panel that draws the timeline and the step history |
 | `demo/fonts/InterVariable.ttf` | Inter variable (OFL, license beside it), used at weight 300 and 420 with tabular figures |
 
@@ -44,7 +44,7 @@ breakpoints, and a runaway loop hangs instead of trapping.
 ```sh
 RIVE=~/Projects/rive-master/packages/rive-cli/out/release/rive
 cd ~/Projects/box3d-rive-as
-WAMRC=~/Projects/rive-parallel-calls/wamrc-build/wamrc
+WAMRC=~/Projects/rive-master/wamrc-build/wamrc                         # built as README.md says
 RIVE_WAMRC=$WAMRC RIVE_WASM_AOT_SYNC=o3 $RIVE . --aot                  # live window, AOT
 $RIVE . --verify                                                       # compile only
 $RIVE . --screenshot=/tmp/x.png --define=START_SCENE=3 --advance=120
@@ -286,17 +286,25 @@ steps (`ThreadsState.apply`) and writes back what the world steps on:
 |---|---|---|
 | Serial | everything on the main thread | 1 |
 | Lanes | `b3World_EnableLanes` on jobs with collide, solve and the tree: the narrow phase and the solver stages on copies of what they read, partition 0 on the main lane, the tree rebuild on a job | 1 to `Jobs.threads() + 1`, at most 8 |
-| Parallel | `b3GetParallelBackend().enable` with collide and solve: parallel calls over the world's own memory, capped at the thread count by `limit` | 1 to `Parallel.size()`, at most 8 |
+| Parallel | `b3World_EnableParallel` with collide and solve: parallel calls over the world's own memory, capped at the thread count by `b3SetParallelLimit` | 1 to `Parallel.size()`, at most 8 |
 
 Choices it cannot take show dim, with the reason in the note under them. What each place offers, detected at run
-time from `Jobs.threads()`, `b3GetParallelBackend()` and its `size()`:
+time from `Jobs.threads()`, a probe job and `Parallel.size()`:
 
 | Where | Serial | Lanes | Parallel |
 |---|---|---|---|
-| master rive-cli | yes | 1, 2, 4 (8 with `--job-threads=7`) | off: needs the parallel-calls toolchain and lib/parallel |
-| parallel-calls rive-cli, as checked in | yes | the same | off, the same, since rive.yaml leaves out `lib/parallel` |
-| parallel-calls rive-cli, `lib/parallel` included | yes | the same | 1, 2, 4 (`Parallel.size()` is the 6 fast cores; 8 with `--job-threads=7`) |
-| a browser runtime without threads, such as the live demo's | yes | off: this runtime has no threads | off, the same |
+| rive-cli at 4a861ff147 or later | yes | 1, 2, 4 (8 with `--job-threads=7`) | 1, 2, 4 (`Parallel.size()` is the 6 fast cores; 8 with `--job-threads=7`) |
+| `@rive-app/webgl2-threads` built from master, isolated page | yes | 1, 2, 4 (the pool has 6 job threads) | 1, 2, 4, 8 (one part per core, up to 8) |
+| `@rive-app/webgl2-threads` 2.48.0 and older (the UAT player) | yes | the same | off: this runtime has no parallel calls |
+| a browser runtime without threads (`@rive-app/webgl2`, the live demo's), or a page without isolation | yes | off: this runtime has no threads | off, the same |
+
+`Parallel.size()` traps on a runtime from before parallel calls (an unlinked import), and a trap stops the script, so
+the scene must know before it asks. No runtime says, but every threaded web runtime released before parallel calls
+(2.47.0 to 2.48.0) also ran a job's `clock()` from its pool thread's start, hundreds of ms behind the page's, which the
+lane clock fix (#15189) changed in the same master. So `ThreadsState.probe` (from `init`) runs a job that reads the
+clock, and `detect` offers Parallel only once the job reports a time no earlier than when it was asked (5 ms of slack);
+it reads the job with `peek`, since a join could run the job on the main lane. Until it reports, the note says it is
+checking and the scene steps on lanes. Natively and on master's web runtime the job's clock agrees with the main lane's.
 
 It opens on the best backend there is, at up to 8 threads. Leaving the scene (`leave()`) puts the world back on the
 serial path and turns tracing off, since the lane hooks are global and would otherwise reach the next scene's
@@ -324,26 +332,63 @@ read 2.30 to 2.73 against 2.24 to 2.70 ms serial and 0.97 to 1.26 against 1.01 t
 machine's noise; the difference is at most about 0.05 ms. The other scenes never turn it on.
 
 Ms per step, `STEP_LOG` means over seconds 6 to 10, min over 2 to 3 interleaved rounds, release AOT bake (`aot
--O3`), Apple M5 Max, shared with other agents' runs (1 minute load 21 to 37):
+-O3`), Apple M5 Max, shared with other agents' runs (1 minute load 21 to 37 for the first two rows, 7 to 10 for the
+last):
 
 | Toolchain | Serial | Lanes 1 | Lanes 2 | Lanes 4 | Lanes 8 | Parallel 1 | Parallel 2 | Parallel 4 | Parallel 8 |
 |---|---|---|---|---|---|---|---|---|---|
-| master | 2.24 | 2.57 | 4.05 | 4.14 | 7.74 | | | | |
+| master before parallel calls | 2.24 | 2.57 | 4.05 | 4.14 | 7.74 | | | | |
 | parallel-calls, lib/parallel | 2.26 | | | 4.91 | | 2.62 | 1.76 | 1.01 | 1.21 |
+| master at 4a861ff147 (2026-10-28) | 1.93 | 1.92 | 2.93 | 3.30 | 6.00 | 2.01 | 1.33 | 0.80 | 0.85 |
 
-- **Parallel calls** take the step from 2.26 to 1.01 ms at 4 parts, 2.2x; 8 parts (with `--job-threads=7`) is no
-  faster, two of them landing on the efficiency cores while the machine is busy. The timeline shows why it is not
-  4x: the pairs are found in parallel, but making the contacts, the solver set up and the island work between the
-  calls stay on the main row, and each of the solver's 170 or so stages ends in a sync.
-- **Lanes lose here**: 4.1 ms at 4 and 7.7 at 8. The timeline shows the main lane packing each lane's section one
-  after another (the accent spans on the main row) while the lanes wait, then copying the results back; this scene
-  has 11500 contacts to copy each step, against the solver work of a few hundred µs per lane.
+The last row runs a copy of the project per configuration with `--define=START_SCENE=8 --define=STEP_LOG
+--define=THREADS_BACKEND=b --define=THREADS_COUNT=n --aot --advance=600`, and `--job-threads=7` for 8.
+
+- **Parallel calls** take the step from 1.93 to 0.80 ms at 4 parts on master, 2.4x (2.26 to 1.01 on the branch, at a
+  higher load); 8 parts (with `--job-threads=7`) is no faster, two of them landing on the efficiency cores while the
+  machine is busy. The timeline shows why it is not 4x: the pairs are found in parallel, but making the contacts, the
+  solver set up and the island work between the calls stay on the main row, and each of the solver's 170 or so stages
+  ends in a sync.
+- **Lanes lose here**: 3.3 ms at 4 and 6.0 at 8 on master (4.1 and 7.7 before). The timeline shows the main lane
+  packing each lane's section one after another (the accent spans on the main row) while the lanes wait, then copying
+  the results back; this scene has 11500 contacts to copy each step, against the solver work of a few hundred µs per
+  lane.
 - In headless Chrome (`bench/web/lanes.html` on the threads build of the web harness, 4 parts, 3 job threads) the
   same scene steps in 1.8 to 2.9 ms under the same load, and every part's first span lands within 0.1 ms of the
   step's start, so the parts' clocks agree there. The page harness draws nothing, so that run was checked from a
   logged summary of the rows, not a capture.
 - On the harness built without threads (node, `bench/web/lanes.mjs` on `out/wasm_release`) the release bake
   opens on Serial with "This runtime has no threads", and steps without trapping.
+
+On the web, master's CLI bake (`--unsigned-riv --release`) on a local copy of the hosted page (`hosted.js`,
+`enableGPUCanvas`, COOP and COEP), 1280 by 800, 2026-10-28. Each run opens the eight scenes in turn, then the Threads
+scene on every backend and count, 7 s each; ms per step is the `STEP_LOG` means past the first two seconds of each,
+min / median, under the load of a parallel AOT gate (10 to 40):
+
+| browser, runtime | Serial | Lanes 1 | 2 | 4 | 8 (7 parts) | Parallel 1 | 2 | 4 | 8 |
+|---|---|---|---|---|---|---|---|---|---|
+| Chrome 156, master `webgl2_threads` | 4.84 / 5.18 | 4.96 / 5.23 | 10.3 / 10.7 | 7.8 / 11.1 | 9.8 / 13.1 | 3.81 / 4.12 | 2.34 / 2.91 | 1.70 / 2.24 | 1.51 / 1.69 |
+| Chrome, the same with `-t` (tools) | 3.13 / 4.39 | 2.89 / 3.88 | 5.8 / 7.2 | 7.4 / 10.5 | 5.1 / 10.8 | 3.01 / 3.87 | 2.07 / 2.83 | 1.37 / 1.82 | 1.40 / 1.61 |
+| Firefox 157, master | 3.72 / 5.11 | 3.71 / 4.98 | 7.1 / 10.1 | 11.5 / 15.7 | 11.5 / 11.9 | 4.01 / 5.29 | 2.68 / 3.64 | 2.17 / 2.81 | 1.51 / 2.46 |
+| WebKit 27.2, master | 3.35 / 4.33 | 3.38 / 4.08 | 5.4 / 7.3 | 8.4 / 11.1 | 8.6 / 9.6 | 3.42 / 4.42 | 2.38 / 2.77 | 2.54 / 2.98 | 2.94 / 3.27 |
+
+- **Every scene loads and draws, and every choice steps**, with no trap or error in any browser. The stock build
+  refuses the unsigned WGSL shader ("its signature did not verify"), as a release runtime must, so the solids fall
+  back to the painter; the `-t` build, which differs only in accepting unsigned files, draws them on the GPU with
+  shadows, as the published, signed page does.
+- **Parallel opens enabled** at up to 8 parts (one per core, up to 8, on the web); Lanes stops at 4 since the page's
+  job pool has 6 threads ("Up to 7 here").
+- **Lane and part rows line up** on master: every lane's spans land inside the step on the timeline
+  (`local_chromium_lanes4.png`), where on webgl2-threads 2.48.0 the lane rows draw empty, every span left of the
+  axis (the lane clock, fixed by #15189).
+- **Parallel calls scale** 2.5 to 2.8x from 1 to 8 parts in Chrome and Firefox; lanes get slower, as natively.
+  WebKit scales to 2 parts and then flattens (2.8, 3.0 and 3.3 ms medians at 2, 4 and 8), its team threads waking
+  from 2 ms timed waits; no run hung.
+- **Older runtimes** (`@rive-app/webgl2@2.48.0` and `@rive-app/webgl2-threads@2.48.0` from jsdelivr, on isolated and
+  plain pages): the bake loads and runs every scene. webgl2 opens the Threads scene on Serial ("This runtime has no
+  threads"); webgl2-threads on Lanes 4 with Parallel dim ("This runtime has no parallel calls"), and pressing Parallel
+  or 8 changes nothing. Before the probe job, the same page trapped on opening the scene ("failed to call unlinked
+  import function rive_parallel_v1.size") and the script stopped.
 
 ## The interface scenes implement
 
@@ -797,6 +842,14 @@ faces). The interpreter is roughly ten times slower.
   counts triangles on the GPU renderer and faces on the painter.
 
 ## Screenshots
+
+Parallel calls on master, 2026-10-28, in
+`/private/tmp/claude-501/-Users-luigi-Projects-rive/65e4f28b-1249-4d28-8600-bb5fb40b325a/scratchpad/parallel-default/caps/`:
+`local_<browser>_s1.png` .. `_s8.png` every scene and `local_<browser>_<backend><n>.png` the Threads scene on master's
+`webgl2_threads` (`local_chromium_scenes.png`, `tools_chromium_scenes.png` side by side, the second on the `-t` build
+with the GPU renderer); `old_chromium_<runtime>_load.png` and `_threads.png` on the 2.48.0 runtimes, and
+`old_chromium_uat_iso_clickpar_after.png` after pressing Parallel and 8 there; `t8_r<round>_b<backend>_t<n>.png` the
+native timing runs.
 
 Final captures in `/private/tmp/claude-501/-Users-luigi-Projects-rive/65e4f28b-1249-4d28-8600-bb5fb40b325a/scratchpad/demo3d/shots/`
 (the `*.log` beside each has the build and run log):

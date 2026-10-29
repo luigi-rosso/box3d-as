@@ -25,9 +25,9 @@ plus fixes). Box3D is MIT licensed. The port keeps that licence and Erin Catto's
   C to AnimaScript mapping.
 - **Bit exact.** The same float operations in the same order, checked against native Box3D on every module and on
   every step of 13 scenes (see Parity below).
-- **Threaded.** The narrow phase, the solver stages and the tree rebuild run on lanes, with the same results at any
-  lane count. An opt in parallel calls backend in `lib/parallel/` scales like native, natively and in the browser,
-  on rive's `parallel-calls` toolchain (see Threading below).
+- **Threaded.** Parallel calls run the pair finding, the narrow phase, the solver stages and finalize over the world's
+  own memory and scale like native, natively and in the browser; lanes run the same tasks on copies. Results are the
+  same at any part or lane count (see Threading below).
 - **Left out:** debug draw; recording, replay and the world snapshots they use; file IO; the built in thread
   scheduler, whose place lanes take; and the SSE2, AVX2 and NEON backends. The 4 lane SIMD layer runs on wasm
   `v128`, or on scalar lanes when the build has no SIMD.
@@ -68,7 +68,7 @@ as `f32` (`<f32>(1.0 / 60.0)`; a constant expression of float literals is `f64`)
   a shape cast, overlaps), [events](examples/events.as) (contact, sensor and hit events),
   [the character mover](examples/mover.as) and [threading](examples/threading.as).
   `examples/check.sh` runs each one under `rive --test` and checks what it shows (`examples/tests.as`), such as the
-  box coming to rest or four lanes ending bit for bit where the serial path does.
+  box coming to rest, or four lanes and parallel calls ending bit for bit where the serial path does.
 - **The demo** at the repo root is a rive-cli project with eight scenes: pyramid, card house, ragdolls with a wrecking
   ball, rain on a mesh, height field, bullets, a capsule character, and threads. Orbit, pick and shoot, with overlays
   for contacts, joints and the profile (`notes/demo.md`). The solids draw instanced on the GPU with a depth buffer,
@@ -76,9 +76,9 @@ as `f32` (`<f32>(1.0 / 60.0)`; a constant expression of float literals is `f64`)
   script's draw takes 0.01 to 0.1 ms where the 2D painter took 0.6 to 1.8 ms, and `--define=VECTOR_DRAW` keeps the
   painter. A sun casts cascaded shadow maps from every solid (`demo/shadows.as`); `H` steps through high, soft, low
   and off. The threads scene stirs 2048 balls and capsules and draws each step's tasks on each thread as it runs, with
-  the step time over the last five seconds: serial or lanes on master's toolchain, parallel calls too on the
-  `parallel-calls` toolchain with `lib/parallel/` included, and serial in a browser runtime without threads, such as
-  the live demo's. It needs AOT for interactive rates:
+  the step time over the last five seconds, on serial, lanes or parallel calls. A runtime without threads offers
+  serial only, and one with threads but without parallel calls (`@rive-app/webgl2-threads` 2.48.0 and older) offers
+  lanes. It needs AOT for interactive rates:
 
   ```sh
   RIVE_WAMRC=<wamrc> rive . --aot
@@ -133,9 +133,9 @@ exactness, with no tolerance.
 |---|---|---|
 | `verify/run.sh` | each module's outputs against a C driver over fixed and seeded random inputs, every value's bits | 29 modules, about 69 million values |
 | `verify/traj.sh --large` | every body's state, the mover and the world counters, every step, against a native recording | 13 scenes |
-| `verify/threads.sh --large` | the per step state hash under rive-cli with lanes at 1, 2, 4 and 8, on workers and on jobs | 130 runs |
+| `verify/threads.sh --large` | the per step state hash under rive-cli on parallel calls at 1, 2, 4 and 8 parts and the default, and on lanes at 1, 2, 4 and 8 on workers and on jobs | 195 runs |
 | `bench/web/verify.sh` | the state hash of every step on V8, for the port and for C Box3D on wasm | 13 scenes, 6 builds |
-| `examples/check.sh` | the examples run and show what they say | 7 cases |
+| `examples/check.sh` | the examples run and show what they say, interpreted and on AOT | 8 cases |
 
 The 13 scenes are pyramid, large pyramid, card house, ragdolls and chains, capsules on a mesh, height field,
 bullets, mover, many bodies, plank pile, mesh drop, village (compounds) and queries. Both module and trajectory
@@ -172,6 +172,8 @@ binaryen 133, as rive-cli bakes a release). Native ARM64 Box3D for scale. main a
   wasm, while the port's scalar artifact runs one lane at a time and skips empty lanes.
 - The same session ran the port's builds from the parallel-calls toolchain, where `notes/perf_4.md` measured 0.99
   to 1.17x: within 5% of main's on every scene, either way. Headless Chrome 155 agrees with node (`notes/web.md`).
+- With parallel calls in lib, on master's rasc at 4a861ff147 against C on emsdk 4.0.23, the AOT session below put
+  the SIMD artifact at 1.00 to 1.12x C on V8, 3 rounds: the main lane runs the same code as before.
 
 Reproduce: `EMSDK=<emsdk> WASM_OPT=<binaryen 133 wasm-opt> bench/web/build.sh`, `bench/web/build_native.sh`, then
 `ROUNDS=5 node bench/web/bench.mjs` (`notes/web.md` has the build details).
@@ -179,27 +181,28 @@ Reproduce: `EMSDK=<emsdk> WASM_OPT=<binaryen 133 wasm-opt> bench/web/build.sh`, 
 ### WAMR AOT: the port against native Box3D
 
 rive-cli's own runtime: the release bake of `bench/as` on WAMR AOT (`--aot`, `RIVE_WASM_AOT_SYNC=o3`, the SIMD
-artifact, software bounds checks as shipped), interleaved with native NEON Box3D on one worker and with the same
-module on V8. main on the master toolchain, `bench/web/aot.mjs`, 3 rounds, 96 runs, load 6.2 to 8.7, 2026-10-26;
-medians from step 1, every hash matched.
+artifact, software bounds checks), interleaved with native NEON Box3D on one worker and with the same module on V8.
+rive master at 4a861ff147 (CLI, rasc and its wamrc), `bench/web/aot.mjs`, 3 rounds, 96 runs, load 7.8 to 20.8,
+2026-10-28; medians from step 1, every hash matched.
 
 | scene | native NEON | AS WAMR AOT | AOT / native | AS on V8 | V8 / native |
 |---|---|---|---|---|---|
-| large_pyramid | 3.60 | 5.01 | 1.39 | 4.40 | 1.22 |
-| many_bodies | 7.45 | 10.81 | 1.45 | 9.19 | 1.23 |
-| mesh_drop | 4.77 | 6.31 | 1.32 | 5.27 | 1.10 |
-| village | 2.62 | 3.40 | 1.30 | 3.42 | 1.30 |
-| plank_pile | 0.670 | 0.684 | 1.02 | 0.724 | 1.08 |
-| chains | 0.0182 | 0.0411 | 2.25 | 0.0397 | 2.18 |
-| pyramid | 0.0292 | 0.0430 | 1.47 | 0.0364 | 1.25 |
-| queries | 0.126 | 0.159 | 1.26 | 0.152 | 1.21 |
+| large_pyramid | 3.33 | 3.71 | 1.11 | 3.85 | 1.16 |
+| many_bodies | 7.15 | 8.46 | 1.18 | 8.98 | 1.26 |
+| mesh_drop | 4.43 | 5.08 | 1.15 | 5.44 | 1.23 |
+| village | 2.50 | 2.91 | 1.16 | 3.18 | 1.27 |
+| plank_pile | 0.661 | 0.647 | 0.98 | 0.710 | 1.07 |
+| chains | 0.0179 | 0.0269 | 1.50 | 0.0269 | 1.50 |
+| pyramid | 0.0291 | 0.0346 | 1.19 | 0.0352 | 1.21 |
+| queries | 0.113 | 0.142 | 1.26 | 0.148 | 1.31 |
 
-- On the big scenes WAMR AOT runs the port at 1.3 to 1.45x native; plank_pile is at native speed.
-- The small scenes vary most between sessions: chains read 0.033 ms on AOT in a later A/B of the same bake, and
-  `notes/perf_4.md` measured 1.0 to 1.6x across all eight. Rive master's CLI and the parallel-calls CLI ran the same
-  bake within 1% of each other on chains, pyramid, large_pyramid and village (3 interleaved rounds).
-- Hardware bounds checks (a CLI built with `--wasm_hw_bounds`, not yet shippable) bring the big scenes to 1.2 to 1.3x
-  (`notes/perf_4.md`).
+- On the big scenes WAMR AOT runs the port at 1.11 to 1.18x native, ahead of V8 now; plank_pile is at native speed.
+  On 2026-10-26, before master's WAMR changes (#15091 onward, such as wide calls on AOT), the same scenes ran at 1.30
+  to 1.45x, and chains at 2.25x.
+- The small scenes vary most between sessions; `notes/perf_4.md` measured 1.0 to 1.6x across all eight.
+- These keep the software bounds checks of the `o3` tier, for comparison with the earlier sessions. Master's CLI now
+  ships hardware bounds on macOS and Linux (#15153), its default tier, which `notes/perf_4.md` measured about 5%
+  faster on the big scenes.
 
 Reproduce: `ROUNDS=3 RIVE_WAMRC=<wamrc> node bench/web/aot.mjs`, then `node bench/web/bench.mjs --table=<log>`, or
 `bench/as/run.sh` for the AOT tier alone against bench/native (`notes/bench.md`).
@@ -211,68 +214,61 @@ the small, call heavy scenes (chains, queries) trail most there.
 
 ### Threaded
 
-ms per step at 1 / 2 / 4 / 8 workers, lanes or parts, min over rounds (`notes/web.md`, `notes/threading.md`,
-2026-10-26). C Box3D uses its own scheduler: natively on threads, on the web on emscripten pthreads (8 pooled
-workers) in headless Chrome. The port's lanes ran in Chrome 155 on rive's threaded web runtime, the solver stages on
-workers. Parallel calls ran natively on WAMR AOT and in Chrome 156 on librive's threads build, both on the rive
-`parallel-calls` toolchain (#15105, b9685d0884), which they need until it lands. The first four columns are means
-from step 1 (load 4 to 15); the Chrome parallel calls column is medians from step 1, 5 rounds interleaved with C's
-pthreads build (load 22 to 86), with its ratio to that build in the same session.
+ms per step at 1 / 2 / 4 / 8 workers, lanes or parts, min over rounds (`notes/threading.md`, `notes/web.md`). C Box3D
+uses its own scheduler: natively on threads, on the web on emscripten pthreads (8 pooled workers) in headless Chrome.
+Parallel calls ran on rive master at 4a861ff147, natively on WAMR AOT (`aot -O3`, software bounds) and in Chrome 156 on
+librive's threads build, 2026-10-28. The native columns are means from step 1, 3 rounds interleaved, load 10 to 14; the
+Chrome columns are medians from step 1, 3 rounds interleaved, load 7 to 8, with the ratio to C's pthreads build in the
+same session. Lanes are the 2026-10-26 session in Chrome 155, the solver stages on workers, with the serial step in
+parentheses.
 
-| scene | native NEON | C wasm pthreads, Chrome | AS lanes, Chrome (serial) | AS parallel calls, native AOT | AS parallel calls, Chrome (parallel-calls toolchain) |
+| scene | native NEON | AS parallel calls, native AOT | C wasm pthreads, Chrome | AS parallel calls, Chrome | AS lanes, Chrome |
 |---|---|---|---|---|---|
-| large_pyramid | 3.42 / 1.78 / 1.01 / 0.99 | 3.81 / 1.99 / 1.15 / 1.08 | 4.65 / 4.81 / 4.81 / 5.34 (4.64) | 4.51 / 2.46 / 1.50 / 1.28 | 4.17 / 2.35 / 1.40 / 1.22 (1.06 to 1.16x C) |
-| many_bodies | 7.22 / 3.40 / 2.02 / 1.55 | 8.08 / 4.28 / 2.26 / 1.72 | 9.81 / 10.69 / 8.92 / 9.97 (10.11) | 9.82 / 5.04 / 2.86 / 2.06 | 10.57 / 5.01 / 2.72 / 2.00 (1.09 to 1.13x) |
-| mesh_drop | 6.52 / 3.44 / 1.95 / 1.52 | 7.48 / 3.95 / 2.19 / 1.63 | 8.80 / 8.15 / 8.24 / 8.30 (8.77) | 8.38 / 4.77 / 2.81 / 2.09 | 5.98 / 3.51 / 2.24 / 1.65 (1.12 to 1.38x) |
-| village | 2.13 / 1.34 / 0.93 / 0.97 | 2.45 / 1.54 / 1.06 / 0.98 | 3.16 / 3.72 / 3.84 / 4.82 (3.22) | 2.77 / 1.81 / 1.24 / 1.36 | 3.37 / 2.27 / 1.51 / 1.50 (1.13 to 1.34x) |
+| large_pyramid | 3.44 / 1.81 / 1.06 / 1.00 | 3.98 / 2.16 / 1.31 / 1.11 | 3.70 / 1.97 / 1.12 / 0.98 | 3.81 / 2.05 / 1.25 / 1.10 (1.03 to 1.13x C) | 4.65 / 4.81 / 4.81 / 5.34 (4.64) |
+| many_bodies | 7.49 / 3.79 / 2.13 / 1.61 | 9.49 / 4.70 / 2.65 / 1.86 | 7.90 / 3.93 / 2.15 / 1.60 | 8.39 / 4.24 / 2.45 / 1.83 (1.06 to 1.14x) | 9.81 / 10.69 / 8.92 / 9.97 (10.11) |
+| mesh_drop | 4.91 / 2.62 / 1.56 / 1.18 | 5.91 / 3.22 / 1.96 / 1.49 | 4.82 / 2.59 / 1.51 / 1.23 | 5.72 / 3.20 / 1.88 / 1.56 (1.19 to 1.27x) | 8.80 / 8.15 / 8.24 / 8.30 (8.77) |
+| village | 2.12 / 1.34 / 0.94 / 0.92 | 2.55 / 1.62 / 1.15 / 1.16 | 2.83 / 1.72 / 1.13 / 1.09 | 3.16 / 2.01 / 1.36 / 1.38 (1.12 to 1.26x) | 3.16 / 3.72 / 3.84 / 4.82 (3.22) |
 
-C threads as well on the web as natively. The port's lanes do not scale, natively or on the web. Parallel calls do,
-in both places: natively at 1.2 to 1.5x native at every count, and in Chrome at 1.06 to 1.16x C's pthreads build
-on large_pyramid and many_bodies (3.4 to 5.3x at 8 parts), where lanes left the port 4.4 to 4.6x behind. mesh_drop
-and village lose ground with parts on the web as they do natively, in the port's own parallel step. Without cross
-origin isolation the same bake runs serially and stays bit exact. The lane and native parallel rows predate the
-fourth single threaded pass.
+Parallel calls scale like C's threads, natively and on the web: natively at 1.11 to 1.27x native at every count, and
+in Chrome at 1.03 to 1.14x C's pthreads build on large_pyramid and many_bodies (3.5 and 4.6x at 8 parts), where lanes
+left the port 4.4 to 4.6x behind. mesh_drop and village stay 1.2 to 1.3x behind in both places, in the port's own
+parallel step. Every run matched native on every step it checked, in Chrome, Firefox and WebKit too, and without cross
+origin isolation the same bake runs serially and stays bit exact.
 
-Reproduce: `THREADS=1 bench/web/build.sh`, then `bench/web/threads.mjs`, `bench/web/browser.mjs` and
-`bench/web/parallel.mjs` (the commands and the web harness builds are in `notes/web.md`); `bench/threads/run.sh`
-for native lanes, and with `PARALLEL=1` on the `parallel-calls` CLI and wamrc for native parallel calls.
+Reproduce: `THREADS=1 bench/web/build.sh`, then `bench/web/parallel.mjs` (the commands and the web harness builds are
+in `notes/web.md`), and `bench/threads/run.sh` natively.
 
 ## Threading
 
+- **Parallel calls:** `b3World_EnableParallel(worldId, tasks)` from `lib/parallel_step.as` runs the pair finding,
+  the narrow phase with the tree rebuild, the solver stages and finalize as `@parallel.inplace` calls over the world's
+  own memory, with no serialization ([example](examples/threading.as)). It is bit exact at every part count and
+  scales like native's workers, natively on WAMR and in Chrome and Firefox on librive's threads build.
+  - It needs rive master at 4a861ff147 or later (#15105), where parallel calls landed.
+  - The part count is `Parallel.size()`: the job pool plus the main lane natively (`--job-threads=N` gives N + 1, the
+    default keeps to the fast cores), one per core up to 8 on an isolated web page with the threads build, and 1
+    anywhere without threads, where the calls run on the main lane with the same results (`notes/web.md`).
+    `b3SetParallelLimit(parts)` caps it at run time.
+  - Parts run the same functions as the main lane. `Parallel.inPart()` keeps callbacks and allocations out of the
+    parts' copies, and the per worker scratch is marked `@parallel.shared`, since each part uses its own worker's.
+  - A runtime from before parallel calls traps on the first call, and gives a script no way to ask whether it has
+    them. The demo's Threads scene tells such runtimes apart before offering Parallel (`notes/web.md`).
 - **Lanes:** `b3World_EnableLanes(worldId, lanes, backend, tasks)` from `lib/lanes.as` puts the narrow phase, the
-  solver stages and the tree rebuild on workers or jobs ([example](examples/threading.as)). Lanes share no memory,
-  so each step serializes the solver's data to the lanes and back and syncs 84 colored stages: the whole step gains
-  at most 1.1 to 1.5x, and village gets slower with every lane. `notes/threading.md` measures why and ranks the
-  changes to AnimaScript threading that would fix it, led by shared memory.
-- **Parallel calls, opt in:** `lib/parallel/parallel_step.as` runs the pair finding, the narrow phase with the tree
-  rebuild, the solver stages and finalize as `@parallel.inplace` calls over the world's own memory, with no
-  serialization. It is bit exact at every part count and scales 3.3 to 4.4x from 1 to 8 parts (village 2.3x), as
-  native's workers do, natively on WAMR and in Chrome and Firefox on librive's threads build.
-  - It needs the rive `parallel-calls` toolchain (#15105, b9685d0884 or later), whose rasc has `@parallel` and
-    atomics. Rive master's cannot build it, so the core lib never imports it and every project here leaves it out.
-  - To use it, keep `lib/parallel/` in your project (the root `rive.yaml` excludes it; drop that line), then call
-    `b3World_EnableParallel(worldId, tasks)` from it, or `b3World_EnableLanes(worldId, n, b3_laneBackendParallel,
-    tasks)`, which reaches it through the backend the directory registers. The part count comes from the job pool:
-    `--job-threads=N` natively, the page's job pool in a browser.
-  - On the web, a page gets parts only with cross origin isolation and librive's threads build; anywhere else the
-    calls run as one part on the page's thread, with the same results (`notes/web.md`).
-  - The scripts switch it on: `PARALLEL=1` copies `lib/parallel/` into the bench and example projects, and
-    `verify/threads.sh` with `BACKENDS=3`, `bench/threads/run.sh` with a backend 3 config and
-    `bench/web/lanes_bake.sh` with `BACKEND=3` do so themselves.
+  solver stages and the tree rebuild on workers or jobs. Lanes share no memory, so each step serializes the solver's
+  data to the lanes and back and syncs 84 colored stages: the whole step gains at most 1.1 to 1.5x, and village gets
+  slower with every lane. `notes/threading.md` measures why; it is what parallel calls replaced.
 
 ## Branches
 
-`main` is the only branch: the port, the examples, the gates, every bench and the opt in parallel calls backend. It
-builds and passes every gate on rive master (b0b4628806 or later) without `lib/parallel/`, and on rive
-`parallel-calls` with it. The older branches (`single-core`, `parallel`, `web-bench`, `threads`) are merged in and
+`main` is the only branch: the port, the examples, the gates and every bench. It builds and passes every gate on rive
+master at 4a861ff147 or later. The older branches (`single-core`, `parallel`, `web-bench`, `threads`) are merged in and
 kept for history.
 
 ## Layout and tooling
 
 | path | what |
 |---|---|
-| `lib/` | the port; `box3d.as` is the public API, `lanes.as` the lanes backend |
-| `lib/parallel/` | the parallel calls backend, opt in, on the `parallel-calls` toolchain |
+| `lib/` | the port; `box3d.as` is the public API, `parallel_step.as` the parallel calls backend, `lanes.as` lanes |
 | `examples/` | one example per API area, `tests.as` and `check.sh` |
 | `main.as`, `demo/`, `rive.yaml` | the demo |
 | `verify/` | parity gates: `cref/` C drivers, `as/` AnimaScript drivers, `scenes/` the 13 scenes in C and AnimaScript |
@@ -305,18 +301,13 @@ KEEP_GOING=1 RASC_FLAGS="-O --enable-simd" verify/run.sh
 RASC_FLAGS="-O" verify/traj.sh --large
 RASC_FLAGS="-O --enable-simd" verify/traj.sh --large
 RIVE_WAMRC=<wamrc> verify/threads.sh --large
-examples/check.sh
+RIVE_WASM_AOT_SYNC=interp examples/check.sh && RIVE_WAMRC=<wamrc> examples/check.sh --aot
 python3 verify/exports.py && python3 docs/api.py
 ```
 
-With the parallel backend, on a `parallel-calls` checkout (`P`) and its own wamrc:
-
-```sh
-RASC=$P/packages/rasc/animascript/out/release/rasc AS_STD=$P/packages/rasc/animascript/std \
-	RASC_FLAGS="-O --enable-simd" verify/traj.sh --large
-RIVE=$P/packages/rive-cli/out/release/rive RIVE_WAMRC=<its wamrc> BACKENDS=3 PARTS="1 4" verify/threads.sh --large
-PARALLEL=1 RIVE=$P/packages/rive-cli/out/release/rive examples/check.sh
-```
+`verify/threads.sh` runs parallel calls, workers and jobs (`BACKENDS="3 2 1"`); `BACKENDS=3 PARTS="1 4"` keeps it
+short. A CLI built from source is a dev build, which `bench/web/lanes_bake.sh` needs for `--unsigned-riv`: release
+CLIs write a `.riv` only through `--publish`.
 
 Benches: `bench/native/run.sh`, `bench/as/run.sh` (WAMR AOT, `notes/bench.md`), `bench/threads/run.sh`, and
 `bench/web/` (`notes/web.md`: `build.sh` builds C Box3D with emscripten and the port's release bake, `bench.mjs`
