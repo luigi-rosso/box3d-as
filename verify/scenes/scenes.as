@@ -1586,23 +1586,13 @@ function Scene_CreateVillageGround(scene: Scene, gridCount: i32, angle: f32): vo
 	}
 
 	let def = new b3CompoundDef();
-	// StaticArray.fromArray traps on arrays of structs (notes/findings.md)
-	let capsuleDefs = new StaticArray<b3CompoundCapsuleDef>(capsules.length);
-	for (let i = 0; i < capsules.length; ++i) {
-		capsuleDefs[i] = capsules[i];
-	}
-	let sphereDefs = new StaticArray<b3CompoundSphereDef>(spheres.length);
-	for (let i = 0; i < spheres.length; ++i) {
-		sphereDefs[i] = spheres[i];
-	}
-
-	def.capsules = capsuleDefs;
+	def.capsules = StaticArray.fromArray<b3CompoundCapsuleDef>(capsules);
 	def.capsuleCount = capsules.length;
 	def.hulls = StaticArray.fromArray<b3CompoundHullDef>(hulls);
 	def.hullCount = hulls.length;
 	def.meshes = StaticArray.fromArray<b3CompoundMeshDef>(meshes);
 	def.meshCount = meshes.length;
-	def.spheres = sphereDefs;
+	def.spheres = StaticArray.fromArray<b3CompoundSphereDef>(spheres);
 	def.sphereCount = spheres.length;
 
 	scene.compound = b3CreateCompound(def);
