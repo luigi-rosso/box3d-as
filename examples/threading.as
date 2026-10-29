@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Erin Catto
 // SPDX-License-Identifier: MIT
-// Threading: the same pyramid stepped once on the main lane alone and once with its narrow phase and solver stages
-// on four lanes. Results do not depend on the lane count, so the two runs end bit for bit the same.
-// b3World_EnableLanes serves one world at a time; notes/threading.md says what lanes cost and when they pay.
+// Threading: the same pyramid stepped on the main lane alone, with its narrow phase and solver stages on four lanes,
+// and on parallel calls over the world's own memory. Results do not depend on the thread count, so the three runs end
+// bit for bit the same. Lanes and parallel calls serve one world at a time; notes/threading.md says what each costs.
 
 import {
 	b3BodyId,
@@ -20,19 +20,24 @@ import {
 	b3_dynamicBody,
 } from "../lib/box3d";
 import { b3World_EnableLanes, b3_laneBackendWorkers, b3_laneCollide, b3_laneSolve } from "../lib/lanes";
+import { b3World_EnableParallel, b3_parallelCollide, b3_parallelSolve, b3_parallelStats } from "../lib/parallel_step";
 
 const BASE_COUNT: i32 = 10;
 
 export class PyramidRun {
 	// Every box's final position
 	positions: StaticArray<f32> = new StaticArray<f32>(0);
-	// Steps whose solver stages and narrow phase ran on the lanes
-	laneSolves: i32 = 0;
-	laneCollides: i32 = 0;
+	// Steps whose solver stages and narrow phase ran on the lanes or parallel calls
+	solves: i32 = 0;
+	collides: i32 = 0;
 }
 
-// Steps a pyramid of boxes on laneCount lanes, 0 for the serial path
-export function stepPyramid(laneCount: i32): PyramidRun {
+export const RUN_SERIAL: i32 = 0;
+export const RUN_LANES: i32 = 1;
+export const RUN_PARALLEL: i32 = 2;
+
+// Steps a pyramid of boxes serially, on four lanes or on parallel calls
+export function stepPyramid(how: i32): PyramidRun {
 	// Awake for the whole run, so every step has work for the lanes
 	let worldDef = b3DefaultWorldDef();
 	worldDef.enableSleep = false;
@@ -57,7 +62,13 @@ export function stepPyramid(laneCount: i32): PyramidRun {
 	}
 
 	// Lanes run on workers here, b3_laneBackendJobs puts them on the job pool instead
-	let lanes = b3World_EnableLanes(worldId, laneCount, b3_laneBackendWorkers, b3_laneCollide | b3_laneSolve);
+	let lanes = how == RUN_LANES ? b3World_EnableLanes(worldId, 4, b3_laneBackendWorkers, b3_laneCollide | b3_laneSolve) : null;
+	// Parallel calls run as many parts as Parallel.size(), one where the runtime has no threads
+	if (how == RUN_PARALLEL) {
+		b3World_EnableParallel(worldId, b3_parallelCollide | b3_parallelSolve);
+	}
+	let solves = b3_parallelStats.solves;
+	let collides = b3_parallelStats.collides;
 
 	let timeStep: f32 = <f32>(1.0 / 60.0);
 	for (let i = 0; i < 120; ++i) {
@@ -66,11 +77,16 @@ export function stepPyramid(laneCount: i32): PyramidRun {
 
 	let run = new PyramidRun();
 	if (lanes != null) {
-		run.laneSolves = lanes.stats.solves;
-		run.laneCollides = lanes.collide.steps;
+		run.solves = lanes.stats.solves;
+		run.collides = lanes.collide.steps;
+		// Zero lanes stops the lanes and gives the world back its own task callbacks
+		b3World_EnableLanes(worldId, 0, b3_laneBackendWorkers, 0);
 	}
-	// Zero lanes stops the lanes and gives the world back its own task callbacks
-	b3World_EnableLanes(worldId, 0, b3_laneBackendWorkers, 0);
+	if (how == RUN_PARALLEL) {
+		run.solves = b3_parallelStats.solves - solves;
+		run.collides = b3_parallelStats.collides - collides;
+		b3World_EnableParallel(worldId, 0);
+	}
 
 	let positions = new StaticArray<f32>(3 * bodies.length);
 	for (let i = 0; i < bodies.length; ++i) {
@@ -85,22 +101,23 @@ export function stepPyramid(laneCount: i32): PyramidRun {
 }
 
 export class ThreadingResult {
-	// Coordinates whose bits differ between the serial and the threaded run
+	// Coordinates whose bits differ from the serial run's
 	differ: i32 = 0;
-	laneSolves: i32 = 0;
-	laneCollides: i32 = 0;
+	solves: i32 = 0;
+	collides: i32 = 0;
 }
 
-export function threading(): ThreadingResult {
-	let serial = stepPyramid(0).positions;
-	let threaded = stepPyramid(4);
+// Runs the pyramid serially and then as how says
+export function threading(how: i32): ThreadingResult {
+	let serial = stepPyramid(RUN_SERIAL).positions;
+	let threaded = stepPyramid(how);
 	let result = new ThreadingResult();
 	for (let i = 0; i < serial.length; ++i) {
 		if (reinterpret<u32>(serial[i]) != reinterpret<u32>(threaded.positions[i])) {
 			result.differ += 1;
 		}
 	}
-	result.laneSolves = threaded.laneSolves;
-	result.laneCollides = threaded.laneCollides;
+	result.solves = threaded.solves;
+	result.collides = threaded.collides;
 	return result;
 }

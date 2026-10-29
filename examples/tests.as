@@ -9,7 +9,7 @@ import { ANCHOR_HEIGHT, LINK_COUNT, LINK_LENGTH, joints } from "./joints";
 import { moverExample } from "./mover";
 import { queries } from "./queries";
 import { shapes } from "./shapes";
-import { threading } from "./threading";
+import { RUN_LANES, RUN_PARALLEL, threading } from "./threading";
 
 export class ExampleTests extends Tests {
 	override run(): void {
@@ -78,11 +78,18 @@ export class ExampleTests extends Tests {
 		});
 
 		test("threading: four lanes end bit for bit where the serial path does", (expect) => {
-			let result = threading();
+			let result = threading(RUN_LANES);
 			expect.that(result.differ).is(0);
 			// Every step ran its solver stages and narrow phase on the lanes
-			expect.that(result.laneSolves).is(120);
-			expect.that(result.laneCollides).is(120);
+			expect.that(result.solves).is(120);
+			expect.that(result.collides).is(120);
+		});
+
+		test("threading: parallel calls end bit for bit where the serial path does", (expect) => {
+			let result = threading(RUN_PARALLEL);
+			expect.that(result.differ).is(0);
+			expect.that(result.solves).is(120);
+			expect.that(result.collides).is(120);
 		});
 	}
 }
