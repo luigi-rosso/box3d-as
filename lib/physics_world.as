@@ -240,6 +240,9 @@ export class b3TaskContext {
 	// Number of contacts recycled this step (collide pass).
 	recycledContactCount: i32 = 0;
 
+	// Sums the loads collide makes ahead of each contact, so the compiler keeps them
+	collideAhead: u32 = 0;
+
 	// B3_CONTACT_MANIFOLD_COUNT_BUCKETS; a FixedArray length must be a literal
 	manifoldCounts: FixedArray<i32, 8>;
 
@@ -804,7 +807,29 @@ export function b3SetLaneCollide(fcn: b3LaneCollideFcn?): void {
 	b3_laneCollide = fcn;
 }
 
-export function b3CollideTask(startIndex: i32, endIndex: i32, workerIndex: i32, stepContext: b3StepContext): void {
+// Collide waits on each contact's cache misses in turn. Loading the next contact's lines first lets those misses
+// overlap this contact's work. Every offset stays inside the object it reads.
+@inline unsafe function b3LoadContactAhead(contact: b3Contact, shapes: Array<b3Shape>, sims: usize): u32 {
+	let at = changetype<usize>(contact);
+	let shapeA = changetype<usize>(unchecked(shapes[contact.shapeIdA]));
+	let shapeB = changetype<usize>(unchecked(shapes[contact.shapeIdB]));
+	let sum = load<u32>(at) + load<u32>(at + 64) + load<u32>(at + 128) + load<u32>(at + 192);
+	sum += load<u32>(shapeA) + load<u32>(shapeA + 64) + load<u32>(shapeA + 128);
+	sum += load<u32>(shapeB) + load<u32>(shapeB + 64) + load<u32>(shapeB + 128);
+	if (contact.manifoldCount > 0) {
+		let manifold = changetype<usize>(contact.manifolds);
+		sum += load<u32>(manifold) + load<u32>(manifold + 64) + load<u32>(manifold + 128) + load<u32>(manifold + 192);
+	}
+	if (contact.encodedBodySimA >= 0) {
+		sum += load<u32>(sims + <usize>contact.encodedBodySimA * sizeof<b3BodySim>());
+	}
+	if (contact.encodedBodySimB >= 0) {
+		sum += load<u32>(sims + <usize>contact.encodedBodySimB * sizeof<b3BodySim>());
+	}
+	return sum;
+}
+
+export unsafe function b3CollideTask(startIndex: i32, endIndex: i32, workerIndex: i32, stepContext: b3StepContext): void {
 	let world = stepContext.world;
 	let graph = world.constraintGraph;
 	let taskContext = world.taskContexts[workerIndex];
@@ -821,9 +846,18 @@ export function b3CollideTask(startIndex: i32, endIndex: i32, workerIndex: i32, 
 	let speculativeDistance = B3_SPECULATIVE_DISTANCE();
 	let recycleDistanceNonTouching = b3MinFloat(recycleDistance, speculativeDistance);
 
+	let simData = awakeSims.dataStart;
+	let ahead: u32 = 0;
 	for (let i = startIndex; i < endIndex; ++i) {
 		let contactIndex = contactIndices[i];
 		B3_ASSERT(contactIndex < world.contacts.length);
+
+		if (i + 2 < endIndex) {
+			ahead += load<u32>(changetype<usize>(unchecked(contacts[unchecked(contactIndices[i + 2])])));
+		}
+		if (i + 1 < endIndex) {
+			ahead += b3LoadContactAhead(unchecked(contacts[unchecked(contactIndices[i + 1])]), shapes, simData);
+		}
 
 		let contact = contacts[contactIndex];
 
@@ -1022,6 +1056,7 @@ export function b3CollideTask(startIndex: i32, endIndex: i32, workerIndex: i32, 
 			}
 		}
 	}
+	taskContext.collideAhead += ahead;
 }
 
 function b3AddNonTouchingContact(world: b3World, contact: b3Contact): void {
