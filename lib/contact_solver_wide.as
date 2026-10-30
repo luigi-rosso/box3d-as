@@ -160,11 +160,11 @@ const M3_CZ = offsetof<b3Matrix3>("cz");
 const b3_zeroSims = new StaticArray<b3BodySim>(1);
 
 @inline unsafe function b3StatesData(states: Array<b3BodyState>): usize {
-	return load<usize>(changetype<usize>(states) + offsetof<Array<i32>>("dataStart"));
+	return states.dataStart;
 }
 
 @inline unsafe function b3SimsData(sims: Array<b3BodySim>): usize {
-	return load<usize>(changetype<usize>(sims) + offsetof<Array<i32>>("dataStart"));
+	return sims.dataStart;
 }
 
 // Indices are 0 for null. They come from b3PrepareConstraintL, so they are in range by construction.

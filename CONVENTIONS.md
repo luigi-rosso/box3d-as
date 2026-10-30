@@ -99,12 +99,12 @@ helper from `lib/core.as`.
   `b3Sensor`, `b3BroadPhase`, `b3DynamicTree`, `b3HullData`, `b3MeshData`,
   `b3HeightFieldData`, `b3CompoundData`.
 - Unions become one field per member.
-- Structs cannot be generic arguments of our own classes, so there is no
-  container class: use `Array<T>` / `StaticArray<T>` directly. Functions
+- There is no container class, as `b3Array(T)` is the builtin `Array<T>`:
+  use `Array<T>` / `StaticArray<T>` directly. Functions
   generic over the array type do work, so `lib/container.as` has
   `b3Array_RemoveSwap`, `b3Array_AddIndex`, `b3Array_Emplace` (returns an
   index), `b3Array_Resize` and `b3Array_Append` for any `Array<V>`.
-- rasc refuses `ref` to a primitive local or field, so `B3_SWAP` is written
+- rasc refuses `ref` to a number local, so `B3_SWAP` is written
   inline (`let t = x; x = y; y = t;`); `b3SwapElements(a, i, j)` swaps array
   elements.
 - Arena, stack and block allocators are not ported: each `b3Bump` or

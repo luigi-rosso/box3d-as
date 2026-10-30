@@ -206,7 +206,8 @@ function printContact(seq: i32, step: i32, touching: bool, contact: b3Contact, s
 		} else if (shapeTypeB == b3_capsuleShape) {
 			vf32(tc.cache.simplexCache.metric);
 			vu32(tc.cache.simplexCache.count);
-			for (let k = 0; k < 4; ++k) {
+			// Indices past count are whatever the cache's memory held, which C never clears
+			for (let k = 0; k < <i32>tc.cache.simplexCache.count; ++k) {
 				vu32(tc.cache.simplexCache.indexA[k]);
 				vu32(tc.cache.simplexCache.indexB[k]);
 			}

@@ -197,7 +197,8 @@ static void printContact( int seq, int step, bool touching, b3Contact* contact, 
 		{
 			vf32( tc->cache.simplexCache.metric );
 			vu32( tc->cache.simplexCache.count );
-			for ( int k = 0; k < 4; ++k )
+			// Indices past count are whatever the cache's memory held, which C never clears
+			for ( int k = 0; k < tc->cache.simplexCache.count; ++k )
 			{
 				vu32( tc->cache.simplexCache.indexA[k] );
 				vu32( tc->cache.simplexCache.indexB[k] );
