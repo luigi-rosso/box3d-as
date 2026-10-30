@@ -203,6 +203,9 @@ rive master at 4a861ff147 (CLI, rasc and its wamrc), `bench/web/aot.mjs`, 3 roun
 - These keep the software bounds checks of the `o3` tier, for comparison with the earlier sessions. Master's CLI now
   ships hardware bounds on macOS and Linux (#15153), its default tier, which `notes/perf_4.md` measured about 5%
   faster on the big scenes.
+- Counted in cycles on the script thread of a quiet machine, master's hardware bounds tier runs large_pyramid at
+  1.04x native and pyramid at 1.12x (`notes/perf_5.md`). Under cache contention our collide slowed twice as much as
+  C's, from misses the core could not overlap, so it now loads the next contact ahead of the current one.
 
 Reproduce: `ROUNDS=3 RIVE_WAMRC=<wamrc> node bench/web/aot.mjs`, then `node bench/web/bench.mjs --table=<log>`, or
 `bench/as/run.sh` for the AOT tier alone against bench/native (`notes/bench.md`).
@@ -320,7 +323,7 @@ runs the V8 rounds, `aot.mjs` WAMR AOT against V8 and native).
 | `CONVENTIONS.md` | how C maps to AnimaScript: files, names, types, structs and classes, pointers, callbacks |
 | `notes/findings.md` | rasc and runtime issues hit along the way, each with a minimal repro |
 | `notes/upstream.md` | upstream Box3D bugs the port found |
-| `notes/perf_solver.md`, `perf_collide.md`, `perf_3.md`, `perf_4.md` | the four performance passes |
+| `notes/perf_solver.md`, `perf_collide.md`, `perf_3.md`, `perf_4.md`, `perf_5.md` | the five performance passes |
 | `notes/web.md` | Box3D on the web: the port against C on V8, threaded, in Chrome |
 | `notes/threading.md` | lanes and parallel calls: design, results, what AnimaScript threading should change |
 | `notes/bench.md`, `notes/scenes.md`, `notes/parity.md` | bench recipes, the scenes and the parity method |
