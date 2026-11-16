@@ -51,11 +51,11 @@ const LANE_TIME_NAMES: StaticArray<string> = [
 const g_options = new Map<string, i32>();
 
 function loadOptions(context: Context): void {
-	let bytes = context.blob("options");
-	if (bytes == null) {
+	let blob = context.blob("options");
+	if (blob == null) {
 		return;
 	}
-	let words = String.UTF8.decode(bytes).replaceAll("\n", " ").split(" ");
+	let words = String.UTF8.decode(blob.toArrayBuffer()).replaceAll("\n", " ").split(" ");
 	for (let i = 0; i < words.length; ++i) {
 		let word = words[i];
 		let equals = word.indexOf("=");
