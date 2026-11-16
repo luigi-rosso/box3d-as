@@ -39,8 +39,11 @@ mean ms per step and the solver stages in parentheses, 2 rounds:
 - **Rebuilding the trees in the solver's call**, where box2d-as moved it, made no measurable difference here: the 3D
   narrow phase is long enough to hide the rebuild. It stays in the narrow phase's call.
 - The trace keeps a span per stage per worker; part 0's now ends before it waits for the others' blocks.
-- **Not run on the web yet.** The orchestrator spins on the page's thread as before, and only parts other than 0
-  call `atomic.wait`. bench/web's parallel runs in Chrome and WebKit should pass before this ships to the page.
+- **In browsers** (bench/web/parallel.mjs `MODE=parity`, librive's web scripting harness built from rive master at
+  5d0e608da3 with and without threads, headless Chrome, Firefox and WebKit): large_pyramid, many_bodies, mesh_drop and
+  village match the native recording on every step at 1, 2, 4 and 8 parts and the default on an isolated page, and on
+  a page without isolation, 28 of 28 runs in each browser, and no run hung. The orchestrator spins on the page's
+  thread as before, and only parts other than 0 call `atomic.wait`.
 
 Gates on rive master at 5d0e608da3 (rasc, rive-cli and a wamrc built from its WAMR patches): verify/run.sh 29 of 29
 on the SIMD artifact, verify/traj.sh --large 13 of 13 on the scalar and SIMD artifacts, verify/threads.sh --large on
