@@ -62,6 +62,8 @@ export class b3ParallelStats {
 	finalizes: i32 = 0;
 	deferredBodies: i64 = 0;
 	solves: i32 = 0;
+	// How many times a long stage wait had every part sync
+	stageSyncs: i32 = 0;
 }
 
 export const b3_parallelStats = new b3ParallelStats();
@@ -71,7 +73,7 @@ let s_partLimit = B3_MAX_WORKERS;
 
 // C's solver task with a part as each worker: part 0 orchestrates the stages and the others claim their blocks
 @parallel.inplace export function b3ParallelSolverTask(part: Part, context: b3StepContext): void {
-	b3SolverWorker(context, part.index);
+	b3SolverWorker(context, part.index, part);
 }
 
 function b3ParallelSolve(context: b3StepContext): bool {
@@ -92,6 +94,7 @@ function b3ParallelSolve(context: b3StepContext): bool {
 
 	Parallel.runUpTo(s_partLimit, b3ParallelSolverTask, context);
 	b3_parallelStats.solves += 1;
+	b3_parallelStats.stageSyncs += context.syncRequests.value;
 	return true;
 }
 
@@ -352,7 +355,8 @@ export function b3SetParallelLimit(parts: i32): void {
 // Fields for a bench's result line
 export function b3ParallelReport(): string {
 	let ps = b3_parallelStats;
-	return " parts=" + Parallel.size().toString() + " parSolves=" + ps.solves.toString() + " parCollides=" +
+	return " parts=" + Parallel.size().toString() + " parSolves=" + ps.solves.toString() + " parStageSyncs=" +
+		ps.stageSyncs.toString() + " parCollides=" +
 		ps.collides.toString() + " parFinalizes=" + ps.finalizes.toString() + " parContacts=" +
 		formatFixed(<f64>ps.contacts / <f64>max(1, ps.collides), 1) + " parDeferredContacts=" +
 		formatFixed(<f64>ps.deferredContacts / <f64>max(1, ps.collides), 1) + " parDeferredBodies=" +

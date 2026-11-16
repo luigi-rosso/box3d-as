@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 // AnimaScript port of src/solver.c
 
-import { Parallel } from "rive/parallel";
+import { Parallel, Part } from "rive/parallel";
 // Solver work is partitioned into fixed-size blocks that worker threads claim
 // in parallel via atomic CAS on a per-block syncIndex. The port runs one worker,
 // but keeps the block and stage structure so the solve order matches C.
@@ -431,6 +431,9 @@ export class b3StepContext {
 	// How many workers sleep on the sync bits, which only the parts of a parallel call do
 	sleepingWorkers: b3AtomicInt = b3AtomicInt();
 
+	// How many syncs part 0 has asked every part of a parallel call to make
+	syncRequests: b3AtomicInt = b3AtomicInt();
+
 	constructor(world: b3World) {
 		this.world = world;
 		this.graph = world.constraintGraph;
@@ -527,6 +530,7 @@ const SC_MAINCLAIMED = offsetof<b3StepContext>("mainClaimed");
 const SC_BULLETBODYCOUNT = offsetof<b3StepContext>("bulletBodyCount");
 const SC_ANYRESTITUTION = offsetof<b3StepContext>("anyRestitution");
 const SC_SLEEPINGWORKERS = offsetof<b3StepContext>("sleepingWorkers");
+const SC_SYNCREQUESTS = offsetof<b3StepContext>("syncRequests");
 
 @inline unsafe function b3StepAtomic(context: b3StepContext, offset: usize): usize {
 	return changetype<usize>(context) + offset;
@@ -546,6 +550,28 @@ function b3Pause(): void {}
 // times in one wait sleeps on the sync bits instead, until b3PublishSyncBits wakes it or this long has passed, in ns.
 const B3_WORKER_SPIN_YIELDS: i32 = 2048;
 const B3_WORKER_SLEEP_NANOS: i64 = 1000000;
+
+// A part learns that another part of its call trapped only at a sync, which then fails the call. So a worker that has
+// slept this many times in one wait leaves the step, which part 0 can finish without it.
+const B3_WORKER_IDLE_SLEEPS: i32 = 500;
+
+// A worker that trapped inside a block never adds its count, so part 0 has every part sync each time it has polled
+// a stage this many times.
+const B3_STAGE_SYNC_POLLS: i32 = 1 << 24;
+
+@inline unsafe function b3RequestSync(context: b3StepContext, part: Part): void {
+	atomic.add<i32>(b3StepAtomic(context, SC_SYNCREQUESTS), 1);
+	part.sync();
+}
+
+// Makes the sync part 0 asked for since this worker had made syncsMade of them, and answers how many it has made now
+@inline unsafe function b3AnswerSync(context: b3StepContext, part: Part, syncsMade: i32): i32 {
+	let requests = atomic.load<i32>(b3StepAtomic(context, SC_SYNCREQUESTS));
+	if (requests != syncsMade) {
+		part.sync();
+	}
+	return requests;
+}
 
 @inline unsafe function b3YieldWorker(context: b3StepContext, syncBits: u32, yieldCount: i32): void {
 	if (Parallel.inPart() && yieldCount > B3_WORKER_SPIN_YIELDS) {
@@ -1801,7 +1827,7 @@ function b3ExecuteStage(
 }
 
 // Execute a stage on worker 0 (main thread).
-function b3ExecuteMainStage(stage: b3SolverStage, context: b3StepContext, syncBits: u32): void {
+function b3ExecuteMainStage(stage: b3SolverStage, context: b3StepContext, syncBits: u32, part: Part?): void {
 	let blockCount = stage.blockCount;
 	if (blockCount == 0) {
 		return;
@@ -1828,8 +1854,12 @@ function b3ExecuteMainStage(stage: b3SolverStage, context: b3StepContext, syncBi
 
 		// Spin waiting for thieves to finish
 		let completionCount = b3CompletionCount(stage);
+		let polls = 0;
 		while (b3AtomicLoadInt(completionCount) != blockCount) {
 			b3Pause();
+			if (Parallel.inPart() && (++polls & (B3_STAGE_SYNC_POLLS - 1)) == 0) {
+				b3RequestSync(context, part!);
+			}
 		}
 
 		b3AtomicStoreInt(completionCount, 0);
@@ -1842,11 +1872,11 @@ function b3ExecuteMainStage(stage: b3SolverStage, context: b3StepContext, syncBi
 
 // Parallel solver task
 function b3SolverTask(workerContext: b3WorkerContext): void {
-	b3SolverWorker(workerContext.context, workerContext.workerIndex);
+	b3SolverWorker(workerContext.context, workerContext.workerIndex, null);
 }
 
-// b3SolverTask for worker workerIndex of the step, which a part of a parallel call runs as its own
-export function b3SolverWorker(context: b3StepContext, workerIndex: i32): void {
+// b3SolverTask for worker workerIndex of the step, which a part of a parallel call runs as its own, passing itself
+export function b3SolverWorker(context: b3StepContext, workerIndex: i32, part: Part?): void {
 	let activeColorCount = context.activeColorCount;
 	let stages = context.stages;
 	let world = context.world;
@@ -1883,7 +1913,7 @@ export function b3SolverWorker(context: b3StepContext, workerIndex: i32): void {
 		let jointSyncIndex = 1;
 		let syncBits = b3SyncBits(jointSyncIndex, stageIndex);
 		B3_ASSERT(stages[stageIndex].type == b3_stagePrepareJoints);
-		b3ExecuteMainStage(stages[stageIndex], context, syncBits);
+		b3ExecuteMainStage(stages[stageIndex], context, syncBits, part);
 		stageIndex += 1;
 		jointSyncIndex += 1;
 
@@ -1891,7 +1921,7 @@ export function b3SolverWorker(context: b3StepContext, workerIndex: i32): void {
 		let convexSyncIndex = 1;
 		syncBits = b3SyncBits(convexSyncIndex, stageIndex);
 		B3_ASSERT(stages[stageIndex].type == b3_stagePrepareWideContacts);
-		b3ExecuteMainStage(stages[stageIndex], context, syncBits);
+		b3ExecuteMainStage(stages[stageIndex], context, syncBits, part);
 		stageIndex += 1;
 		convexSyncIndex += 1;
 
@@ -1899,7 +1929,7 @@ export function b3SolverWorker(context: b3StepContext, workerIndex: i32): void {
 		let meshSyncIndex = 1;
 		syncBits = b3SyncBits(meshSyncIndex, stageIndex);
 		B3_ASSERT(stages[stageIndex].type == b3_stagePrepareContacts);
-		b3ExecuteMainStage(stages[stageIndex], context, syncBits);
+		b3ExecuteMainStage(stages[stageIndex], context, syncBits, part);
 		stageIndex += 1;
 		meshSyncIndex += 1;
 
@@ -1919,7 +1949,7 @@ export function b3SolverWorker(context: b3StepContext, workerIndex: i32): void {
 			// Integrate velocities
 			syncBits = b3SyncBits(bodySyncIndex, iterationStageIndex);
 			B3_ASSERT(stages[iterationStageIndex].type == b3_stageIntegrateVelocities);
-			b3ExecuteMainStage(stages[iterationStageIndex], context, syncBits);
+			b3ExecuteMainStage(stages[iterationStageIndex], context, syncBits, part);
 			iterationStageIndex += 1;
 			bodySyncIndex += 1;
 
@@ -1932,7 +1962,7 @@ export function b3SolverWorker(context: b3StepContext, workerIndex: i32): void {
 			for (let colorIndex = 0; colorIndex < activeColorCount; ++colorIndex) {
 				syncBits = b3SyncBits(graphSyncIndex, iterationStageIndex);
 				B3_ASSERT(stages[iterationStageIndex].type == b3_stageWarmStart);
-				b3ExecuteMainStage(stages[iterationStageIndex], context, syncBits);
+				b3ExecuteMainStage(stages[iterationStageIndex], context, syncBits, part);
 				iterationStageIndex += 1;
 			}
 			graphSyncIndex += 1;
@@ -1949,7 +1979,7 @@ export function b3SolverWorker(context: b3StepContext, workerIndex: i32): void {
 				for (let colorIndex = 0; colorIndex < activeColorCount; ++colorIndex) {
 					syncBits = b3SyncBits(graphSyncIndex, iterationStageIndex);
 					B3_ASSERT(stages[iterationStageIndex].type == b3_stageSolve);
-					b3ExecuteMainStage(stages[iterationStageIndex], context, syncBits);
+					b3ExecuteMainStage(stages[iterationStageIndex], context, syncBits, part);
 					iterationStageIndex += 1;
 				}
 				graphSyncIndex += 1;
@@ -1960,7 +1990,7 @@ export function b3SolverWorker(context: b3StepContext, workerIndex: i32): void {
 			// Integrate positions
 			B3_ASSERT(stages[iterationStageIndex].type == b3_stageIntegratePositions);
 			syncBits = b3SyncBits(bodySyncIndex, iterationStageIndex);
-			b3ExecuteMainStage(stages[iterationStageIndex], context, syncBits);
+			b3ExecuteMainStage(stages[iterationStageIndex], context, syncBits, part);
 			iterationStageIndex += 1;
 			bodySyncIndex += 1;
 
@@ -1975,7 +2005,7 @@ export function b3SolverWorker(context: b3StepContext, workerIndex: i32): void {
 				for (let colorIndex = 0; colorIndex < activeColorCount; ++colorIndex) {
 					syncBits = b3SyncBits(graphSyncIndex, iterationStageIndex);
 					B3_ASSERT(stages[iterationStageIndex].type == b3_stageRelax);
-					b3ExecuteMainStage(stages[iterationStageIndex], context, syncBits);
+					b3ExecuteMainStage(stages[iterationStageIndex], context, syncBits, part);
 					iterationStageIndex += 1;
 				}
 				graphSyncIndex += 1;
@@ -1997,7 +2027,7 @@ export function b3SolverWorker(context: b3StepContext, workerIndex: i32): void {
 				for (let colorIndex = 0; colorIndex < activeColorCount; ++colorIndex) {
 					syncBits = b3SyncBits(graphSyncIndex, iterationStageIndex);
 					B3_ASSERT(stages[iterationStageIndex].type == b3_stageRestitution);
-					b3ExecuteMainStage(stages[iterationStageIndex], context, syncBits);
+					b3ExecuteMainStage(stages[iterationStageIndex], context, syncBits, part);
 					iterationStageIndex += 1;
 				}
 				graphSyncIndex += 1;
@@ -2013,12 +2043,12 @@ export function b3SolverWorker(context: b3StepContext, workerIndex: i32): void {
 
 		syncBits = b3SyncBits(convexSyncIndex, stageIndex);
 		B3_ASSERT(stages[stageIndex].type == b3_stageStoreWideImpulses);
-		b3ExecuteMainStage(stages[stageIndex], context, syncBits);
+		b3ExecuteMainStage(stages[stageIndex], context, syncBits, part);
 		stageIndex += 1;
 
 		syncBits = b3SyncBits(meshSyncIndex, stageIndex);
 		B3_ASSERT(stages[stageIndex].type == b3_stageStoreImpulses);
-		b3ExecuteMainStage(stages[stageIndex], context, syncBits);
+		b3ExecuteMainStage(stages[stageIndex], context, syncBits, part);
 		stageIndex += 1;
 
 		world.profile.storeImpulses += b3GetMillisecondsAndReset(ticks.value);
@@ -2032,6 +2062,7 @@ export function b3SolverWorker(context: b3StepContext, workerIndex: i32): void {
 
 	// Worker spins and waits for work
 	let lastSyncBits: u32 = 0;
+	let syncsMade = 0;
 	while (true) {
 		// Spin until main thread bumps changes the sync bits. This can waste significant time overall, but it is necessary for
 		// parallel simulation with graph coloring.
@@ -2044,6 +2075,12 @@ export function b3SolverWorker(context: b3StepContext, workerIndex: i32): void {
 			if (spinCount > 5) {
 				yieldCount += 1;
 				b3YieldWorker(context, lastSyncBits, yieldCount);
+				if (Parallel.inPart()) {
+					if (yieldCount > B3_WORKER_SPIN_YIELDS + B3_WORKER_IDLE_SLEEPS) {
+						return;
+					}
+					syncsMade = b3AnswerSync(context, part!, syncsMade);
+				}
 				spinCount = 0;
 			} else {
 				b3Pause();
@@ -2706,6 +2743,7 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 		b3AtomicStoreU32(b3StepAtomic(stepContext, SC_SYNCBITS), 0);
 		b3AtomicStoreInt(b3StepAtomic(stepContext, SC_MAINCLAIMED), 0);
 		b3AtomicStoreInt(b3StepAtomic(stepContext, SC_SLEEPINGWORKERS), 0);
+		b3AtomicStoreInt(b3StepAtomic(stepContext, SC_SYNCREQUESTS), 0);
 
 		world.profile.solverSetup = b3GetMillisecondsAndReset(setupTicks.value);
 
