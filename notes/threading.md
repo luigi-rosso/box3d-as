@@ -7,6 +7,48 @@ inputs and outputs can be serialized onto jobs and workers, keeps every result b
 native at any lane count, and measures what it costs.
 
 
+## The solver without a sync per stage (2026-11-15)
+
+The solver stages no longer sync after each stage. Every part runs C's `b3SolverTask` as its own worker
+(`b3SolverWorker(context, part.index)`): part 0 orchestrates, the others spin on the sync bits and claim blocks from
+their home index by compare and swap, and a stage is over when its completion count says so. solver.as's stand-ins
+for C's atomics take the value's address and are real atomics under `Parallel.inPart()`, a plain load and store
+elsewhere. Where a waiting C worker yields its core, a part sleeps on the sync bits after 2048 yields in one wait
+(`atomic.wait`), and part 0 wakes sleepers when it stores new bits (`atomic.notify`). Pair finding is one claim loop
+over the cross seeds and the self pair blocks, so nothing in the backend calls `part.sync()`. The change came from
+box2d-as, where the stages are short enough for the syncs to show on a quiet machine.
+
+Why: a sync waits for every part of the call, about a hundred times a step, so one part that is not scheduled holds
+all the others. C waits for a stage's blocks, and whoever is running claims them.
+
+large_pyramid and village, the two builds interleaved under rive-cli (master at 5d0e608da3, AOT -O3, SIMD artifact),
+mean ms per step and the solver stages in parentheses, 2 rounds:
+
+| machine | scene | parts | sync per stage | C's scheme |
+|---|---|---|---|---|
+| 24 busy loops beside the bench | large_pyramid | 8 | 8.06, 8.12 (6.77, 6.75) | 3.63, 3.70 (2.11, 2.36) |
+| 24 busy loops beside the bench | village | 8 | 6.78, 7.47 (4.88, 5.52) | 3.29, 3.06 (1.10, 1.13) |
+| 24 busy loops beside the bench | large_pyramid | 4 | 3.43, 3.95 | 3.63, 3.73 |
+| 24 busy loops beside the bench | village | 4 | 3.18, 3.08 | 3.03, 3.19 |
+
+- **With the cores contended and more parts than free cores, the step is less than half** (8.1 to 3.7 ms, 7.1 to
+  3.2), all of it in the solver stages.
+- **At 4 parts, and at the load the machine happened to have** (9 to 16, min over 2 rounds on large_pyramid,
+  many_bodies, mesh_drop and village at 2, 4 and 8 parts), the two are within 5% of each other either way, which is
+  that session's noise. A quiet machine has not measured it: the stages here are long, so little is expected.
+- **Rebuilding the trees in the solver's call**, where box2d-as moved it, made no measurable difference here: the 3D
+  narrow phase is long enough to hide the rebuild. It stays in the narrow phase's call.
+- The trace keeps a span per stage per worker; part 0's now ends before it waits for the others' blocks.
+- **Not run on the web yet.** The orchestrator spins on the page's thread as before, and only parts other than 0
+  call `atomic.wait`. bench/web's parallel runs in Chrome and WebKit should pass before this ships to the page.
+
+Gates on rive master at 5d0e608da3 (rasc, rive-cli and a wamrc built from its WAMR patches): verify/run.sh 29 of 29
+on the SIMD artifact, verify/traj.sh --large 13 of 13 on the scalar and SIMD artifacts, verify/threads.sh --large on
+parallel calls 65 of 65 (1, 2, 4 and 8 parts and the default), and pyramid and chains on workers and jobs at 1, 1
+serialized and 4 lanes, 12 of 12.
+
+bench/threads reads its options blob through `BlobAsset.toArrayBuffer`, which rive master needs since rive#15736.
+
 ## Parallel calls on master (2026-10-28)
 
 Parallel calls landed on rive master as 4a861ff147 (#15105), so the backend is now part of lib and of every build:
