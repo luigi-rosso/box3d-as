@@ -6,33 +6,17 @@
 import { Parallel, Part } from "rive/parallel";
 import { formatFixed } from "rive/format";
 
-import { b3GetMillisecondsAndReset, b3GetTicks, b3Ticks } from "./core";
 import { b3SetBitCountAndClear } from "./bitset";
 import { b3GetIdCapacity } from "./id_pool";
-import { B3_OVERFLOW_INDEX } from "./constraint_graph";
-import {
-	b3PrepareContacts_Overflow,
-	b3WarmStartContacts_Overflow,
-	b3PushContacts_Overflow,
-	b3SolveContacts_Overflow,
-	b3ApplyRestitution_Overflow,
-	b3StoreImpulses_Overflow,
-} from "./contact_solver";
-import {
-	b3PrepareJoints_Overflow,
-	b3WarmStartJoints_Overflow,
-	b3SolveJoints_Overflow,
-} from "./joint";
 import { b3PrepareCompoundContacts } from "./contact";
 import { b3ReserveMeshScratchForWorkers } from "./mesh_contact";
 import {
-	b3ExecuteBlock,
 	b3FinalizeBodiesTask,
 	b3FinishParallelFinalize,
 	b3PrepareParallelContinuous,
 	b3SetLaneFinalize,
 	b3SetLaneSolve,
-	b3SolverStage,
+	b3SolverWorker,
 	b3StepContext,
 } from "./solver";
 import {
@@ -61,7 +45,6 @@ import {
 	b3SpanBegin,
 	b3SpanEnd,
 	b3TraceRowAt,
-	b3TraceStageKind,
 	b3_traceCollide,
 	b3_traceFinalize,
 	b3_tracePairs,
@@ -86,165 +69,9 @@ export const b3_parallelStats = new b3ParallelStats();
 // The most parts a call runs on
 let s_partLimit = B3_MAX_WORKERS;
 
-// Runs one stage's blocks on whichever parts claim them, then waits for every part, as C's main thread waits for
-// the stage's completion count.
-function b3RunStage(part: Part, stage: b3SolverStage, context: b3StepContext): void {
-	let blockCount = stage.blockCount;
-	if (blockCount == 0) {
-		return;
-	}
-
-	let blocks = stage.blocks;
-	let workerIndex = part.index;
-	let trace = b3TraceRowAt(workerIndex);
-	let traceBegin = b3SpanBegin(trace);
-	for (let i = part.claim(blockCount, 1); i < blockCount; i = part.claim(blockCount, 1)) {
-		b3ExecuteBlock(stage, context, blocks[i].block, workerIndex);
-	}
-	b3SpanEnd(trace, b3TraceStageKind(stage.type), traceBegin);
-	part.sync();
-}
-
-// C's single threaded overflow work runs on the main thread between stages while the workers spin
-const OVERFLOW_PREPARE: i32 = 0;
-const OVERFLOW_WARM_START: i32 = 1;
-const OVERFLOW_SOLVE: i32 = 2;
-const OVERFLOW_RELAX: i32 = 3;
-const OVERFLOW_RESTITUTION: i32 = 4;
-const OVERFLOW_STORE: i32 = 5;
-
-function b3RunOverflow(part: Part, context: b3StepContext, kind: i32, hasOverflow: bool): void {
-	if (hasOverflow == false) {
-		return;
-	}
-
-	if (part.index == 0) {
-		if (kind == OVERFLOW_PREPARE) {
-			b3PrepareJoints_Overflow(context);
-			b3PrepareContacts_Overflow(context);
-		} else if (kind == OVERFLOW_WARM_START) {
-			b3WarmStartJoints_Overflow(context);
-			b3WarmStartContacts_Overflow(context);
-		} else if (kind == OVERFLOW_SOLVE) {
-			b3SolveJoints_Overflow(context, true);
-			b3PushContacts_Overflow(context);
-		} else if (kind == OVERFLOW_RELAX) {
-			b3SolveJoints_Overflow(context, false);
-			b3SolveContacts_Overflow(context);
-		} else if (kind == OVERFLOW_RESTITUTION) {
-			b3ApplyRestitution_Overflow(context);
-		} else {
-			b3StoreImpulses_Overflow(context);
-		}
-	}
-	part.sync();
-}
-
-// b3SolverTask's orchestrator walk, run by every part: the stages in C's order with a sync after each
+// C's solver task with a part as each worker: part 0 orchestrates the stages and the others claim their blocks
 @parallel.inplace export function b3ParallelSolverTask(part: Part, context: b3StepContext): void {
-	let activeColorCount = context.activeColorCount;
-	let stages = context.stages;
-	let overflow = context.graph.colors[B3_OVERFLOW_INDEX];
-	let hasOverflow = overflow.contacts.length > 0 || overflow.jointSims.length > 0;
-	let world = context.world;
-
-	// C's main thread times the stages; here part 0 is the main lane
-	let main = part.index == 0;
-	let ticks = b3Ticks();
-	ticks.value = main ? b3GetTicks() : 0;
-
-	let stageIndex = 0;
-
-	// Prepare joints, convex contacts and mesh contacts
-	b3RunStage(part, stages[stageIndex], context);
-	stageIndex += 1;
-	b3RunStage(part, stages[stageIndex], context);
-	stageIndex += 1;
-	b3RunStage(part, stages[stageIndex], context);
-	stageIndex += 1;
-
-	b3RunOverflow(part, context, OVERFLOW_PREPARE, hasOverflow);
-	if (main) {
-		world.profile.prepareConstraints += b3GetMillisecondsAndReset(ticks.value);
-	}
-
-	let subStepCount = context.subStepCount;
-	for (let subStepIndex = 0; subStepIndex < subStepCount; ++subStepIndex) {
-		let iterationStageIndex = stageIndex;
-
-		// Integrate velocities
-		b3RunStage(part, stages[iterationStageIndex], context);
-		iterationStageIndex += 1;
-		if (main) {
-			world.profile.integrateVelocities += b3GetMillisecondsAndReset(ticks.value);
-		}
-
-		// Warm start constraints
-		b3RunOverflow(part, context, OVERFLOW_WARM_START, hasOverflow);
-		for (let colorIndex = 0; colorIndex < activeColorCount; ++colorIndex) {
-			b3RunStage(part, stages[iterationStageIndex], context);
-			iterationStageIndex += 1;
-		}
-		if (main) {
-			world.profile.warmStart += b3GetMillisecondsAndReset(ticks.value);
-		}
-
-		// Solve constraints, ITERATIONS is 1
-		b3RunOverflow(part, context, OVERFLOW_SOLVE, hasOverflow);
-		for (let colorIndex = 0; colorIndex < activeColorCount; ++colorIndex) {
-			b3RunStage(part, stages[iterationStageIndex], context);
-			iterationStageIndex += 1;
-		}
-		if (main) {
-			world.profile.solveImpulses += b3GetMillisecondsAndReset(ticks.value);
-		}
-
-		// Integrate positions
-		b3RunStage(part, stages[iterationStageIndex], context);
-		iterationStageIndex += 1;
-		if (main) {
-			world.profile.integratePositions += b3GetMillisecondsAndReset(ticks.value);
-		}
-
-		// Relax constraints, RELAX_ITERATIONS is 1
-		b3RunOverflow(part, context, OVERFLOW_RELAX, hasOverflow);
-		for (let colorIndex = 0; colorIndex < activeColorCount; ++colorIndex) {
-			b3RunStage(part, stages[iterationStageIndex], context);
-			iterationStageIndex += 1;
-		}
-		if (main) {
-			world.profile.relaxImpulses += b3GetMillisecondsAndReset(ticks.value);
-		}
-	}
-
-	stageIndex += 1 + activeColorCount + activeColorCount + 1 + activeColorCount;
-
-	let restitutionIterations = context.world.restitutionIterations;
-	if (restitutionIterations > 0 && context.anyRestitution.value != 0) {
-		for (let j = 0; j < restitutionIterations; ++j) {
-			b3RunOverflow(part, context, OVERFLOW_RESTITUTION, hasOverflow);
-
-			let iterationStageIndex = stageIndex;
-			for (let colorIndex = 0; colorIndex < activeColorCount; ++colorIndex) {
-				b3RunStage(part, stages[iterationStageIndex], context);
-				iterationStageIndex += 1;
-			}
-		}
-		if (main) {
-			world.profile.restitution += b3GetMillisecondsAndReset(ticks.value);
-		}
-	}
-
-	stageIndex += activeColorCount;
-
-	// Store impulses
-	b3RunOverflow(part, context, OVERFLOW_STORE, hasOverflow);
-	b3RunStage(part, stages[stageIndex], context);
-	stageIndex += 1;
-	b3RunStage(part, stages[stageIndex], context);
-	if (main) {
-		world.profile.storeImpulses += b3GetMillisecondsAndReset(ticks.value);
-	}
+	b3SolverWorker(context, part.index);
 }
 
 function b3ParallelSolve(context: b3StepContext): bool {
@@ -393,7 +220,8 @@ unsafe function b3ParallelFinalize(context: b3StepContext, bodyCount: i32): bool
 	return true;
 }
 
-// b3UpdateBroadPhasePairs' two parallel fors, the cross tree seeds and then the moved siblings of the dynamic tree
+// b3UpdateBroadPhasePairs' two parallel fors as one claim loop, so the parts never wait for each other: first the
+// cross tree seeds, one each, then the moved siblings of the dynamic tree in blocks of selfBlockSize
 @parallel.inplace export function b3ParallelPairsTask(
 	part: Part,
 	world: b3World,
@@ -405,15 +233,14 @@ unsafe function b3ParallelFinalize(context: b3StepContext, bodyCount: i32): bool
 	let workerIndex = part.index;
 	let trace = b3TraceRowAt(workerIndex);
 	let traceBegin = b3SpanBegin(trace);
-	for (let i = part.claim(crossCount, 1); i < crossCount; i = part.claim(crossCount, 1)) {
-		b3CrossPairsTask(i, i + 1, workerIndex, crossContext);
-	}
-	b3SpanEnd(trace, b3_tracePairs, traceBegin);
-	part.sync();
-
-	traceBegin = b3SpanBegin(trace);
-	for (let start = part.claim(selfCount, selfBlockSize); start < selfCount; start = part.claim(selfCount, selfBlockSize)) {
-		b3SelfPairsTask(start, min(start + selfBlockSize, selfCount), workerIndex, world);
+	let taskCount = crossCount + (selfCount + selfBlockSize - 1) / selfBlockSize;
+	for (let i = part.claim(taskCount, 1); i < taskCount; i = part.claim(taskCount, 1)) {
+		if (i < crossCount) {
+			b3CrossPairsTask(i, i + 1, workerIndex, crossContext);
+		} else {
+			let start = (i - crossCount) * selfBlockSize;
+			b3SelfPairsTask(start, min(start + selfBlockSize, selfCount), workerIndex, world);
+		}
 	}
 	b3SpanEnd(trace, b3_tracePairs, traceBegin);
 }

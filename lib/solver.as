@@ -428,6 +428,9 @@ export class b3StepContext {
 	// Race flag claimed by whichever runner reaches b3SolverTask with workerIndex 0 first.
 	mainClaimed: b3AtomicInt = b3AtomicInt();
 
+	// How many workers sleep on the sync bits, which only the parts of a parallel call do
+	sleepingWorkers: b3AtomicInt = b3AtomicInt();
+
 	constructor(world: b3World) {
 		this.world = world;
 		this.graph = world.constraintGraph;
@@ -474,40 +477,94 @@ export function b3MakeSoft(hertz: f32, zeta: f32, h: f32): b3Softness {
 const ITERATIONS: i32 = 1;
 const RELAX_ITERATIONS: i32 = 1;
 
-// Single threaded stand-ins for the C atomics, kept so the synchronization code reads as in C.
-@inline function b3AtomicLoadInt(a: b3AtomicInt): i32 {
-	return a.value;
+// C's atomics, on the value's address. The parts of a parallel call run them as atomics; elsewhere one thread runs
+// the step and they are a plain read and write.
+@inline unsafe function b3AtomicLoadInt(address: usize): i32 {
+	return Parallel.inPart() ? atomic.load<i32>(address) : load<i32>(address);
 }
 
-@inline function b3AtomicStoreInt(a: ref b3AtomicInt, value: i32): void {
-	a.value = value;
+@inline unsafe function b3AtomicStoreInt(address: usize, value: i32): void {
+	if (Parallel.inPart()) {
+		atomic.store<i32>(address, value);
+	} else {
+		store<i32>(address, value);
+	}
 }
 
-@inline function b3AtomicFetchAddInt(a: ref b3AtomicInt, increment: i32): i32 {
-	let value = a.value;
-	a.value = value + increment;
+@inline unsafe function b3AtomicFetchAddInt(address: usize, increment: i32): i32 {
+	if (Parallel.inPart()) {
+		return atomic.add<i32>(address, increment);
+	}
+
+	let value = load<i32>(address);
+	store<i32>(address, value + increment);
 	return value;
 }
 
-@inline function b3AtomicCompareExchangeInt(a: ref b3AtomicInt, expected: i32, desired: i32): bool {
-	if (a.value == expected) {
-		a.value = desired;
+@inline unsafe function b3AtomicCompareExchangeInt(address: usize, expected: i32, desired: i32): bool {
+	if (Parallel.inPart()) {
+		return atomic.cmpxchg<i32>(address, expected, desired) == expected;
+	}
+
+	if (load<i32>(address) == expected) {
+		store<i32>(address, desired);
 		return true;
 	}
 	return false;
 }
 
-@inline function b3AtomicLoadU32(a: b3AtomicU32): u32 {
-	return a.value;
+@inline unsafe function b3AtomicLoadU32(address: usize): u32 {
+	return <u32>b3AtomicLoadInt(address);
 }
 
-@inline function b3AtomicStoreU32(a: ref b3AtomicU32, value: u32): void {
-	a.value = value;
+@inline unsafe function b3AtomicStoreU32(address: usize, value: u32): void {
+	b3AtomicStoreInt(address, <i32>value);
+}
+
+// Where C's atomics live: in the step context, in a stage and in a sync block
+const SC_SYNCBITS = offsetof<b3StepContext>("atomicSyncBits");
+const SC_MAINCLAIMED = offsetof<b3StepContext>("mainClaimed");
+const SC_BULLETBODYCOUNT = offsetof<b3StepContext>("bulletBodyCount");
+const SC_ANYRESTITUTION = offsetof<b3StepContext>("anyRestitution");
+const SC_SLEEPINGWORKERS = offsetof<b3StepContext>("sleepingWorkers");
+
+@inline unsafe function b3StepAtomic(context: b3StepContext, offset: usize): usize {
+	return changetype<usize>(context) + offset;
+}
+
+@inline unsafe function b3CompletionCount(stage: b3SolverStage): usize {
+	return changetype<usize>(stage) + offsetof<b3SolverStage>("completionCount");
+}
+
+@inline unsafe function b3SyncIndex(blocks: StaticArray<b3SyncBlock>, index: i32): usize {
+	return changetype<usize>(blocks) + <usize>index * sizeof<b3SyncBlock>() + offsetof<b3SyncBlock>("syncIndex");
 }
 
 function b3Pause(): void {}
 
-function b3Yield(): void {}
+// C yields the core to another thread here. A part of a parallel call cannot, so a worker that has yielded this many
+// times in one wait sleeps on the sync bits instead, until b3PublishSyncBits wakes it or this long has passed, in ns.
+const B3_WORKER_SPIN_YIELDS: i32 = 2048;
+const B3_WORKER_SLEEP_NANOS: i64 = 1000000;
+
+@inline unsafe function b3YieldWorker(context: b3StepContext, syncBits: u32, yieldCount: i32): void {
+	if (Parallel.inPart() && yieldCount > B3_WORKER_SPIN_YIELDS) {
+		let sleepingWorkers = b3StepAtomic(context, SC_SLEEPINGWORKERS);
+		atomic.add<i32>(sleepingWorkers, 1);
+		atomic.wait<u32>(b3StepAtomic(context, SC_SYNCBITS), syncBits, B3_WORKER_SLEEP_NANOS);
+		atomic.sub<i32>(sleepingWorkers, 1);
+	}
+}
+
+// C's store of the sync bits, which here also wakes the workers that sleep on them. A worker that is about to sleep
+// on the old bits finds them changed and does not.
+@inline unsafe function b3PublishSyncBits(context: b3StepContext, syncBits: u32): void {
+	let address = b3StepAtomic(context, SC_SYNCBITS);
+	b3AtomicStoreU32(address, syncBits);
+	if (Parallel.inPart() && atomic.load<i32>(b3StepAtomic(context, SC_SLEEPINGWORKERS)) != 0) {
+		atomic.notify(address, -1);
+	}
+}
 
 class b3WorkerContext {
 	context: b3StepContext;
@@ -1410,13 +1467,7 @@ export unsafe function b3FinalizeBodiesTask(startIndex: i32, endIndex: i32, work
 				// Store in fast array for the continuous collision stage
 				// This is deterministic because the order of TOI sweeps doesn't matter
 				if ((simFlags & b3_isBullet) != 0) {
-					let bulletIndex: i32;
-					if (Parallel.inPart()) {
-						let count = changetype<usize>(stepContext) + offsetof<b3StepContext>("bulletBodyCount");
-						bulletIndex = atomic.add<i32>(count + offsetof<b3AtomicInt>("value"), 1);
-					} else {
-						bulletIndex = b3AtomicFetchAddInt(stepContext.bulletBodyCount, 1);
-					}
+					let bulletIndex = b3AtomicFetchAddInt(b3StepAtomic(stepContext, SC_BULLETBODYCOUNT), 1);
 					stepContext.bulletBodies[bulletIndex] = simIndex;
 				} else if (Parallel.inPart()) {
 					if (parallelContinuous) {
@@ -1559,7 +1610,7 @@ function b3InitBlocks(
 		b.block.count = <u16>blockSize;
 		b.block.blockType = blockType;
 		b.block.colorIndex = colorIndex;
-		b3AtomicStoreInt(b.syncIndex, 0);
+		b3AtomicStoreInt(b3SyncIndex(blocks, offset + i), 0);
 	}
 
 	// The last block may not be full
@@ -1580,7 +1631,7 @@ function b3InitStage(
 	stage.blocks = blocks;
 	stage.blockCount = blockCount;
 	stage.colorIndex = colorIndex;
-	b3AtomicStoreInt(stage.completionCount, 0);
+	b3AtomicStoreInt(b3CompletionCount(stage), 0);
 	return stageIndex + 1;
 }
 
@@ -1731,7 +1782,7 @@ function b3ExecuteStage(
 
 	let blockIndex = startIndex;
 	for (let i = 0; i < blockCount; ++i) {
-		if (b3AtomicCompareExchangeInt(blocks[blockIndex].syncIndex, previousSyncIndex, syncIndex)) {
+		if (b3AtomicCompareExchangeInt(b3SyncIndex(blocks, blockIndex), previousSyncIndex, syncIndex)) {
 			B3_ASSERT(completedCount < blockCount);
 
 			// Pass the descriptor by value -- the wrapping b3SyncBlock holds the atomic
@@ -1746,7 +1797,7 @@ function b3ExecuteStage(
 		}
 	}
 
-	b3AtomicFetchAddInt(stage.completionCount, completedCount);
+	b3AtomicFetchAddInt(b3CompletionCount(stage), completedCount);
 }
 
 // Execute a stage on worker 0 (main thread).
@@ -1762,8 +1813,9 @@ function b3ExecuteMainStage(stage: b3SolverStage, context: b3StepContext, syncBi
 
 	if (blockCount == 1) {
 		b3ExecuteBlock(stage, context, stage.blocks[0].block, workerIndex);
+		b3SpanEnd(trace, b3TraceStageKind(stage.type), traceBegin);
 	} else {
-		b3AtomicStoreU32(context.atomicSyncBits, syncBits);
+		b3PublishSyncBits(context, syncBits);
 
 		let syncIndex = <i32>((syncBits >> 16) & 0xffff);
 		B3_ASSERT(syncIndex > 0);
@@ -1771,14 +1823,17 @@ function b3ExecuteMainStage(stage: b3SolverStage, context: b3StepContext, syncBi
 
 		b3ExecuteStage(stage, context, previousSyncIndex, syncIndex, workerIndex);
 
+		// The span is this worker's own blocks, not the wait for the others
+		b3SpanEnd(trace, b3TraceStageKind(stage.type), traceBegin);
+
 		// Spin waiting for thieves to finish
-		while (b3AtomicLoadInt(stage.completionCount) != blockCount) {
+		let completionCount = b3CompletionCount(stage);
+		while (b3AtomicLoadInt(completionCount) != blockCount) {
 			b3Pause();
 		}
 
-		b3AtomicStoreInt(stage.completionCount, 0);
+		b3AtomicStoreInt(completionCount, 0);
 	}
-	b3SpanEnd(trace, b3TraceStageKind(stage.type), traceBegin);
 }
 
 @inline function b3SyncBits(syncIndex: i32, stageIndex: i32): u32 {
@@ -1787,8 +1842,11 @@ function b3ExecuteMainStage(stage: b3SolverStage, context: b3StepContext, syncBi
 
 // Parallel solver task
 function b3SolverTask(workerContext: b3WorkerContext): void {
-	let workerIndex = workerContext.workerIndex;
-	let context = workerContext.context;
+	b3SolverWorker(workerContext.context, workerContext.workerIndex);
+}
+
+// b3SolverTask for worker workerIndex of the step, which a part of a parallel call runs as its own
+export function b3SolverWorker(context: b3StepContext, workerIndex: i32): void {
 	let activeColorCount = context.activeColorCount;
 	let stages = context.stages;
 	let world = context.world;
@@ -1799,7 +1857,7 @@ function b3SolverTask(workerContext: b3WorkerContext): void {
 		// out of order, has fewer threads than workerCount, or runs the task synchronously
 		// inside enqueueTaskFcn. Whoever wins the CAS becomes the orchestrator; the loser
 		// returns and lets the spinner-only path handle workers >0.
-		if (b3AtomicCompareExchangeInt(context.mainClaimed, 0, 1) == false) {
+		if (b3AtomicCompareExchangeInt(b3StepAtomic(context, SC_MAINCLAIMED), 0, 1) == false) {
 			return;
 		}
 
@@ -1931,7 +1989,7 @@ function b3SolverTask(workerContext: b3WorkerContext): void {
 		stageIndex += 1 + activeColorCount + ITERATIONS * activeColorCount + 1 + RELAX_ITERATIONS * activeColorCount;
 
 		let restitutionIterations = context.world.restitutionIterations;
-		if (restitutionIterations > 0 && b3AtomicLoadInt(context.anyRestitution) != 0) {
+		if (restitutionIterations > 0 && b3AtomicLoadInt(b3StepAtomic(context, SC_ANYRESTITUTION)) != 0) {
 			for (let j = 0; j < restitutionIterations; ++j) {
 				b3ApplyRestitution_Overflow(context);
 
@@ -1966,7 +2024,7 @@ function b3SolverTask(workerContext: b3WorkerContext): void {
 		world.profile.storeImpulses += b3GetMillisecondsAndReset(ticks.value);
 
 		// Signal workers to finish
-		b3AtomicStoreU32(context.atomicSyncBits, UINT32_MAX);
+		b3PublishSyncBits(context, UINT32_MAX);
 
 		B3_ASSERT(stageIndex == context.stageCount);
 		return;
@@ -1978,18 +2036,21 @@ function b3SolverTask(workerContext: b3WorkerContext): void {
 		// Spin until main thread bumps changes the sync bits. This can waste significant time overall, but it is necessary for
 		// parallel simulation with graph coloring.
 		// todo improve this spinner
-		let syncBits: u32 = b3AtomicLoadU32(context.atomicSyncBits);
+		let syncBitsAddress = b3StepAtomic(context, SC_SYNCBITS);
+		let syncBits: u32 = b3AtomicLoadU32(syncBitsAddress);
 		let spinCount = 0;
+		let yieldCount = 0;
 		while (syncBits == lastSyncBits) {
 			if (spinCount > 5) {
-				b3Yield();
+				yieldCount += 1;
+				b3YieldWorker(context, lastSyncBits, yieldCount);
 				spinCount = 0;
 			} else {
 				b3Pause();
 				b3Pause();
 				spinCount += 1;
 			}
-			syncBits = b3AtomicLoadU32(context.atomicSyncBits);
+			syncBits = b3AtomicLoadU32(syncBitsAddress);
 		}
 
 		if (syncBits == UINT32_MAX) {
@@ -2006,7 +2067,10 @@ function b3SolverTask(workerContext: b3WorkerContext): void {
 		let previousSyncIndex = syncIndex - 1;
 
 		let stage = stages[stageIndex];
+		let trace = b3TraceRowAt(workerIndex);
+		let traceBegin = b3SpanBegin(trace);
 		b3ExecuteStage(stage, context, previousSyncIndex, syncIndex, workerIndex);
+		b3SpanEnd(trace, b3TraceStageKind(stage.type), traceBegin);
 
 		lastSyncBits = syncBits;
 	}
@@ -2190,7 +2254,7 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 		setupTicks.value = b3GetTicks();
 
 		// Prepare buffers for continuous collision (fast bodies)
-		b3AtomicStoreInt(stepContext.bulletBodyCount, 0);
+		b3AtomicStoreInt(b3StepAtomic(stepContext, SC_BULLETBODYCOUNT), 0);
 		let scratch = b3_solverScratch;
 		scratch.bulletBodies = b3ReserveIndices(scratch.bulletBodies, awakeBodyCount);
 		stepContext.bulletBodies = scratch.bulletBodies;
@@ -2639,8 +2703,9 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 		stepContext.wideMeshManifoldStarts = meshManifoldStarts;
 		stepContext.meshPrepareSpans = meshPrepareSpans;
 		stepContext.jointPrepareSpans = jointPrepareSpans;
-		b3AtomicStoreU32(stepContext.atomicSyncBits, 0);
-		b3AtomicStoreInt(stepContext.mainClaimed, 0);
+		b3AtomicStoreU32(b3StepAtomic(stepContext, SC_SYNCBITS), 0);
+		b3AtomicStoreInt(b3StepAtomic(stepContext, SC_MAINCLAIMED), 0);
+		b3AtomicStoreInt(b3StepAtomic(stepContext, SC_SLEEPINGWORKERS), 0);
 
 		world.profile.solverSetup = b3GetMillisecondsAndReset(setupTicks.value);
 
@@ -2652,7 +2717,7 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 		let laneSolve = b3_laneSolve;
 		if (laneSolve != null && laneSolve(stepContext)) {
 			// The lanes ran every stage, so the caller's b3SolverTask below finds the orchestrator claimed
-			b3AtomicStoreInt(stepContext.mainClaimed, 1);
+			b3AtomicStoreInt(b3StepAtomic(stepContext, SC_MAINCLAIMED), 1);
 			workerCount = 0;
 		}
 		for (let i = 0; i < workerCount; ++i) {
@@ -2894,7 +2959,7 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 		world.profile.refit = b3GetMilliseconds(refitTicks);
 	}
 
-	let bulletBodyCount = b3AtomicLoadInt(stepContext.bulletBodyCount);
+	let bulletBodyCount = b3AtomicLoadInt(b3StepAtomic(stepContext, SC_BULLETBODYCOUNT));
 	if (bulletBodyCount > 0) {
 		let bulletTicks = b3GetTicks();
 
@@ -2957,7 +3022,7 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 	}
 
 	stepContext.bulletBodies = b3_emptyIndices;
-	b3AtomicStoreInt(stepContext.bulletBodyCount, 0);
+	b3AtomicStoreInt(b3StepAtomic(stepContext, SC_BULLETBODYCOUNT), 0);
 
 	// Report sensor hits. This may include bullets sensor hits.
 	{
