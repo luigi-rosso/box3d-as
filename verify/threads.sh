@@ -76,6 +76,12 @@ for s in "${scenes[@]}"; do
 					r="RESULT $label 0 fail Parallel.size() is ${size:-missing}"
 					status=1
 				fi
+				# A world with too few workers steps serially and passes on hashes alone
+				solves=$(sed -n 's/.* parSolves=\([0-9]*\).*/\1/p' "$log" | head -1)
+				if [ $((tasks & 2)) -ne 0 ] && [ "${solves:-0}" -le 0 ]; then
+					r="RESULT $label 0 fail no solver call ran on parts"
+					status=1
+				fi
 				echo "$r"
 				results+=("$r")
 				[ $status -eq 0 ] || failed=$((failed + 1))
