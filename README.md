@@ -134,7 +134,7 @@ exactness, with no tolerance.
 | `verify/run.sh` | each module's outputs against a C driver over fixed and seeded random inputs, every value's bits | 29 modules, about 69 million values |
 | `verify/traj.sh --large` | every body's state, the mover and the world counters, every step, against a native recording | 13 scenes |
 | `verify/threads.sh --large` | the per step state hash under rive-cli on parallel calls at 1, 2, 4 and 8 parts and the default, and on lanes at 1, 2, 4 and 8 on workers and on jobs | 195 runs |
-| `verify/parts.sh` | parallel calls on copies with one edit each: part 0 runs no block, so the other parts must run them all; a sync every 8 polls of a stage wait; a trap in a worker and in part 0, which must end the call | 2 scenes, 14 runs |
+| `verify/parts.sh` | parallel calls on edited copies: part 0 runs no block, so the other parts must be able to run them all; a sync every 8 polls of a stage wait; a trap in a worker and in part 0, which must end the call. It does not hold speed | 2 scenes, 12 runs, and 2 trap runs |
 | `bench/web/verify.sh` | the state hash of every step on V8, for the port and for C Box3D on wasm | 13 scenes, 6 builds |
 | `examples/check.sh` | the examples run and show what they say, interpreted and on AOT | 8 cases |
 
@@ -237,7 +237,9 @@ Parallel calls scale like C's threads, natively and on the web: natively at 1.11
 in Chrome at 1.03 to 1.14x C's pthreads build on large_pyramid and many_bodies (3.5 and 4.6x at 8 parts), where lanes
 left the port 4.4 to 4.6x behind. mesh_drop and village stay 1.2 to 1.3x behind in both places, in the port's own
 parallel step. Every run matched native on every step it checked, in Chrome, Firefox and WebKit too, and without cross
-origin isolation the same bake runs serially and stays bit exact.
+origin isolation the same bake runs serially and stays bit exact. These columns predate the solver's change of scheme
+(`notes/threading.md`, 2026-11-15), which moved the native step between 11% faster and 3% slower on a machine with
+free cores.
 
 Reproduce: `THREADS=1 bench/web/build.sh`, then `bench/web/parallel.mjs` (the commands and the web harness builds are
 in `notes/web.md`), and `bench/threads/run.sh` natively.
