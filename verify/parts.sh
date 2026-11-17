@@ -15,9 +15,11 @@
 # end the call, pass.
 here="$(cd "$(dirname "$0")" && pwd)"
 project="$here/../bench/threads"
-# The scalar artifact runs from another directory, where the checks below would not find its log, and the edits
-# are to the solver's task
-unset WASM_SIMD TASKS
+# The caller's would take the runs off the solver's task, or to another directory's log
+unset TASKS WASM_SIMD
+case " $PARTS " in
+	*" 1 "*) echo "PARTS cannot hold 1: with part 0 running no block, a step on one part never ends" >&2; exit 2 ;;
+esac
 scenes=("$@")
 [ ${#scenes[@]} -gt 0 ] || scenes=(pyramid large_pyramid)
 "$project/sync.sh"

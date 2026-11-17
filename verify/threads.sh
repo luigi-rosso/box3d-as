@@ -75,7 +75,7 @@ for s in "${scenes[@]}"; do
 				status=$?
 				size=$(sed -n 's/.*BENCH parallel size=\([0-9]*\).*/\1/p' "$log" | head -1)
 				# A run that stopped before it logged its size keeps what stopped it
-				if [ "$p" != default ] && [ "$size" != "$p" ] && { [ -n "$size" ] || [ $status -eq 0 ]; }; then
+				if { [ -z "$size" ] && [ $status -eq 0 ]; } || { [ "$p" != default ] && [ -n "$size" ] && [ "$size" != "$p" ]; }; then
 					r="RESULT $label 0 fail Parallel.size() is ${size:-missing}"
 					status=1
 				fi
