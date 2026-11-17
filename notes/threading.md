@@ -62,9 +62,12 @@ SIMD artifact), mean ms per step, min over the rounds:
 - **With the cores contended and more parts than free cores, the step is a third** (12.0 to 4.0 ms, 10.3 to 3.6),
   all of it in the solver stages. Other work came back during those rounds and took the load to 360, so the sizes
   are that session's; the day before, with the busy loops alone, they were 8.1 to 3.7 and 7.1 to 3.2.
-- **Otherwise it is 1 to 8% faster or the same**: at 4 parts beside the busy loops the two are within 4% either way.
-- No run here made a stage sync, the contended ones included, and the lib without the stage sync and the idle limit
-  measured within 4% of this one either way at every row.
+- **Otherwise the step is 1 to 8% faster or the same**: at 4 parts beside the busy loops the two are within 4%
+  either way. That is the whole step. The solver stages alone are faster on large_pyramid, 8 to 11% at 4 and 8
+  parts, and slower on village, whose stages are short: 3, 7 and 10% at 2, 4 and 8 parts (0.47 to 0.52 ms at 8).
+- No run here made a stage sync, the contended ones included, but the stage sync and the idle limit are not free:
+  the lib without them (6c94e48) stepped 1 to 4% faster than this one in the six rows of 2 or more parts at the
+  lower load, and its solver stages were 7 to 8% faster on village at 4 and 8 parts.
 - **Rebuilding the trees in the solver's call**, where box2d-as moved it, made no measurable difference here: the 3D
   narrow phase is long enough to hide the rebuild. It stays in the narrow phase's call.
 - The trace keeps part 0's span per stage, which now ends before it waits for the others' blocks. A worker has a
@@ -75,8 +78,9 @@ SIMD artifact), mean ms per step, min over the rounds:
   a page without isolation, 28 of 28 runs in each browser, and no run hung. The orchestrator spins on the page's
   thread as before, and only parts other than 0 call `atomic.wait`.
 
-Gates on this lib, on rive master at 5d0e608da3 (rasc, rive-cli and a wamrc built from its WAMR patches), with the
-machine at a load of 200 to 600 from other work: verify/run.sh 29 of 29 on the SIMD artifact, verify/traj.sh --large
+Gates on this lib, on rive master at 5d0e608da3 (rasc, rive-cli and a wamrc built from its WAMR patches), the
+threaded ones twice and the first time with the machine at a load of 200 to 600 from other work: verify/run.sh 29 of
+29 on the SIMD artifact, verify/traj.sh --large
 13 of 13 on the scalar and SIMD artifacts, verify/threads.sh --large on parallel calls 65 of 65 (1, 2, 4 and 8 parts
 and the default), pyramid and chains on workers and jobs at 1, 1 serialized and 4 lanes, 12 of 12, and
 verify/parts.sh on pyramid and large_pyramid, 14 of 14. A build that syncs on every poll of a stage wait also
