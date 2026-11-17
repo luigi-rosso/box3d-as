@@ -70,11 +70,12 @@ for s in "${scenes[@]}"; do
 				log="$logs/run.log"
 				OPTIONS="SCENE=$define STEPS=$steps LANES=1 BACKEND=$b TASKS=$tasks HASHLOG=1" \
 					"$run_dir/run1.sh" 900 --bench=$((steps + 10)) $threads > "$log" 2>&1
+				[ $? -ne 142 ] || echo "the run timed out after 900 s" >> "$log"
 				r=$(node "$here/threads.mjs" "$ref" "$log" "$label")
 				status=$?
 				size=$(sed -n 's/.*BENCH parallel size=\([0-9]*\).*/\1/p' "$log" | head -1)
-				if [ "$p" != default ] && [ "$size" != "$p" ]; then
-					r="RESULT $label 0 fail Parallel.size() is ${size:-missing}"
+				if [ "$p" != default ] && [ -n "$size" ] && [ "$size" != "$p" ]; then
+					r="RESULT $label 0 fail Parallel.size() is $size"
 					status=1
 				fi
 				# A world with too few workers steps serially and passes on hashes alone. A run with no result
@@ -98,6 +99,7 @@ for s in "${scenes[@]}"; do
 				log="$logs/run.log"
 				OPTIONS="SCENE=$define STEPS=$steps LANES=$l BACKEND=$b TASKS=$tasks HASHLOG=1 REPLICA=$replica" \
 					"$run_dir/run1.sh" 900 --bench=$((steps + 10)) --job-threads=8 --worker-threads=8 > "$log" 2>&1
+				[ $? -ne 142 ] || echo "the run timed out after 900 s" >> "$log"
 				r=$(node "$here/threads.mjs" "$ref" "$log" "$label")
 				status=$?
 				echo "$r"

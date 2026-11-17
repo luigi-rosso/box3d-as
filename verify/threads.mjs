@@ -41,7 +41,7 @@ for ( const line of fs.readFileSync( logFile, 'utf8' ).split( '\n' ) )
 		run.set( Number( m[1] ), Number( m[2] ) );
 	}
 }
-const problems = fs.readFileSync( logFile, 'utf8' ).split( '\n' ).filter( ( l ) => /trapped|failed|gave up| error /.test( l ) );
+const problems = fs.readFileSync( logFile, 'utf8' ).split( '\n' ).filter( ( l ) => /trapped|failed|gave up| error |timed out/.test( l ) );
 
 let compared = 0;
 let divergence = '-';
@@ -59,7 +59,8 @@ for ( let step = 0; step < native.length; ++step )
 	}
 	compared += 1;
 }
-if ( problems.length > 0 && divergence === '-' )
+// A problem says more than the step it stopped the run at
+if ( problems.length > 0 )
 {
 	divergence = problems[0].replace( /^.*?\] /, '' ).slice( 0, 120 );
 }
