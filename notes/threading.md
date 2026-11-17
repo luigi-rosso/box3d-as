@@ -34,7 +34,7 @@ finishes on part 0.
 
 This is slower to report a trap than a sync per stage was, which ended the call at the next stage, and how much
 depends on the tier, since 2^24 polls do, and on the machine's load. With a trap injected on large_pyramid at 4 and
-8 parts, at loads of 17 to 150: on AOT a worker's trap ends the call in 19 to 47 ms and part 0's in 0.65 to 0.76 s;
+8 parts, at loads of 17 to 35: on AOT a worker's trap ends the call in 19 to 38 ms and part 0's in 0.65 to 0.76 s;
 on the interpreter a worker's in 0.17 to 0.2 s and part 0's in about 0.1 s, where the first step alone takes 0.12 s
 and the host stops the other parts itself. A std accessor for the stop flag would let both wait loops poll it and
 report at once again.
@@ -55,12 +55,12 @@ artifact), mean ms per step, min over the rounds:
 | | | 2 | 2.52 | 2.50 |
 | | | 4 | 1.94 | 1.91 |
 | | | 8 | 1.63 | 1.59 |
-| load 9 to 22, 3 rounds | many_bodies | 2 | 4.33 | 4.29 |
-| | | 4 | 3.61 | 3.22 |
-| | | 8 | 2.00 | 1.90 |
-| | mesh_drop | 2 | 3.27 | 3.36 |
-| | | 4 | 2.13 | 2.14 |
-| | | 8 | 1.68 | 1.67 |
+| load 5 to 17, 5 rounds | many_bodies | 2 | 4.28 | 4.25 |
+| | | 4 | 2.57 | 2.54 |
+| | | 8 | 1.82 | 1.74 |
+| | mesh_drop | 2 | 2.93 | 2.89 |
+| | | 4 | 1.88 | 1.92 |
+| | | 8 | 1.43 | 1.56 |
 | 24 busy loops beside the bench, 2 rounds | large_pyramid | 4 | 4.06 | 4.16 |
 | | | 8 | 12.04 | 4.01 |
 | | village | 4 | 3.48 | 3.35 |
@@ -69,12 +69,13 @@ artifact), mean ms per step, min over the rounds:
 - **Beside 24 busy loops the step at 8 parts is a third** (12.0 to 4.0 ms, 10.3 to 3.6), all of it in the solver
   stages, and at 4 parts the two are within 4% either way. Other work came back during those rounds and took the
   load to 360, so the sizes are that session's.
-- **Otherwise the step is faster where the stages are long and the same where they are short**: 5 to 11% faster on
-  large_pyramid and many_bodies at 4 and 8 parts, within 3% either way on village and mesh_drop.
+- **Otherwise it depends on how long the stages are.** large_pyramid is 3 to 8% faster at every part count,
+  many_bodies 1 to 4% and village up to 2%. mesh_drop is 1% faster at 2 parts and slower above: 2% at 4 parts and 9%
+  at 8, 1.43 to 1.56 ms, in every one of the five rounds.
 - **The solver stages alone are slower where they are short**: on village 3, 7 and 10% at 2, 4 and 8 parts (0.47 to
-  0.52 ms at 8), on mesh_drop 2, 7 and 18% (0.48 to 0.56 ms at 8). On large_pyramid and many_bodies they are 8 to 13%
-  faster at 4 and 8 parts. An earlier build of the scheme had also read 4 to 8% behind on the step of those two
-  short scenes at 4 and 8 parts in one session.
+  0.52 ms at 8), on mesh_drop 8% at 4 parts and 26% at 8 (0.42 to 0.53 ms). On large_pyramid they are 8 to 11% faster
+  at 4 and 8 parts and on many_bodies 2 to 6%. An earlier build of the scheme had also read 3 to 8% behind on the
+  step of those two short scenes at 4 and 8 parts in one session.
 - No run here made a stage sync, the contended ones included, but the stage sync and the idle limit are not free:
   the lib without them (6c94e48) stepped 1 to 4% faster than this one in the six rows of large_pyramid and village
   at 2 or more parts, and its solver stages were 7 to 8% faster on village at 4 and 8 parts.
@@ -93,9 +94,9 @@ Gates on this lib, on rive master at 5d0e608da3 (rasc, rive-cli and a wamrc buil
 verify/run.sh 29 of 29 and verify/traj.sh --large 13 of 13, each on the scalar and SIMD artifacts,
 verify/threads.sh --large on parallel calls 65 of 65 (1, 2, 4 and 8 parts and the default), pyramid and chains on
 workers and jobs at 1, 1 serialized and 4 lanes, 12 of 12, and verify/parts.sh on pyramid and large_pyramid, 14 of
-14. The same lib had passed an earlier form of the threaded gates with the machine at a load of several hundred from
-other work, and a build that syncs on every poll of a stage wait passed the 11 scenes it was run on at 2, 4 and 8
-parts and the default, 44 of 44.
+14. The same lib had passed an earlier form of the threaded gates with the machine's load at several hundred, and a
+build that syncs on every poll of a stage wait passed the 11 scenes it was run on at 2, 4 and 8 parts and the
+default, 44 of 44.
 
 bench/threads reads its options blob through `BlobAsset.toArrayBuffer`, which rive master needs since rive#15736.
 

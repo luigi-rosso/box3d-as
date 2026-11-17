@@ -238,8 +238,7 @@ in Chrome at 1.03 to 1.14x C's pthreads build on large_pyramid and many_bodies (
 left the port 4.4 to 4.6x behind. mesh_drop and village stay 1.2 to 1.3x behind in both places, in the port's own
 parallel step. Every run matched native on every step it checked, in Chrome, Firefox and WebKit too, and without cross
 origin isolation the same bake runs serially and stays bit exact. These columns predate the solver's change of scheme
-(`notes/threading.md`, 2026-11-15), which moved the native step between 11% faster and 3% slower on a machine with
-free cores.
+(`notes/threading.md`, 2026-11-15).
 
 Reproduce: `THREADS=1 bench/web/build.sh`, then `bench/web/parallel.mjs` (the commands and the web harness builds are
 in `notes/web.md`), and `bench/threads/run.sh` natively.
