@@ -9,9 +9,10 @@
 # LANES="1 2 4 8" BACKENDS="3 2 1" (3 parallel calls, 2 workers, 1 jobs) TASKS=3 (1 collide, 2 solve, 3 both) pick the
 # runs; LANES=1 also runs the main lane's partition through the serialized replica path. Parallel calls take their
 # part count from the job pool, so backend 3 runs PARTS="1 2 4 8" instead, 1 being --parallel-safe, plus the default
-# pool. WASM_SIMD=off takes the scalar artifact.
+# pool. WASM_SIMD=off takes the scalar artifact. PROJECT names a copy of bench/threads to run as it is, which is how
+# verify/parts.sh runs its edited ones.
 here="$(cd "$(dirname "$0")" && pwd)"
-project="$here/../bench/threads"
+project=${PROJECT:-$here/../bench/threads}
 lanes=${LANES:-1 2 4 8}
 parts=${PARTS:-1 2 4 8 default}
 backends=${BACKENDS:-3 2 1}
@@ -35,7 +36,7 @@ scene_define() {
 	esac
 }
 
-"$project/sync.sh"
+[ -n "$PROJECT" ] || "$project/sync.sh"
 run_dir="$project"
 if [ "${WASM_SIMD:-on}" = off ]; then
 	# The scalar artifact bakes from a copy with wasmSimd: off, outside the project so the CLI does not compile it
@@ -76,9 +77,10 @@ for s in "${scenes[@]}"; do
 					r="RESULT $label 0 fail Parallel.size() is ${size:-missing}"
 					status=1
 				fi
-				# A world with too few workers steps serially and passes on hashes alone
+				# A world with too few workers steps serially and passes on hashes alone. A run with no result
+				# line keeps what stopped it.
 				solves=$(sed -n 's/.* parSolves=\([0-9]*\).*/\1/p' "$log" | head -1)
-				if [ $((tasks & 2)) -ne 0 ] && [ "${solves:-0}" -le 0 ]; then
+				if [ $((tasks & 2)) -ne 0 ] && [ -n "$solves" ] && [ "$solves" -le 0 ]; then
 					r="RESULT $label 0 fail no solver call ran on parts"
 					status=1
 				fi
