@@ -33,11 +33,10 @@ once the workers have, and part 0 can finish any step without them: one that par
 finishes on part 0.
 
 This is slower to report a trap than a sync per stage was, which ended the call at the next stage, and how much
-depends on the tier, since 2^24 polls do, and on the machine's load. With a trap injected with no step condition
-on large_pyramid at 4 and 8 parts, at loads of 17 to 35, from the bench's start line to the error: on AOT 19 to 38
-ms for a worker's trap and 0.73 to 0.76 s for part 0's; on the interpreter 0.17 to 0.2 s and 0.08 to 0.12 s, where
-the host stops the other parts itself. For scale, a first step that does not trap takes 15 ms on AOT and 0.12 s on
-the interpreter. A std accessor for the stop flag would let both wait loops poll it and report at once again.
+depends on the tier. With a trap injected with no step condition on large_pyramid at 4 and 8 parts, at loads of 17
+to 35, from the bench's start line to the error: on AOT 19 to 38 ms for a worker's trap and 0.73 to 0.76 s for part
+0's; on the interpreter 0.17 to 0.2 s and 0.08 to 0.12 s. A std accessor for the stop flag would let both wait
+loops poll it and report at once again.
 
 `verify/parts.sh` holds what parity cannot see, on edited copies of bench/threads: part 0 running no block (the
 other parts must run them all), a sync every 8 polls, and a trap in a worker and in part 0.
