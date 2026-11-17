@@ -33,11 +33,11 @@ once the workers have, and part 0 can finish any step without them: one that par
 finishes on part 0.
 
 This is slower to report a trap than a sync per stage was, which ended the call at the next stage, and how much
-depends on the tier, since 2^24 polls do, and on the machine's load. With a trap injected in the first step of
-large_pyramid at 4 and 8 parts, at loads of 17 to 35, from the start of the run to the error: on AOT 19 to 38 ms
-for a worker's trap and 0.73 to 0.76 s for part 0's; on the interpreter 0.17 to 0.2 s and about 0.1 s, where the
-host stops the other parts itself. The first step alone takes 15 ms of that on AOT and 0.12 s on the interpreter. A
-std accessor for the stop flag would let both wait loops poll it and report at once again.
+depends on the tier, since 2^24 polls do, and on the machine's load. With a trap injected with no step condition
+on large_pyramid at 4 and 8 parts, at loads of 17 to 35, from the bench's start line to the error: on AOT 19 to 38
+ms for a worker's trap and 0.73 to 0.76 s for part 0's; on the interpreter 0.17 to 0.2 s and 0.08 to 0.12 s, where
+the host stops the other parts itself. For scale, a first step that does not trap takes 15 ms on AOT and 0.12 s on
+the interpreter. A std accessor for the stop flag would let both wait loops poll it and report at once again.
 
 `verify/parts.sh` holds what parity cannot see, on edited copies of bench/threads: part 0 running no block (the
 other parts must run them all), a sync every 8 polls, and a trap in a worker and in part 0.
@@ -71,7 +71,7 @@ artifact), mean ms per step, min over the rounds:
   load to 360, so the sizes are that session's.
 - **Otherwise it depends on how long the stages are.** large_pyramid is 3 to 8% faster at every part count,
   many_bodies 1 to 4% and village up to 2%. mesh_drop is 1% faster at 2 parts and slower above: 2% at 4 parts and 9%
-  at 8, 1.43 to 1.56 ms, where it is slower in each of the five rounds.
+  at 8, 1.43 to 1.56 ms, and at 8 it is slower in each of the five rounds.
 - **The solver stages alone are slower where they are short**: on village 3, 7 and 10% at 2, 4 and 8 parts (0.47 to
   0.52 ms at 8), on mesh_drop 8% at 4 parts and 26% at 8 (0.42 to 0.53 ms), though 1% faster at 2. On large_pyramid
   they are 8 to 11% faster at 4 and 8 parts and on many_bodies 2 to 6%. An earlier build of the scheme had also read
