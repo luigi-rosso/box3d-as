@@ -1,7 +1,8 @@
 #!/bin/bash
-# What verify/threads.sh cannot see of the parallel calls backend, each held on a copy of bench/threads with one edit
-# to lib/solver.as:
-#   workers  part 0 runs no block of a stage it published, so a step ends only if the other parts can run them all
+# What verify/threads.sh cannot see of the parallel calls backend, each held on a copy of bench/threads with
+# lib/solver.as edited:
+#   workers  part 0 runs no block of a stage it published and the others never leave, so a step ends only if they
+#            can run every block
 #   syncs    part 0 asks every part to sync after 8 polls of a stage wait, not 2^24, so the requests run
 #   trap     a worker traps inside a block from step 20 on, and the call has to end with an error, not hang
 #   trap0    part 0 traps after it published a stage in step 20, the same
@@ -9,10 +10,14 @@
 # syncs must have synced.
 #   verify/parts.sh [scene...]    pyramid and large_pyramid by default
 # A scene needs stages of more than one block, as those two have: a small one publishes none, so it makes no sync
-# and reaches no trap. A hang fails at bench/threads/run1.sh's alarm. It does not hold speed: workers that leave
-# too soon, that are slow to answer a sync, or a trap that takes minutes to end the call, pass.
+# and reaches no trap. A hang fails at bench/threads/run1.sh's alarm. It runs both tasks on the SIMD artifact. It
+# does not hold speed: workers that leave too soon, that are slow to answer a sync, or a trap that takes minutes to
+# end the call, pass.
 here="$(cd "$(dirname "$0")" && pwd)"
 project="$here/../bench/threads"
+# The scalar artifact runs from another directory, where the checks below would not find its log, and the edits
+# are to the solver's task
+unset WASM_SIMD TASKS
 scenes=("$@")
 [ ${#scenes[@]} -gt 0 ] || scenes=(pyramid large_pyramid)
 "$project/sync.sh"
@@ -70,7 +75,7 @@ for v in workers syncs; do
 	PROJECT="$work/$v" BACKENDS=3 PARTS="${PARTS:-2 4 8}" "$here/threads.sh" "${scenes[@]}" > "$work/$v.out" || failed=$((failed + 1))
 	grep "^RESULT" "$work/$v.out" | sed "s/^RESULT/$v/"
 done
-# The last run's log, which is the last scene at 8 parts
+# The last run's log
 synced=$(sed -n 's/.* parStageSyncs=\([0-9]*\).*/\1/p' "$work/syncs/build/rive.log" | tail -1)
 if [ "${synced:-0}" -gt 0 ]; then
 	echo "syncs made $synced stage syncs in its last run"
