@@ -134,6 +134,7 @@ exactness, with no tolerance.
 | `verify/run.sh` | each module's outputs against a C driver over fixed and seeded random inputs, every value's bits | 29 modules, about 69 million values |
 | `verify/traj.sh --large` | every body's state, the mover and the world counters, every step, against a native recording | 13 scenes |
 | `verify/threads.sh --large` | the per step state hash under rive-cli on parallel calls at 1, 2, 4 and 8 parts and the default, and on lanes at 1, 2, 4 and 8 on workers and on jobs | 195 runs |
+| `verify/parts.sh` | parallel calls on copies with one edit each: part 0 runs no block, so the other parts must run them all; a sync every 8 polls of a stage wait; a trap in a worker and in part 0, which must end the call | 2 scenes, 14 runs |
 | `bench/web/verify.sh` | the state hash of every step on V8, for the port and for C Box3D on wasm | 13 scenes, 6 builds |
 | `examples/check.sh` | the examples run and show what they say, interpreted and on AOT | 8 cases |
 
@@ -292,7 +293,8 @@ cmake -S $R/packages/rive-cli/dependencies/bytecodealliance_wasm-micro-runtime_W
 
 `build_rive.sh` is in `$R/packages/runtime/build`. A dependency's patches apply only when it is first downloaded, so
 delete `packages/*/dependencies/bytecodealliance_wasm-micro-runtime_*` when rive's WAMR patches change. The scripts
-default to `~/Projects/rive-master`; `RASC`, `AS_STD`, `RIVE` and `RIVE_WAMRC` override.
+default to `~/Projects/rive-master`; `RASC`, `AS_STD`, `RIVE` and `RIVE_WAMRC` override. bench/threads needs rive at
+rive#15736 or later.
 
 The gates need upstream Box3D at `~/Projects/box3d` (`BOX3D`), built in `build/scalar` (`BOX3D_DISABLE_SIMD=ON`,
 `-ffp-contract=off`) and `build/release`. The native recordings in `verify/scenes/out` are not committed:
@@ -304,6 +306,7 @@ KEEP_GOING=1 RASC_FLAGS="-O --enable-simd" verify/run.sh
 RASC_FLAGS="-O" verify/traj.sh --large
 RASC_FLAGS="-O --enable-simd" verify/traj.sh --large
 RIVE_WAMRC=<wamrc> verify/threads.sh --large
+RIVE_WAMRC=<wamrc> verify/parts.sh
 RIVE_WASM_AOT_SYNC=interp examples/check.sh && RIVE_WAMRC=<wamrc> examples/check.sh --aot
 python3 verify/exports.py && python3 docs/api.py
 ```
