@@ -132,7 +132,7 @@ export function vspecialf(): f32 {
 
 // Runs a minor collection under --runtime frame. Call it from the host between
 // driver calls, never from inside one: only globals are roots.
-export unsafe function frameBoundary(): void {
+export function frameBoundary(): void {
   if (ASC_RUNTIME == 3) {
     __frameMinor();
   }

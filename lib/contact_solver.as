@@ -468,7 +468,7 @@ export function b3PrepareContacts_Mesh(block: b3SolverBlock, context: b3StepCont
 	}
 }
 
-export unsafe function b3WarmStartContacts_Mesh(block: b3SolverBlock, context: b3StepContext): void {
+export function b3WarmStartContacts_Mesh(block: b3SolverBlock, context: b3StepContext): void {
 	let world = context.world;
 	let color = world.constraintGraph.colors[block.colorIndex];
 	let awakeSet = world.solverSets[b3_awakeSet];
@@ -546,7 +546,7 @@ export unsafe function b3WarmStartContacts_Mesh(block: b3SolverBlock, context: b
 
 // Merged normal and friction loops. This is much more stable for the Jenga stack.
 // Solve the non-penetration constraints with the soft bias. No friction and no restitution.
-export unsafe function b3PushContacts_Mesh(block: b3SolverBlock, context: b3StepContext): void {
+export function b3PushContacts_Mesh(block: b3SolverBlock, context: b3StepContext): void {
 	let world = context.world;
 	let color = world.constraintGraph.colors[block.colorIndex];
 	let contactConstraints = color.contactConstraints;
@@ -654,7 +654,7 @@ export unsafe function b3PushContacts_Mesh(block: b3SolverBlock, context: b3Step
 }
 
 // Solve contacts: normal, friction and rolling resistance.
-export unsafe function b3SolveContacts_Mesh(block: b3SolverBlock, context: b3StepContext): void {
+export function b3SolveContacts_Mesh(block: b3SolverBlock, context: b3StepContext): void {
 	let world = context.world;
 	let color = world.constraintGraph.colors[block.colorIndex];
 	let contactConstraints = color.contactConstraints;
@@ -832,7 +832,7 @@ export unsafe function b3SolveContacts_Mesh(block: b3SolverBlock, context: b3Ste
 	}
 }
 
-export unsafe function b3ApplyRestitution_Mesh(block: b3SolverBlock, context: b3StepContext): void {
+export function b3ApplyRestitution_Mesh(block: b3SolverBlock, context: b3StepContext): void {
 	let world = context.world;
 	let color = world.constraintGraph.colors[block.colorIndex];
 	let contactConstraints = color.contactConstraints;

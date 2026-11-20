@@ -279,7 +279,7 @@ export function b3PrepareDistanceJoint(base: b3JointSim, context: b3StepContext)
 }
 
 @noinline
-export unsafe function b3WarmStartDistanceJoint(base: b3JointSim, context: b3StepContext): void {
+export function b3WarmStartDistanceJoint(base: b3JointSim, context: b3StepContext): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(base.type == b3_distanceJoint);
 
 	let mA = base.invMassA;
@@ -316,7 +316,7 @@ export unsafe function b3WarmStartDistanceJoint(base: b3JointSim, context: b3Ste
 }
 
 @noinline
-export unsafe function b3SolveDistanceJoint(base: b3JointSim, context: b3StepContext, useBias: bool): void {
+export function b3SolveDistanceJoint(base: b3JointSim, context: b3StepContext, useBias: bool): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(base.type == b3_distanceJoint);
 
 	let mA = base.invMassA;

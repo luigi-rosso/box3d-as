@@ -431,9 +431,6 @@ export class b3StepContext {
 	// How many workers sleep on the sync bits, which only the parts of a parallel call do
 	sleepingWorkers: b3AtomicInt = b3AtomicInt();
 
-	// How many syncs part 0 has asked every part of a parallel call to make
-	syncRequests: b3AtomicInt = b3AtomicInt();
-
 	constructor(world: b3World) {
 		this.world = world;
 		this.graph = world.constraintGraph;
@@ -482,11 +479,11 @@ const RELAX_ITERATIONS: i32 = 1;
 
 // C's atomics, on the value's address. The parts of a parallel call run them as atomics; elsewhere one thread runs
 // the step and they are a plain read and write.
-@inline unsafe function b3AtomicLoadInt(address: usize): i32 {
+@inline function b3AtomicLoadInt(address: usize): i32 {
 	return Parallel.inPart() ? atomic.load<i32>(address) : load<i32>(address);
 }
 
-@inline unsafe function b3AtomicStoreInt(address: usize, value: i32): void {
+@inline function b3AtomicStoreInt(address: usize, value: i32): void {
 	if (Parallel.inPart()) {
 		atomic.store<i32>(address, value);
 	} else {
@@ -494,7 +491,7 @@ const RELAX_ITERATIONS: i32 = 1;
 	}
 }
 
-@inline unsafe function b3AtomicFetchAddInt(address: usize, increment: i32): i32 {
+@inline function b3AtomicFetchAddInt(address: usize, increment: i32): i32 {
 	if (Parallel.inPart()) {
 		return atomic.add<i32>(address, increment);
 	}
@@ -504,7 +501,7 @@ const RELAX_ITERATIONS: i32 = 1;
 	return value;
 }
 
-@inline unsafe function b3AtomicCompareExchangeInt(address: usize, expected: i32, desired: i32): bool {
+@inline function b3AtomicCompareExchangeInt(address: usize, expected: i32, desired: i32): bool {
 	if (Parallel.inPart()) {
 		return atomic.cmpxchg<i32>(address, expected, desired) == expected;
 	}
@@ -516,11 +513,11 @@ const RELAX_ITERATIONS: i32 = 1;
 	return false;
 }
 
-@inline unsafe function b3AtomicLoadU32(address: usize): u32 {
+@inline function b3AtomicLoadU32(address: usize): u32 {
 	return <u32>b3AtomicLoadInt(address);
 }
 
-@inline unsafe function b3AtomicStoreU32(address: usize, value: u32): void {
+@inline function b3AtomicStoreU32(address: usize, value: u32): void {
 	b3AtomicStoreInt(address, <i32>value);
 }
 
@@ -530,17 +527,16 @@ const SC_MAINCLAIMED = offsetof<b3StepContext>("mainClaimed");
 const SC_BULLETBODYCOUNT = offsetof<b3StepContext>("bulletBodyCount");
 const SC_ANYRESTITUTION = offsetof<b3StepContext>("anyRestitution");
 const SC_SLEEPINGWORKERS = offsetof<b3StepContext>("sleepingWorkers");
-const SC_SYNCREQUESTS = offsetof<b3StepContext>("syncRequests");
 
-@inline unsafe function b3StepAtomic(context: b3StepContext, offset: usize): usize {
+@inline function b3StepAtomic(context: b3StepContext, offset: usize): usize {
 	return changetype<usize>(context) + offset;
 }
 
-@inline unsafe function b3CompletionCount(stage: b3SolverStage): usize {
+@inline function b3CompletionCount(stage: b3SolverStage): usize {
 	return changetype<usize>(stage) + offsetof<b3SolverStage>("completionCount");
 }
 
-@inline unsafe function b3SyncIndex(blocks: StaticArray<b3SyncBlock>, index: i32): usize {
+@inline function b3SyncIndex(blocks: StaticArray<b3SyncBlock>, index: i32): usize {
 	return changetype<usize>(blocks) + <usize>index * sizeof<b3SyncBlock>() + offsetof<b3SyncBlock>("syncIndex");
 }
 
@@ -551,29 +547,10 @@ function b3Pause(): void {}
 const B3_WORKER_SPIN_YIELDS: i32 = 2048;
 const B3_WORKER_SLEEP_NANOS: i64 = 1000000;
 
-// A part learns that another part of its call trapped only at a sync, which then fails the call. So a worker that has
-// slept this many times in one wait leaves the step, which part 0 can finish without it.
-const B3_WORKER_IDLE_SLEEPS: i32 = 500;
+// On a page part 0's read of the stop flag is a host call, so its stage wait makes it once in this many polls
+const B3_STAGE_STOP_POLLS: i32 = 1 << 16;
 
-// A worker that trapped inside a block never adds its count, so part 0 has every part sync each time it has polled
-// a stage this many times.
-const B3_STAGE_SYNC_POLLS: i32 = 1 << 24;
-
-@inline unsafe function b3RequestSync(context: b3StepContext, part: Part): void {
-	atomic.add<i32>(b3StepAtomic(context, SC_SYNCREQUESTS), 1);
-	part.sync();
-}
-
-// Makes the sync part 0 asked for since this worker had made syncsMade of them, and answers how many it has made now
-@inline unsafe function b3AnswerSync(context: b3StepContext, part: Part, syncsMade: i32): i32 {
-	let requests = atomic.load<i32>(b3StepAtomic(context, SC_SYNCREQUESTS));
-	if (requests != syncsMade) {
-		part.sync();
-	}
-	return requests;
-}
-
-@inline unsafe function b3YieldWorker(context: b3StepContext, syncBits: u32, yieldCount: i32): void {
+@inline function b3YieldWorker(context: b3StepContext, syncBits: u32, yieldCount: i32): void {
 	if (Parallel.inPart() && yieldCount > B3_WORKER_SPIN_YIELDS) {
 		let sleepingWorkers = b3StepAtomic(context, SC_SLEEPINGWORKERS);
 		atomic.add<i32>(sleepingWorkers, 1);
@@ -584,7 +561,7 @@ const B3_STAGE_SYNC_POLLS: i32 = 1 << 24;
 
 // C's store of the sync bits, which here also wakes the workers that sleep on them. A worker that is about to sleep
 // on the old bits finds them changed and does not.
-@inline unsafe function b3PublishSyncBits(context: b3StepContext, syncBits: u32): void {
+@inline function b3PublishSyncBits(context: b3StepContext, syncBits: u32): void {
 	let address = b3StepAtomic(context, SC_SYNCBITS);
 	b3AtomicStoreU32(address, syncBits);
 	if (Parallel.inPart() && atomic.load<i32>(b3StepAtomic(context, SC_SLEEPINGWORKERS)) != 0) {
@@ -650,7 +627,7 @@ const FB_GENERATION = offsetof<b3Body>("generation");
 
 // Integrate velocities, apply damping, and gyroscopic torque
 // Through state and sim pointers as C; i is below the awake body count the body blocks cover.
-unsafe function b3IntegrateVelocitiesTask(block: b3SolverBlock, context: b3StepContext): void {
+function b3IntegrateVelocitiesTask(block: b3SolverBlock, context: b3StepContext): void {
 	let states = b3ArrayData(context.states);
 	let sims = b3ArrayData(context.sims);
 
@@ -759,7 +736,7 @@ unsafe function b3IntegrateVelocitiesTask(block: b3SolverBlock, context: b3StepC
 	}
 }
 
-unsafe function b3IntegratePositionsTask(block: b3SolverBlock, context: b3StepContext): void {
+function b3IntegratePositionsTask(block: b3SolverBlock, context: b3StepContext): void {
 	let states = b3ArrayData(context.states);
 	let h = context.h;
 	let maxLinearSpeed = context.maxLinearVelocity;
@@ -1055,7 +1032,7 @@ function b3MakeContinuousScratch(): StaticArray<b3ContinuousScratch> {
 
 // Whether parallel parts can sweep world's fast bodies: they cannot call its filter or pre-solve callbacks, or push sensor
 // hits. Points each worker's continuous context at world.
-export unsafe function b3PrepareParallelContinuous(world: b3World): bool {
+export function b3PrepareParallelContinuous(world: b3World): bool {
 	if (world.customFilterFcn != null || world.preSolveFcn != null || world.sensors.length > 0) {
 		return false;
 	}
@@ -1097,7 +1074,7 @@ function b3IsShapeFast(shape: b3Shape, centroid1: b3Vec3, centroid2: b3Vec3, rot
 }
 
 // Continuous collision of dynamic versus static
-unsafe function b3SolveContinuous(world: b3World, bodySimIndex: i32, taskContext: b3TaskContext, dt: f32, workerIndex: i32): void {
+function b3SolveContinuous(world: b3World, bodySimIndex: i32, taskContext: b3TaskContext, dt: f32, workerIndex: i32): void {
 	let awakeSet = world.solverSets[b3_awakeSet];
 	let fastBodySim = b3ArrayData(awakeSet.bodySims) + <usize>bodySimIndex * sizeof<b3BodySim>();
 	B3_ASSERT((load<u32>(fastBodySim + FSIM_FLAGS) & b3_isFast) != 0);
@@ -1305,7 +1282,7 @@ function b3MakeBodyMoveId(index1: i32, world0: u16, generation: u16): b3BodyId {
 
 // Implements b3ParallelForCallback
 // b3MulMM( b3MulMM( r, i ), b3Transpose( r ) ) with each b3MulMV sum in C's order, stored into dst
-@inline unsafe function b3StoreWorldInertia(dst: usize, r: b3Matrix3, i: b3Matrix3): void {
+@inline function b3StoreWorldInertia(dst: usize, r: b3Matrix3, i: b3Matrix3): void {
 	let axx = r.cx.x * i.cx.x + r.cy.x * i.cx.y + r.cz.x * i.cx.z;
 	let axy = r.cx.y * i.cx.x + r.cy.y * i.cx.y + r.cz.y * i.cx.z;
 	let axz = r.cx.z * i.cx.x + r.cy.z * i.cx.y + r.cz.z * i.cx.z;
@@ -1337,13 +1314,13 @@ function b3LogUnstableBody(world: b3World, bodyId: i32): void {
 	b3Log("unstable: " + name);
 }
 
-@inline unsafe function b3UpdateWorldInertia(sim: usize): void {
+@inline function b3UpdateWorldInertia(sim: usize): void {
 	let rotationMatrix = b3MakeMatrixFromQuat(load<b3Quat>(sim + FSIM_Q));
 	b3StoreWorldInertia(sim + FSIM_INVINERTIAWORLD, rotationMatrix, load<b3Matrix3>(sim + FSIM_INVINERTIALOCAL));
 }
 
 // What b3FinalizeBodiesTask does for the fast bodies and unstable bodies a parallel part left to the main lane
-export unsafe function b3FinishParallelFinalize(world: b3World, stepContext: b3StepContext): void {
+export function b3FinishParallelFinalize(world: b3World, stepContext: b3StepContext): void {
 	let sims = b3ArrayData(stepContext.sims);
 	let states = b3ArrayData(stepContext.states);
 	let unstableCount = 0;
@@ -1369,7 +1346,7 @@ export unsafe function b3FinishParallelFinalize(world: b3World, stepContext: b3S
 	}
 }
 
-export unsafe function b3FinalizeBodiesTask(startIndex: i32, endIndex: i32, workerIndex: i32, stepContext: b3StepContext): void {
+export function b3FinalizeBodiesTask(startIndex: i32, endIndex: i32, workerIndex: i32, stepContext: b3StepContext): void {
 	let world = stepContext.world;
 	let bodies = b3ArrayData(world.bodies);
 	let sims = b3ArrayData(stepContext.sims);
@@ -1857,8 +1834,9 @@ function b3ExecuteMainStage(stage: b3SolverStage, context: b3StepContext, syncBi
 		let polls = 0;
 		while (b3AtomicLoadInt(completionCount) != blockCount) {
 			b3Pause();
-			if (Parallel.inPart() && (++polls & (B3_STAGE_SYNC_POLLS - 1)) == 0) {
-				b3RequestSync(context, part!);
+			// A worker that trapped inside a block never adds its count
+			if (Parallel.inPart() && (++polls & (B3_STAGE_STOP_POLLS - 1)) == 0 && part!.stopping()) {
+				unreachable();
 			}
 		}
 
@@ -2062,7 +2040,6 @@ export function b3SolverWorker(context: b3StepContext, workerIndex: i32, part: P
 
 	// Worker spins and waits for work
 	let lastSyncBits: u32 = 0;
-	let syncsMade = 0;
 	while (true) {
 		// Spin until main thread bumps changes the sync bits. This can waste significant time overall, but it is necessary for
 		// parallel simulation with graph coloring.
@@ -2075,11 +2052,9 @@ export function b3SolverWorker(context: b3StepContext, workerIndex: i32, part: P
 			if (spinCount > 5) {
 				yieldCount += 1;
 				b3YieldWorker(context, lastSyncBits, yieldCount);
-				if (Parallel.inPart()) {
-					if (yieldCount > B3_WORKER_SPIN_YIELDS + B3_WORKER_IDLE_SLEEPS) {
-						return;
-					}
-					syncsMade = b3AnswerSync(context, part!, syncsMade);
+				// A part 0 that trapped publishes no more bits
+				if (Parallel.inPart() && part!.stopping()) {
+					return;
 				}
 				spinCount = 0;
 			} else {
@@ -2743,7 +2718,6 @@ export function b3Solve(world: b3World, stepContext: b3StepContext): void {
 		b3AtomicStoreU32(b3StepAtomic(stepContext, SC_SYNCBITS), 0);
 		b3AtomicStoreInt(b3StepAtomic(stepContext, SC_MAINCLAIMED), 0);
 		b3AtomicStoreInt(b3StepAtomic(stepContext, SC_SLEEPINGWORKERS), 0);
-		b3AtomicStoreInt(b3StepAtomic(stepContext, SC_SYNCREQUESTS), 0);
 
 		world.profile.solverSetup = b3GetMillisecondsAndReset(setupTicks.value);
 

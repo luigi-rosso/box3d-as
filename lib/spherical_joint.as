@@ -353,7 +353,7 @@ export function b3PrepareSphericalJoint(base: b3JointSim, context: b3StepContext
 }
 
 @noinline
-export unsafe function b3WarmStartSphericalJoint(base: b3JointSim, context: b3StepContext): void {
+export function b3WarmStartSphericalJoint(base: b3JointSim, context: b3StepContext): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(base.type == b3_sphericalJoint);
 
 	let mA = base.invMassA;
@@ -396,7 +396,7 @@ export unsafe function b3WarmStartSphericalJoint(base: b3JointSim, context: b3St
 }
 
 @noinline
-export unsafe function b3SolveSphericalJoint(base: b3JointSim, context: b3StepContext, useBias: bool): void {
+export function b3SolveSphericalJoint(base: b3JointSim, context: b3StepContext, useBias: bool): void {
 	let mA = base.invMassA;
 	let mB = base.invMassB;
 	let iA = base.invIA;

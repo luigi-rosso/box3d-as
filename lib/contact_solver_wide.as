@@ -159,11 +159,11 @@ const M3_CZ = offsetof<b3Matrix3>("cz");
 // C points null sims at b3_zeroBodySim.
 const b3_zeroSims = new StaticArray<b3BodySim>(1);
 
-@inline unsafe function b3StatesData(states: Array<b3BodyState>): usize {
+@inline function b3StatesData(states: Array<b3BodyState>): usize {
 	return states.dataStart;
 }
 
-@inline unsafe function b3SimsData(sims: Array<b3BodySim>): usize {
+@inline function b3SimsData(sims: Array<b3BodySim>): usize {
 	return sims.dataStart;
 }
 
@@ -177,18 +177,18 @@ const b3_zeroSims = new StaticArray<b3BodySim>(1);
 }
 
 // The sim of a lane's body from the constraint's base 1 index, as C's simLanes
-@inline unsafe function b3SimLane(data: usize, zero: usize, indices: usize, lane: i32): usize {
+@inline function b3SimLane(data: usize, zero: usize, indices: usize, lane: i32): usize {
 	return b3SimPointer(data, zero, load<i32>(indices + <usize>lane * 4) - 1);
 }
 
 // A lane's contact as C's contactLanes, the zeroed contact for an empty lane
-@inline unsafe function b3ContactLane(c: usize, lane: i32, zero: usize): usize {
+@inline function b3ContactLane(c: usize, lane: i32, zero: usize): usize {
 	let contact = load<usize>(c + CW_CONTACTS + <usize>lane * 4);
 	return contact != 0 ? contact : zero;
 }
 
 // A lane's manifold as C's manifoldLanes: zero past the lane's manifold count or for an empty lane
-@inline unsafe function b3LaneManifold(contact: usize, manifoldIndex: i32, zero: usize): usize {
+@inline function b3LaneManifold(contact: usize, manifoldIndex: i32, zero: usize): usize {
 	if (contact != 0 && manifoldIndex < load<i32>(contact + CT_MANIFOLDCOUNT)) {
 		return load<usize>(contact + CT_MANIFOLDS) + <usize>manifoldIndex * sizeof<b3Manifold>();
 	}
@@ -201,7 +201,7 @@ const b3_zeroSims = new StaticArray<b3BodySim>(1);
 }
 
 // The SSE2 gather: each 64 byte state is four rows, transposed into lanes. An f32 kernel reads its lane's state p1.
-@inline unsafe function b3GatherXL<T>(p1: usize, p2: usize, p3: usize, p4: usize, offset: usize): T {
+@inline function b3GatherXL<T>(p1: usize, p2: usize, p3: usize, p4: usize, offset: usize): T {
 	if (isFloat<T>()) {
 		return load<f32>(p1 + offset);
 	} else {
@@ -209,7 +209,7 @@ const b3_zeroSims = new StaticArray<b3BodySim>(1);
 	}
 }
 
-@inline unsafe function b3GatherYL<T>(p1: usize, p2: usize, p3: usize, p4: usize, offset: usize): T {
+@inline function b3GatherYL<T>(p1: usize, p2: usize, p3: usize, p4: usize, offset: usize): T {
 	if (isFloat<T>()) {
 		return load<f32>(p1 + offset + 4);
 	} else {
@@ -217,7 +217,7 @@ const b3_zeroSims = new StaticArray<b3BodySim>(1);
 	}
 }
 
-@inline unsafe function b3GatherZL<T>(p1: usize, p2: usize, p3: usize, p4: usize, offset: usize): T {
+@inline function b3GatherZL<T>(p1: usize, p2: usize, p3: usize, p4: usize, offset: usize): T {
 	if (isFloat<T>()) {
 		return load<f32>(p1 + offset + 8);
 	} else {
@@ -225,7 +225,7 @@ const b3_zeroSims = new StaticArray<b3BodySim>(1);
 	}
 }
 
-@inline unsafe function b3GatherWL<T>(p1: usize, p2: usize, p3: usize, p4: usize, offset: usize): T {
+@inline function b3GatherWL<T>(p1: usize, p2: usize, p3: usize, p4: usize, offset: usize): T {
 	if (isFloat<T>()) {
 		return load<f32>(p1 + offset + 12);
 	} else {
@@ -233,7 +233,7 @@ const b3_zeroSims = new StaticArray<b3BodySim>(1);
 	}
 }
 
-@inline unsafe function b3StoreBodyVelocity(data: usize, index: i32, vX: f32, vY: f32, vZ: f32, wX: f32, wY: f32, wZ: f32): void {
+@inline function b3StoreBodyVelocity(data: usize, index: i32, vX: f32, vY: f32, vZ: f32, wX: f32, wY: f32, wZ: f32): void {
 	// Indices are 0 for null
 	if (index == 0) {
 		return;
@@ -252,7 +252,7 @@ const b3_zeroSims = new StaticArray<b3BodySim>(1);
 	store<f32>(state + BS_W + 8, wZ);
 }
 
-@inline unsafe function b3StoreBodyVelocityV<T>(data: usize, index: i32, v: T, w: T): void {
+@inline function b3StoreBodyVelocityV<T>(data: usize, index: i32, v: T, w: T): void {
 	if (index == 0) {
 		return;
 	}
@@ -269,7 +269,7 @@ const b3_zeroSims = new StaticArray<b3BodySim>(1);
 
 // One 16 byte row of each lane's state transposed into lanes at once, as C's b3TransposeW4: c0 to c2 are x, y and z
 // of the row. An f32 kernel reads its lane's three floats.
-@inline unsafe function b3GatherRow3L<T>(p1: usize, p2: usize, p3: usize, p4: usize, offset: usize): b3ColumnsL<T> {
+@inline function b3GatherRow3L<T>(p1: usize, p2: usize, p3: usize, p4: usize, offset: usize): b3ColumnsL<T> {
 	if (isFloat<T>()) {
 		let c: b3ColumnsL<T>;
 		c.c0 = load<f32>(p1 + offset);
@@ -282,7 +282,7 @@ const b3_zeroSims = new StaticArray<b3BodySim>(1);
 }
 
 // b3GatherRow3L for the row's x and y only, which the v128 path takes from the low zips
-@inline unsafe function b3GatherRow2L<T>(p1: usize, p2: usize, p3: usize, p4: usize, offset: usize): b3ColumnsL<T> {
+@inline function b3GatherRow2L<T>(p1: usize, p2: usize, p3: usize, p4: usize, offset: usize): b3ColumnsL<T> {
 	if (isFloat<T>()) {
 		let c: b3ColumnsL<T>;
 		c.c0 = load<f32>(p1 + offset);
@@ -294,7 +294,7 @@ const b3_zeroSims = new StaticArray<b3BodySim>(1);
 }
 
 // b3GatherRow3L with the row's w in c3
-@inline unsafe function b3GatherRowL<T>(p1: usize, p2: usize, p3: usize, p4: usize, offset: usize): b3ColumnsL<T> {
+@inline function b3GatherRowL<T>(p1: usize, p2: usize, p3: usize, p4: usize, offset: usize): b3ColumnsL<T> {
 	if (isFloat<T>()) {
 		let c: b3ColumnsL<T>;
 		c.c0 = load<f32>(p1 + offset);
@@ -308,7 +308,7 @@ const b3_zeroSims = new StaticArray<b3BodySim>(1);
 }
 
 // This writes only the velocities back to the solver bodies. indices points at the lane's body index.
-@inline unsafe function b3ScatterBodiesL<T>(data: usize, indices: usize, vX: T, vY: T, vZ: T, wX: T, wY: T, wZ: T): void {
+@inline function b3ScatterBodiesL<T>(data: usize, indices: usize, vX: T, vY: T, vZ: T, wX: T, wY: T, wZ: T): void {
 	if (isFloat<T>()) {
 		b3StoreBodyVelocity(data, load<i32>(indices), vX, vY, vZ, wX, wY, wZ);
 	} else {
@@ -323,7 +323,7 @@ const b3_zeroSims = new StaticArray<b3BodySim>(1);
 }
 
 // b3SoftMaskW over the lane's body indices
-@inline unsafe function b3SoftMaskL<T>(indexA: usize, indexB: usize): T {
+@inline function b3SoftMaskL<T>(indexA: usize, indexB: usize): T {
 	if (isFloat<T>()) {
 		return load<i32>(indexA) == 0 || load<i32>(indexB) == 0 ? <f32>1.0 : <f32>0.0;
 	} else {
@@ -332,7 +332,7 @@ const b3_zeroSims = new StaticArray<b3BodySim>(1);
 }
 
 // Any of the four floats in memory greater than zero, as b3AnyTrueW( b3GreaterThanW( a, zero ) )
-@inline unsafe function b3AnyPositiveAt(p: usize): bool {
+@inline function b3AnyPositiveAt(p: usize): bool {
 	if (ASC_FEATURE_SIMD) {
 		return v128.any_true(f32x4.gt(v128.load(p), f32x4.splat(0.0)));
 	}
@@ -347,7 +347,7 @@ const b3_zeroSims = new StaticArray<b3BodySim>(1);
 // [c1 m11 m12 c2 m21 c3 m31 m32 m33 ... ]
 // The constraint is constraints[constraintIndex], whose contacts the caller has set as C's contacts argument.
 // An f32 kernel reads only its lane: l0 to l3 all name that lane, so the lane sets take its value.
-unsafe function b3PrepareConstraintL<T>(
+function b3PrepareConstraintL<T>(
 	constraints: StaticArray<b3ContactConstraintWide>,
 	constraintIndex: i32,
 	manifolds: StaticArray<b3ContactManifoldWide>,
@@ -1007,7 +1007,7 @@ export function b3PrepareContacts_MeshWideW4(block: b3SolverBlock, context: b3St
 }
 
 // C's c->contacts[lane] = contacts[lane]; B3_NULL_INDEX stores C's NULL
-@inline unsafe function b3SetConstraintContact(
+@inline function b3SetConstraintContact(
 	constraints: StaticArray<b3ContactConstraintWide>,
 	constraintIndex: i32,
 	lane: i32,
@@ -1021,7 +1021,7 @@ export function b3PrepareContacts_MeshWideW4(block: b3SolverBlock, context: b3St
 
 // C's base pointer is the constraint array from constraintBase. The first manifold of the block is at the constraint
 // index for convex contacts (one manifold each) and at manifoldStarts[block.startIndex] for mesh groups.
-unsafe function b3WarmStartContactsL<T>(
+function b3WarmStartContactsL<T>(
 	block: b3SolverBlock,
 	context: b3StepContext,
 	constraints: StaticArray<b3ContactConstraintWide>,
@@ -1241,7 +1241,7 @@ unsafe function b3WarmStartContactsL<T>(
 }
 
 // Solve the non-penetration constraints with the soft bias. No friction and no restitution.
-unsafe function b3PushContactsL<T>(
+function b3PushContactsL<T>(
 	block: b3SolverBlock,
 	context: b3StepContext,
 	constraints: StaticArray<b3ContactConstraintWide>,
@@ -1458,7 +1458,7 @@ unsafe function b3PushContactsL<T>(
 }
 
 // Solve the normal constraint, friction, and rolling resistance.
-unsafe function b3SolveContactsL<T>(
+function b3SolveContactsL<T>(
 	block: b3SolverBlock,
 	context: b3StepContext,
 	constraints: StaticArray<b3ContactConstraintWide>,
@@ -1813,7 +1813,7 @@ unsafe function b3SolveContactsL<T>(
 	}
 }
 
-unsafe function b3ApplyRestitutionL<T>(
+function b3ApplyRestitutionL<T>(
 	block: b3SolverBlock,
 	context: b3StepContext,
 	constraints: StaticArray<b3ContactConstraintWide>,
@@ -2028,7 +2028,7 @@ unsafe function b3ApplyRestitutionL<T>(
 // Store impulses by contact constraint. C reads each lane through a float pointer; so do these raw loads, in range by
 // construction (lane < 4, manifold and point counts from the contact). The same for both lane types.
 // One lane of C's store impulses loop, from the lane's contact and its manifold data. Returns whether it set a hit event.
-@inline unsafe function b3StoreLaneImpulses(
+@inline function b3StoreLaneImpulses(
 	manifolds: usize,
 	lane: i32,
 	contact: usize,
@@ -2091,7 +2091,7 @@ unsafe function b3ApplyRestitutionL<T>(
 	return false;
 }
 
-unsafe function b3StoreImpulsesW(
+function b3StoreImpulsesW(
 	block: b3SolverBlock,
 	context: b3StepContext,
 	workerIndex: i32,

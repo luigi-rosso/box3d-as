@@ -212,12 +212,12 @@ export class Main extends Layout {
 		return true;
 	}
 
-	unsafe copies(): void {
+	copies(): void {
 		this.copiesOf(1);
 		this.copiesOf(8);
 	}
 
-	unsafe copiesOf(megabytes: i32): void {
+	copiesOf(megabytes: i32): void {
 		let tag = "_" + megabytes.toString() + "MB";
 		let bytes = megabytes * MB;
 		let words = bytes / 4;

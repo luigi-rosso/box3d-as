@@ -41,7 +41,7 @@ export class b3LaneWriter {
 	}
 
 	// The address of byteCount fresh bytes, good until the next reserve
-	unsafe reserve(byteCount: i32): usize {
+	reserve(byteCount: i32): usize {
 		let offset = this.length;
 		let need = offset + byteCount;
 		if (need > this.buffer.length) {
@@ -57,23 +57,23 @@ export class b3LaneWriter {
 		return this.buffer.dataStart + <usize>offset;
 	}
 
-	@inline unsafe u32(value: u32): void {
+	@inline u32(value: u32): void {
 		store<u32>(this.reserve(4), value);
 	}
 
-	@inline unsafe i32(value: i32): void {
+	@inline i32(value: i32): void {
 		store<i32>(this.reserve(4), value);
 	}
 
-	@inline unsafe f32(value: f32): void {
+	@inline f32(value: f32): void {
 		store<f32>(this.reserve(4), value);
 	}
 
-	@inline unsafe bytes(source: usize, byteCount: i32): void {
+	@inline bytes(source: usize, byteCount: i32): void {
 		memory.copy(this.reserve(byteCount), source, <usize>byteCount);
 	}
 
-	@inline unsafe patch(offset: i32, value: u32): void {
+	@inline patch(offset: i32, value: u32): void {
 		store<u32>(this.buffer.dataStart + <usize>offset, value);
 	}
 }
@@ -90,23 +90,23 @@ export class b3LaneWriter {
 	return a.length >= count ? a : new Uint32Array(count + (count >> 2) + 16);
 }
 
-@inline export unsafe function b3ReadU32(base: usize, offset: i32): u32 {
+@inline export function b3ReadU32(base: usize, offset: i32): u32 {
 	return load<u32>(base + <usize>offset);
 }
 
-@inline export unsafe function b3ReadI32(base: usize, offset: i32): i32 {
+@inline export function b3ReadI32(base: usize, offset: i32): i32 {
 	return load<i32>(base + <usize>offset);
 }
 
-@inline export unsafe function b3ReadF32(base: usize, offset: i32): f32 {
+@inline export function b3ReadF32(base: usize, offset: i32): f32 {
 	return load<f32>(base + <usize>offset);
 }
 
-@inline export unsafe function b3HeaderI32(h: Uint32Array, index: i32): i32 {
+@inline export function b3HeaderI32(h: Uint32Array, index: i32): i32 {
 	return load<i32>(h.dataStart + <usize>index * 4);
 }
 
-@inline export unsafe function b3HeaderF32(h: Uint32Array, index: i32): f32 {
+@inline export function b3HeaderF32(h: Uint32Array, index: i32): f32 {
 	return load<f32>(h.dataStart + <usize>index * 4);
 }
 

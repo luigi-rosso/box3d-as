@@ -318,7 +318,7 @@ export const b3_identityBodyState: b3BodyState = b3MakeIdentityBodyState();
 
 // The element data of an Array of structs, for the solver's pointer walks. The address holds until the array grows,
 // which no solver stage does.
-@inline export unsafe function b3ArrayData<A>(a: A): usize {
+@inline export function b3ArrayData<A>(a: A): usize {
 	return a.dataStart;
 }
 
@@ -333,19 +333,19 @@ export const b3_identityStates = b3MakeIdentityStates();
 
 // C's state pointer: the awake state at index, or the identity state for B3_NULL_INDEX. Index comes from a
 // constraint the solver prepared, so it is below the awake count.
-@inline export unsafe function b3StateAddress(states: Array<b3BodyState>, index: i32): usize {
+@inline export function b3StateAddress(states: Array<b3BodyState>, index: i32): usize {
 	return index == B3_NULL_INDEX
 		? changetype<usize>(b3_identityStates)
 		: b3ArrayData(states) + <usize>index * sizeof<b3BodyState>();
 }
 
-@inline export unsafe function b3StoreStateVelocities(states: Array<b3BodyState>, index: i32, v: b3Vec3, w: b3Vec3): void {
+@inline export function b3StoreStateVelocities(states: Array<b3BodyState>, index: i32, v: b3Vec3, w: b3Vec3): void {
 	let state = b3ArrayData(states) + <usize>index * sizeof<b3BodyState>();
 	store<b3Vec3>(state + offsetof<b3BodyState>("linearVelocity"), v);
 	store<b3Vec3>(state + offsetof<b3BodyState>("angularVelocity"), w);
 }
 
-@inline export unsafe function b3StoreStateAngularVelocity(states: Array<b3BodyState>, index: i32, w: b3Vec3): void {
+@inline export function b3StoreStateAngularVelocity(states: Array<b3BodyState>, index: i32, w: b3Vec3): void {
 	store<b3Vec3>(b3ArrayData(states) + <usize>index * sizeof<b3BodyState>() + offsetof<b3BodyState>("angularVelocity"), w);
 }
 
@@ -429,7 +429,7 @@ export function b3MakeRelativeSweep(bodySim: b3BodySim, base: b3Pos): b3Sweep {
 }
 
 // b3MakeRelativeSweep over the sim at address sim
-@inline export unsafe function b3MakeRelativeSweepAt(sim: usize, base: b3Pos): b3Sweep {
+@inline export function b3MakeRelativeSweepAt(sim: usize, base: b3Pos): b3Sweep {
 	let s: b3Sweep;
 	s.c1 = b3SubPos(load<b3Vec3>(sim + offsetof<b3BodySim>("center0")), base);
 	s.c2 = b3SubPos(load<b3Vec3>(sim + offsetof<b3BodySim>("center")), base);
@@ -476,7 +476,7 @@ export function b3GetBodySim(world: b3World, bodyId: i32): b3BodySim {
 }
 
 // The address of the sim b3GetBodySim returns, where C returns its pointer
-export unsafe function b3GetBodySimAddress(world: b3World, bodyId: i32): usize {
+export function b3GetBodySimAddress(world: b3World, bodyId: i32): usize {
 	let set = world.solverSets[world.bodies[bodyId].setIndex];
 	let localIndex = world.bodies[bodyId].localIndex;
 	if (B3_ASSERT_ENABLED) B3_ASSERT(0 <= localIndex && localIndex < set.bodySims.length);

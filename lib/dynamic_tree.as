@@ -2082,7 +2082,7 @@ export function b3DynamicTree_MarkProxyMovedSerial(tree: b3DynamicTree, proxyId:
 
 // Update a proxy AABB and flag the ancestors as moved. Thread-safe using atomics in the parallel copy, which parts
 // run as they finalize bodies.
-export unsafe function b3DynamicTree_MarkProxyMoved(tree: b3DynamicTree, proxyId: i32, aabb: b3AABB): void {
+export function b3DynamicTree_MarkProxyMoved(tree: b3DynamicTree, proxyId: i32, aabb: b3AABB): void {
 	let nodes = tree.nodes;
 	let parents = tree.parents;
 

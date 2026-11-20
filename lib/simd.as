@@ -839,7 +839,7 @@ export {
 	}
 }
 
-@inline export unsafe function b3LoadL<T>(p: usize): T {
+@inline export function b3LoadL<T>(p: usize): T {
 	if (isFloat<T>()) {
 		return load<f32>(p);
 	} else {
@@ -847,7 +847,7 @@ export {
 	}
 }
 
-@inline export unsafe function b3StoreL<T>(p: usize, a: T): void {
+@inline export function b3StoreL<T>(p: usize, a: T): void {
 	if (isFloat<T>()) {
 		store<f32>(p, a);
 	} else {
@@ -866,7 +866,7 @@ export {
 
 // b3SetL of the floats at four addresses, read straight into their lanes as C's b3SetW of loads compiles; a lane
 // kernel reads a
-@inline export unsafe function b3SetLoadL<T>(a: usize, b: usize, c: usize, d: usize): T {
+@inline export function b3SetLoadL<T>(a: usize, b: usize, c: usize, d: usize): T {
 	if (isFloat<T>()) {
 		return load<f32>(a);
 	} else {
@@ -1090,7 +1090,7 @@ export struct b3ColumnsL<T> {
 }
 
 // b3AllZeroW over four floats in memory, for decisions a lane kernel shares across lanes
-@inline export unsafe function b3AllZeroAt(p: usize): bool {
+@inline export function b3AllZeroAt(p: usize): bool {
 	if (ASC_FEATURE_SIMD) {
 		return i32x4.all_true(f32x4.eq(v128.load(p), f32x4.splat(0.0)));
 	}
@@ -1099,7 +1099,7 @@ export struct b3ColumnsL<T> {
 
 // Four floats into the 16 bytes at p: one v128 store under SIMD, four f32 stores without. Lanes only move bits, so
 // both artifacts write the same memory. Callers pass the current value of any field the row covers past their own.
-@inline export unsafe function b3StoreRow(p: usize, x: f32, y: f32, z: f32, w: f32): void {
+@inline export function b3StoreRow(p: usize, x: f32, y: f32, z: f32, w: f32): void {
 	if (ASC_FEATURE_SIMD) {
 		v128.store(p, f32x4.replace_lane(f32x4.replace_lane(f32x4.replace_lane(f32x4.splat(x), 1, y), 2, z), 3, w));
 	} else {

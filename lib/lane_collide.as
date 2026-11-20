@@ -116,13 +116,13 @@ const O_MANIFOLD_COUNTS: i32 = 16;
 const O_BYTES: i32 = O_MANIFOLD_COUNTS + 4 * B3_CONTACT_MANIFOLD_COUNT_BUCKETS;
 
 // Contact state: what b3CollideTask reads and writes on a contact. Written and read the same way both ways.
-unsafe function b3StateBytes(contact: b3Contact): i32 {
+function b3StateBytes(contact: b3Contact): i32 {
 	return 4 * 3 + 2 * <i32>sizeof<b3Quat>() + <i32>sizeof<b3Transform>() + 4 * 6 + <i32>sizeof<b3ContactCache>() +
 		<i32>sizeof<b3AABB>() + contact.meshContact.triangleCache.length * <i32>sizeof<b3TriangleCache>() +
 		contact.manifoldCount * <i32>sizeof<b3Manifold>();
 }
 
-unsafe function b3WriteState(at: usize, contact: b3Contact): usize {
+function b3WriteState(at: usize, contact: b3Contact): usize {
 	let triangleCount = contact.meshContact.triangleCache.length;
 	store<u32>(at, contact.flags);
 	store<i32>(at + 4, contact.manifoldCount);
@@ -156,7 +156,7 @@ unsafe function b3WriteState(at: usize, contact: b3Contact): usize {
 }
 
 // Manifold arrays are sized to their count, as b3AllocateManifolds sizes them, so the lengths match the serial run
-unsafe function b3ReadState(at: usize, contact: b3Contact): usize {
+function b3ReadState(at: usize, contact: b3Contact): usize {
 	contact.flags = load<u32>(at);
 	let manifoldCount = load<i32>(at + 4);
 	let triangleCount = load<i32>(at + 8);
@@ -199,12 +199,12 @@ unsafe function b3ReadState(at: usize, contact: b3Contact): usize {
 // Shape snapshot
 
 // Sections of struct arrays copy as raw bytes behind their length, at the element size the caller passes.
-@inline unsafe function b3WriteSection<A>(w: b3LaneWriter, a: A, elementSize: usize): void {
+@inline function b3WriteSection<A>(w: b3LaneWriter, a: A, elementSize: usize): void {
 	w.i32(a.length);
 	w.bytes(changetype<usize>(a), a.length * <i32>elementSize);
 }
 
-@inline unsafe function b3ReadSection<A>(base: usize, at: i32, out: A, elementSize: usize): i32 {
+@inline function b3ReadSection<A>(base: usize, at: i32, out: A, elementSize: usize): i32 {
 	let bytes = out.length * <i32>elementSize;
 	memory.copy(changetype<usize>(out), base + <usize>at, <usize>bytes);
 	return at + bytes;
@@ -256,7 +256,7 @@ function b3GeometryIndex(s: b3LaneSnapshot, object: usize, kind: i32): i32 {
 	return index;
 }
 
-unsafe function b3WriteHull(w: b3LaneWriter, hull: b3HullData): void {
+function b3WriteHull(w: b3LaneWriter, hull: b3HullData): void {
 	w.bytes(changetype<usize>(hull), <i32>offsetof<b3HullData>("vertices"));
 	b3WriteSection(w, hull.vertices, sizeof<b3HullVertex>());
 	b3WriteSection(w, hull.points, sizeof<b3Vec3>());
@@ -268,7 +268,7 @@ unsafe function b3WriteHull(w: b3LaneWriter, hull: b3HullData): void {
 	b3WriteSection(w, hull.edgeCosines, sizeof<f32>());
 }
 
-unsafe function b3WriteMeshData(w: b3LaneWriter, mesh: b3MeshData): void {
+function b3WriteMeshData(w: b3LaneWriter, mesh: b3MeshData): void {
 	w.bytes(changetype<usize>(mesh), <i32>offsetof<b3MeshData>("nodes"));
 	b3WriteSection(w, mesh.nodes, sizeof<b3MeshNode>());
 	b3WriteSection(w, mesh.vertices, sizeof<b3Vec3>());
@@ -277,14 +277,14 @@ unsafe function b3WriteMeshData(w: b3LaneWriter, mesh: b3MeshData): void {
 	b3WriteSection(w, mesh.flags, sizeof<u8>());
 }
 
-unsafe function b3WriteHeightField(w: b3LaneWriter, field: b3HeightFieldData): void {
+function b3WriteHeightField(w: b3LaneWriter, field: b3HeightFieldData): void {
 	w.bytes(changetype<usize>(field), <i32>offsetof<b3HeightFieldData>("compressedHeights"));
 	b3WriteSection(w, field.compressedHeights, sizeof<u16>());
 	b3WriteSection(w, field.materialIndices, sizeof<u8>());
 	b3WriteSection(w, field.flags, sizeof<u8>());
 }
 
-unsafe function b3WriteCompound(s: b3LaneSnapshot, w: b3LaneWriter, compound: b3CompoundData): void {
+function b3WriteCompound(s: b3LaneSnapshot, w: b3LaneWriter, compound: b3CompoundData): void {
 	w.bytes(changetype<usize>(compound), <i32>offsetof<b3CompoundData>("nodes"));
 	b3WriteSection(w, compound.nodes, sizeof<b3TreeNode>());
 	b3WriteSection(w, compound.materials, sizeof<b3SurfaceMaterial>());
@@ -307,7 +307,7 @@ unsafe function b3WriteCompound(s: b3LaneSnapshot, w: b3LaneWriter, compound: b3
 
 // Layout: magic, shape slots, geometry count, the offset of each shape (0 for an empty slot) and of each
 // geometry, then the records
-unsafe function b3BuildSnapshot(s: b3LaneSnapshot, world: b3World): void {
+function b3BuildSnapshot(s: b3LaneSnapshot, world: b3World): void {
 	s.geometry.clear();
 	s.geometryObjects.length = 0;
 	s.geometryKinds.length = 0;
@@ -445,13 +445,13 @@ function b3UseSnapshot(cache: b3LaneShapeCache, snapshot: Blob): void {
 }
 
 // The byte offset of geometry record g, past its kind word
-@inline unsafe function b3GeometryAt(cache: b3LaneShapeCache, g: i32): i32 {
+@inline function b3GeometryAt(cache: b3LaneShapeCache, g: i32): i32 {
 	let base = cache.bytes.dataStart;
 	let shapeCount = b3ReadI32(base, 4);
 	return b3ReadI32(base, 16 + 4 * shapeCount + 4 * g) + 4;
 }
 
-unsafe function b3DecodeHull(cache: b3LaneShapeCache, g: i32): b3HullData {
+function b3DecodeHull(cache: b3LaneShapeCache, g: i32): b3HullData {
 	if (cache.slots[g] >= 0) {
 		return cache.hulls[cache.slots[g]];
 	}
@@ -481,7 +481,7 @@ unsafe function b3DecodeHull(cache: b3LaneShapeCache, g: i32): b3HullData {
 	return hull;
 }
 
-unsafe function b3DecodeMesh(cache: b3LaneShapeCache, g: i32): b3MeshData {
+function b3DecodeMesh(cache: b3LaneShapeCache, g: i32): b3MeshData {
 	if (cache.slots[g] >= 0) {
 		return cache.meshes[cache.slots[g]];
 	}
@@ -505,7 +505,7 @@ unsafe function b3DecodeMesh(cache: b3LaneShapeCache, g: i32): b3MeshData {
 	return mesh;
 }
 
-unsafe function b3DecodeHeightField(cache: b3LaneShapeCache, g: i32): b3HeightFieldData {
+function b3DecodeHeightField(cache: b3LaneShapeCache, g: i32): b3HeightFieldData {
 	if (cache.slots[g] >= 0) {
 		return cache.fields[cache.slots[g]];
 	}
@@ -525,7 +525,7 @@ unsafe function b3DecodeHeightField(cache: b3LaneShapeCache, g: i32): b3HeightFi
 	return field;
 }
 
-unsafe function b3DecodeCompound(cache: b3LaneShapeCache, g: i32): b3CompoundData {
+function b3DecodeCompound(cache: b3LaneShapeCache, g: i32): b3CompoundData {
 	if (cache.slots[g] >= 0) {
 		return cache.compounds[cache.slots[g]];
 	}
@@ -573,7 +573,7 @@ unsafe function b3DecodeCompound(cache: b3LaneShapeCache, g: i32): b3CompoundDat
 	return compound;
 }
 
-unsafe function b3DecodeShape(cache: b3LaneShapeCache, shapeId: i32): b3Shape {
+function b3DecodeShape(cache: b3LaneShapeCache, shapeId: i32): b3Shape {
 	let shape = cache.shapes[shapeId];
 	if (cache.decoded[shapeId] != 0) {
 		return shape;
@@ -645,7 +645,7 @@ export class b3LaneCollideReplica {
 
 // Runs b3CollideTask over a section on the replica and answers the contacts' updated state as a blob, whose size
 // only the task knows: a mesh contact's manifolds and triangle cache may grow
-export unsafe function b3LaneCollidePartition(
+export function b3LaneCollidePartition(
 	r: b3LaneCollideReplica,
 	snapshot: Blob,
 	input: Blob,
@@ -813,7 +813,7 @@ export function b3LaneCollideSupported(world: b3World): bool {
 		world.restitutionCallback == b3DefaultRestitutionCallback;
 }
 
-unsafe function b3PackBody(m: b3LaneCollideMain, world: b3World, encoded: i32, bodyId: i32): void {
+function b3PackBody(m: b3LaneCollideMain, world: b3World, encoded: i32, bodyId: i32): void {
 	let stamps = m.bodyStamps;
 	if (stamps[bodyId] == m.stamp) {
 		return;
@@ -850,7 +850,7 @@ unsafe function b3PackBody(m: b3LaneCollideMain, world: b3World, encoded: i32, b
 	memory.copy(at + <usize>(BODY_WORDS * 4), b3ArrayData(sims) + <usize>index * <usize>simSize, <usize>simSize);
 }
 
-unsafe function b3PackShape(m: b3LaneCollideMain, world: b3World, shapeId: i32): void {
+function b3PackShape(m: b3LaneCollideMain, world: b3World, shapeId: i32): void {
 	let stamps = m.shapeStamps;
 	if (stamps[shapeId] == m.stamp) {
 		return;
@@ -863,7 +863,7 @@ unsafe function b3PackShape(m: b3LaneCollideMain, world: b3World, shapeId: i32):
 }
 
 // Serializes contacts [first, last) of the step's awake contacts as one section
-unsafe function b3PackCollideSection(m: b3LaneCollideMain, context: b3StepContext, first: i32, last: i32): void {
+function b3PackCollideSection(m: b3LaneCollideMain, context: b3StepContext, first: i32, last: i32): void {
 	let world = context.world;
 	let w = m.writer;
 	let ids = context.awakeContactIndices;
@@ -922,7 +922,7 @@ unsafe function b3PackCollideSection(m: b3LaneCollideMain, context: b3StepContex
 
 // Readies a step's collide on lanes: the snapshot, rebuilt when the shapes changed, and the even split of the awake
 // contacts, partition 0's share staying on the main lane
-export unsafe function b3LaneCollideBegin(m: b3LaneCollideMain, context: b3StepContext, contactCount: i32, lanes: i32): void {
+export function b3LaneCollideBegin(m: b3LaneCollideMain, context: b3StepContext, contactCount: i32, lanes: i32): void {
 	let world = context.world;
 	let ticks = b3LaneNow();
 	let checksum = b3ShapesChecksum(world);
@@ -940,7 +940,7 @@ export unsafe function b3LaneCollideBegin(m: b3LaneCollideMain, context: b3StepC
 }
 
 // Lane p's share of the contacts as one section blob
-export unsafe function b3LaneCollideSection(m: b3LaneCollideMain, context: b3StepContext, p: i32): Blob {
+export function b3LaneCollideSection(m: b3LaneCollideMain, context: b3StepContext, p: i32): Blob {
 	let ticks = b3LaneNow();
 	let w = m.writer;
 	w.reset();
@@ -953,7 +953,7 @@ export unsafe function b3LaneCollideSection(m: b3LaneCollideMain, context: b3Ste
 
 // Copies lane p's updated contacts back, and does what b3CollideTask does with the world's task context for them:
 // the state bits, the counters and the mesh contact spec
-export unsafe function b3LaneCollideApply(m: b3LaneCollideMain, context: b3StepContext, p: i32, output: Blob): void {
+export function b3LaneCollideApply(m: b3LaneCollideMain, context: b3StepContext, p: i32, output: Blob): void {
 	let ticks = b3LaneNow();
 	let world = context.world;
 	let taskContext = world.taskContexts[0];

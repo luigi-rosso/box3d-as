@@ -809,7 +809,7 @@ export function b3SetLaneCollide(fcn: b3LaneCollideFcn?): void {
 
 // Collide waits on each contact's cache misses in turn. Loading the next contact's lines first lets those misses
 // overlap this contact's work. Every offset stays inside the object it reads.
-@inline unsafe function b3LoadContactAhead(contact: b3Contact, shapes: Array<b3Shape>, sims: usize): u32 {
+@inline function b3LoadContactAhead(contact: b3Contact, shapes: Array<b3Shape>, sims: usize): u32 {
 	let at = changetype<usize>(contact);
 	let shapeA = changetype<usize>(unchecked(shapes[contact.shapeIdA]));
 	let shapeB = changetype<usize>(unchecked(shapes[contact.shapeIdB]));
@@ -829,7 +829,7 @@ export function b3SetLaneCollide(fcn: b3LaneCollideFcn?): void {
 	return sum;
 }
 
-export unsafe function b3CollideTask(startIndex: i32, endIndex: i32, workerIndex: i32, stepContext: b3StepContext): void {
+export function b3CollideTask(startIndex: i32, endIndex: i32, workerIndex: i32, stepContext: b3StepContext): void {
 	let world = stepContext.world;
 	let graph = world.constraintGraph;
 	let taskContext = world.taskContexts[workerIndex];

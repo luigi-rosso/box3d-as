@@ -217,7 +217,7 @@ export function b3PrepareMotorJoint(base: b3JointSim, context: b3StepContext): v
 }
 
 @noinline
-export unsafe function b3WarmStartMotorJoint(base: b3JointSim, context: b3StepContext): void {
+export function b3WarmStartMotorJoint(base: b3JointSim, context: b3StepContext): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(base.type == b3_motorJoint);
 
 	let mA = base.invMassA;
@@ -251,7 +251,7 @@ export unsafe function b3WarmStartMotorJoint(base: b3JointSim, context: b3StepCo
 }
 
 @noinline
-export unsafe function b3SolveMotorJoint(base: b3JointSim, context: b3StepContext): void {
+export function b3SolveMotorJoint(base: b3JointSim, context: b3StepContext): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(base.type == b3_motorJoint);
 
 	let mA = base.invMassA;

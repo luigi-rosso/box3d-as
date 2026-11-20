@@ -17,7 +17,7 @@ import { b3SpanBegin, b3SpanEnd, b3_traceTree } from "./trace";
 // proxyFreeList, rebuildCapacity, dfsOrdered
 const TREE_WORDS: i32 = 8;
 
-unsafe function b3WriteTree(w: b3LaneWriter, tree: b3DynamicTree): void {
+function b3WriteTree(w: b3LaneWriter, tree: b3DynamicTree): void {
 	w.i32(tree.nodes.length);
 	w.bytes(changetype<usize>(tree.nodes), tree.nodes.length * <i32>sizeof<b3TreeNode>());
 	w.i32(tree.parents.length);
@@ -35,7 +35,7 @@ unsafe function b3WriteTree(w: b3LaneWriter, tree: b3DynamicTree): void {
 }
 
 // Reads a tree written by b3WriteTree into tree, reusing its arrays where they are long enough
-unsafe function b3ReadTree(base: usize, at: i32, tree: b3DynamicTree): i32 {
+function b3ReadTree(base: usize, at: i32, tree: b3DynamicTree): i32 {
 	let nodeCount = b3ReadI32(base, at);
 	if (tree.nodes.length != nodeCount) {
 		tree.nodes = new StaticArray<b3TreeNode>(nodeCount);
@@ -105,7 +105,7 @@ export class b3LaneTreeMain {
 	bytes: f64 = 0;
 }
 
-export unsafe function b3LaneTreePack(m: b3LaneTreeMain, world: b3World): Blob {
+export function b3LaneTreePack(m: b3LaneTreeMain, world: b3World): Blob {
 	let ticks = b3LaneNow();
 	let w = m.writer;
 	w.reset();
@@ -120,7 +120,7 @@ export unsafe function b3LaneTreePack(m: b3LaneTreeMain, world: b3World): Blob {
 
 // The rebuilt trees replace the world's. Their rebuild scratch stays the world's own, which a rebuild fully writes
 // before it reads, so the capacity it was sized for stays too.
-export unsafe function b3LaneTreeApply(m: b3LaneTreeMain, world: b3World, output: Blob): void {
+export function b3LaneTreeApply(m: b3LaneTreeMain, world: b3World, output: Blob): void {
 	let ticks = b3LaneNow();
 	let length = <i32>output.byteLength;
 	m.staging = b3GrowU8(m.staging, length);

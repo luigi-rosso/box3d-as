@@ -315,7 +315,7 @@ function b3SetRuns(part: b3LanePartition, bodies: Int32Array, bodyCount: i32): v
 
 // Reads a section into the replica and points its step context at compact arrays. Each color's slice of
 // constraints keeps the lanes the main lane's layout gives it, so the kernels compute the same bits.
-unsafe function b3LaneSolveSetup(r: b3LaneSolveReplica): void {
+function b3LaneSolveSetup(r: b3LaneSolveReplica): void {
 	let world = r.world;
 	let part = r.part;
 	let context = part.context;
@@ -584,7 +584,7 @@ function b3RunColor(part: b3LanePartition, exchanges: Array<SharedRegion>, type:
 	b3LaneExchange(part, exchanges, i);
 }
 
-@inline unsafe function b3CopyVelocities(dst: usize, src: usize): void {
+@inline function b3CopyVelocities(dst: usize, src: usize): void {
 	let v = offsetof<b3BodyState>("linearVelocity");
 	let w = offsetof<b3BodyState>("angularVelocity");
 	store<u32>(dst + v, load<u32>(src));
@@ -598,7 +598,7 @@ function b3RunColor(part: b3LanePartition, exchanges: Array<SharedRegion>, type:
 // Publishes this partition's writes to shared bodies, to each lane that touches them, then waits for the lanes that
 // send it velocities in this color and applies them. Within a step nothing in a pair is written twice, and the
 // next step starts only once every lane is done.
-unsafe function b3LaneExchange(part: b3LanePartition, exchanges: Array<SharedRegion>, colorSlot: i32): void {
+function b3LaneExchange(part: b3LanePartition, exchanges: Array<SharedRegion>, colorSlot: i32): void {
 	part.epoch += 1;
 	if (part.neighbors == 0) {
 		return;
@@ -776,7 +776,7 @@ function b3LaneSolveStages(part: b3LanePartition, exchanges: Array<SharedRegion>
 
 // Output: byte length, partition, wait spins, then per contact its hit bit and what the solver wrote into its
 // manifolds, then the states of the bodies whose lowest touching lane is this one
-unsafe function b3LaneSolveOutput(r: b3LaneSolveReplica, output: SharedRegion): void {
+function b3LaneSolveOutput(r: b3LaneSolveReplica, output: SharedRegion): void {
 	let part = r.part;
 	let stateSize = <i32>sizeof<b3BodyState>();
 	let contacts = r.world.contacts;
@@ -836,7 +836,7 @@ unsafe function b3LaneSolveOutput(r: b3LaneSolveReplica, output: SharedRegion): 
 }
 
 // Everything a lane's partition does in a step, the same on a job and a worker
-export unsafe function b3LaneSolvePartition(
+export function b3LaneSolvePartition(
 	r: b3LaneSolveReplica,
 	input: Blob,
 	output: SharedRegion,
@@ -1085,7 +1085,7 @@ export class b3LaneTasks {
 	}
 }
 
-@inline unsafe function b3MarkBody(masks: Uint32Array, encoded: i32, bit: u32): void {
+@inline function b3MarkBody(masks: Uint32Array, encoded: i32, bit: u32): void {
 	if (encoded >= 0) {
 		store<u32>(masks.dataStart + <usize>encoded * 4, load<u32>(masks.dataStart + <usize>encoded * 4) | bit);
 	}
@@ -1118,7 +1118,7 @@ export class b3LaneTasks {
 	}
 }
 
-unsafe function b3WriteContact(w: b3LaneWriter, contact: b3Contact): void {
+function b3WriteContact(w: b3LaneWriter, contact: b3Contact): void {
 	let bytes = contact.manifoldCount * <i32>sizeof<b3Manifold>();
 	let at = w.reserve(R_WORDS * 4 + bytes);
 	store<i32>(at, contact.contactId);
@@ -1218,7 +1218,7 @@ function b3SetMainPartition(t: b3LaneTasks, context: b3StepContext, activeColorC
 // Serializes the other lanes' shares of the step's constraints, starts them, runs partition 0 here over the
 // world's own arrays and applies what the others wrote. Answers false, leaving the solver to the task callbacks,
 // for what it does not cover.
-unsafe function b3LaneSolve(t: b3LaneTasks, context: b3StepContext): bool {
+function b3LaneSolve(t: b3LaneTasks, context: b3StepContext): bool {
 	let world = context.world;
 	let colors = world.constraintGraph.colors;
 	let overflow = colors[B3_OVERFLOW_INDEX];
@@ -1604,7 +1604,7 @@ unsafe function b3LaneSolve(t: b3LaneTasks, context: b3StepContext): bool {
 }
 
 // The hit bits come from partition 0's stores straight into the world's task context, and from the others' outputs
-unsafe function b3LaneSolveApply(t: b3LaneTasks, context: b3StepContext, firstPacked: i32): void {
+function b3LaneSolveApply(t: b3LaneTasks, context: b3StepContext, firstPacked: i32): void {
 	let world = context.world;
 	let taskContext = world.taskContexts[0];
 	let contacts = world.contacts;
@@ -1655,7 +1655,7 @@ unsafe function b3LaneSolveApply(t: b3LaneTasks, context: b3StepContext, firstPa
 
 // Serializes the other lanes' shares of the step's awake contacts, starts them, runs b3CollideTask over the first
 // share here and copies the others' contacts back. Answers false for what it does not cover.
-unsafe function b3LaneCollide(t: b3LaneTasks, context: b3StepContext, contactCount: i32): bool {
+function b3LaneCollide(t: b3LaneTasks, context: b3StepContext, contactCount: i32): bool {
 	let m = t.collide;
 	let world = context.world;
 	let lanes = t.lanes;
@@ -1740,7 +1740,7 @@ const TREE_TASK: u64 = 1;
 
 // The world's enqueue callback while the tree task is on lanes. Every other task carries its arguments inside its
 // closure, which cannot cross to a lane, so it runs here at once as the default callback runs it.
-unsafe function b3LaneEnqueue(t: b3LaneTasks, task: b3TaskCallback, taskContext: u64, name: string): u64 {
+function b3LaneEnqueue(t: b3LaneTasks, task: b3TaskCallback, taskContext: u64, name: string): u64 {
 	if (name == "rebuild tree" && t.treeJob == null) {
 		let trace = b3TraceRowAt(0);
 		let traceBegin = b3SpanBegin(trace);
@@ -1757,7 +1757,7 @@ unsafe function b3LaneEnqueue(t: b3LaneTasks, task: b3TaskCallback, taskContext:
 	return 0;
 }
 
-unsafe function b3LaneFinish(t: b3LaneTasks, userTask: u64): void {
+function b3LaneFinish(t: b3LaneTasks, userTask: u64): void {
 	let job = t.treeJob;
 	if (userTask != TREE_TASK || job == null) {
 		return;

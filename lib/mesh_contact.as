@@ -176,7 +176,7 @@ function b3QueryCacheTriangles(meshContact: b3MeshContact, shapeA: b3Shape, xfA:
 }
 
 // The second half: the new query bounds, and the new cache matched with the old one
-unsafe function b3SaveCacheTriangles(meshContact: b3MeshContact, shapeA: b3Shape, triangleCount: i32, scratch: b3MeshScratch): void {
+function b3SaveCacheTriangles(meshContact: b3MeshContact, shapeA: b3Shape, triangleCount: i32, scratch: b3MeshScratch): void {
 	let triangleCache = meshContact.triangleCache;
 	let triangleIndices = scratch.triangleQuery.indices;
 	meshContact.queryBounds = scratch.refreshBounds;
@@ -216,17 +216,17 @@ unsafe function b3SaveCacheTriangles(meshContact: b3MeshContact, shapeA: b3Shape
 }
 
 // Array#length's capacity and its setter without the growth, which parallel parts may not run, over std's Array fields
-@inline unsafe function b3TriangleCacheCapacity(triangleCache: Array<b3TriangleCache>): i32 {
+@inline function b3TriangleCacheCapacity(triangleCache: Array<b3TriangleCache>): i32 {
 	let byteLength = load<i32>(changetype<usize>(triangleCache) + offsetof<Array<b3TriangleCache>>("byteLength"));
 	return byteLength / <i32>sizeof<b3TriangleCache>();
 }
 
-@inline unsafe function b3SetTriangleCacheLength(triangleCache: Array<b3TriangleCache>, length: i32): void {
+@inline function b3SetTriangleCacheLength(triangleCache: Array<b3TriangleCache>, length: i32): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(length <= b3TriangleCacheCapacity(triangleCache));
 	store<i32>(changetype<usize>(triangleCache) + offsetof<Array<b3TriangleCache>>("length_"), length);
 }
 
-unsafe function b3RefreshCache(contact: b3Contact, shapeA: b3Shape, xfA: b3WorldTransform, bounds: b3AABB, scratch: b3MeshScratch): void {
+function b3RefreshCache(contact: b3Contact, shapeA: b3Shape, xfA: b3WorldTransform, bounds: b3AABB, scratch: b3MeshScratch): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(shapeA.type == b3_meshShape || shapeA.type == b3_heightShape);
 
 	let meshContact = contact.meshContact;
@@ -685,7 +685,7 @@ export function b3ReserveMeshScratchForWorkers(workerCount: i32): void {
 // Whether a parallel part can update this mesh contact, before it changes it: its triangle cache needs no refresh, or one
 // that fits the cache's capacity and is not of a compound child, and its manifolds and the worker's scratch have room for
 // every triangle. A refresh it queries is left in the worker's scratch for b3ComputeMeshManifolds.
-export unsafe function b3MeshContactFitsPart(contact: b3Contact, shapeA: b3Shape, xfA: b3WorldTransform, boundsB: b3AABB, workerIndex: i32): bool {
+export function b3MeshContactFitsPart(contact: b3Contact, shapeA: b3Shape, xfA: b3WorldTransform, boundsB: b3AABB, workerIndex: i32): bool {
 	let meshContact = contact.meshContact;
 	let scratch = s_meshScratch[workerIndex];
 	scratch.refreshReady = false;
@@ -738,12 +738,12 @@ function b3SurfaceMaterialAt(materials: StaticArray<b3SurfaceMaterial>, index: i
 }
 
 // C's memcpy and memset of manifold arrays; both counts are within the arrays
-unsafe function b3CopyManifolds(dst: StaticArray<b3Manifold>, src: StaticArray<b3Manifold>, count: i32): void {
+function b3CopyManifolds(dst: StaticArray<b3Manifold>, src: StaticArray<b3Manifold>, count: i32): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(count <= dst.length && count <= src.length);
 	memory.copy(changetype<usize>(dst), changetype<usize>(src), <usize>count * sizeof<b3Manifold>());
 }
 
-unsafe function b3ZeroManifolds(manifolds: StaticArray<b3Manifold>, count: i32): void {
+function b3ZeroManifolds(manifolds: StaticArray<b3Manifold>, count: i32): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(count <= manifolds.length);
 	memory.fill(changetype<usize>(manifolds), 0, <usize>count * sizeof<b3Manifold>());
 }
@@ -941,11 +941,11 @@ function b3PrefilterTriangles(
 }
 
 // b3StoreW4 of a v128 row into the lane scratch, which has room for three rows
-@inline unsafe function b3StoreLanesL<T>(data: StaticArray<f32>, index: i32, a: T): void {
+@inline function b3StoreLanesL<T>(data: StaticArray<f32>, index: i32, a: T): void {
 	b3StoreL<T>(changetype<usize>(data) + <usize>index * 4, a);
 }
 
-export unsafe function b3ComputeMeshManifolds(
+export function b3ComputeMeshManifolds(
 	world: b3World,
 	workerIndex: i32,
 	contact: b3Contact,
@@ -962,7 +962,7 @@ export unsafe function b3ComputeMeshManifolds(
 // Unchecked: its scratch covers the counts its loops are
 // bounded by (notes/perf_collide.md, change 7); reads of shape supplied data stay checked through helpers.
 @unchecked
-export unsafe function b3ComputeMeshManifoldsAt(
+export function b3ComputeMeshManifoldsAt(
 	world: b3World,
 	workerIndex: i32,
 	contact: b3Contact,

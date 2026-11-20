@@ -93,7 +93,7 @@ export const MP_TRIANGLEINDEX = offsetof<b3ManifoldPoint>("triangleIndex");
 export const MP_PERSISTED = offsetof<b3ManifoldPoint>("persisted");
 
 // The address of point pointIndex of manifold manifoldIndex; both are below the counts the caller holds
-@inline export unsafe function b3ManifoldPointAddress(manifolds: StaticArray<b3Manifold>, manifoldIndex: i32, pointIndex: i32): usize {
+@inline export function b3ManifoldPointAddress(manifolds: StaticArray<b3Manifold>, manifoldIndex: i32, pointIndex: i32): usize {
 	return (
 		changetype<usize>(manifolds) +
 		<usize>manifoldIndex * sizeof<b3Manifold>() +
@@ -103,7 +103,7 @@ export const MP_PERSISTED = offsetof<b3ManifoldPoint>("persisted");
 }
 
 // anchorA, anchorB, separation and normalImpulse of the point at mp
-@inline export unsafe function b3StorePointAnchors(mp: usize, anchorA: b3Vec3, anchorB: b3Vec3, separation: f32, normalImpulse: f32): void {
+@inline export function b3StorePointAnchors(mp: usize, anchorA: b3Vec3, anchorB: b3Vec3, separation: f32, normalImpulse: f32): void {
 	b3StoreRow(mp + MP_ANCHORA, anchorA.x, anchorA.y, anchorA.z, anchorB.x);
 	b3StoreRow(mp + MP_ANCHORB + 4, anchorB.y, anchorB.z, separation, normalImpulse);
 }
@@ -774,7 +774,7 @@ function b3SetCompoundChildShape(
 }
 
 // Whether the identity, flags and materials compound children copy from their shape are as they copied them
-unsafe function b3CompoundParentUnchanged(shape: b3Shape): bool {
+function b3CompoundParentUnchanged(shape: b3Shape): bool {
 	let materials = shape.materials;
 	let copy = shape.compoundParentMaterialCopy;
 	if (shape.compoundParentGeneration != shape.generation || shape.compoundParentFlags != shape.flags ||
@@ -794,7 +794,7 @@ unsafe function b3CompoundParentUnchanged(shape: b3Shape): bool {
 }
 
 // Builds each compound shape's children as shapes, which parallel parts read in place of the scratch child shape
-export unsafe function b3PrepareCompoundContacts(world: b3World): void {
+export function b3PrepareCompoundContacts(world: b3World): void {
 	if (world.compoundShapeCount == 0) {
 		return;
 	}
@@ -852,7 +852,7 @@ const s_contactChildMaterial = new Uint16Array(1);
 const s_contactChildShape = new b3Shape();
 const s_contactChildMaterials = new StaticArray<b3SurfaceMaterial>(1);
 
-unsafe function b3ComputeConvexManifold(
+function b3ComputeConvexManifold(
 	world: b3World,
 	workerIndex: i32,
 	contact: b3Contact,
@@ -989,7 +989,7 @@ unsafe function b3ComputeConvexManifold(
 	return true;
 }
 
-unsafe function b3UpdateConvexContact(
+function b3UpdateConvexContact(
 	world: b3World,
 	workerIndex: i32,
 	contact: b3Contact,
@@ -1100,7 +1100,7 @@ unsafe function b3UpdateConvexContact(
 
 // Update the contact manifold and touching status.
 // Note: do not assume the shape AABBs are overlapping or are valid.
-export unsafe function b3UpdateContact(
+export function b3UpdateContact(
 	world: b3World,
 	workerIndex: i32,
 	contact: b3Contact,

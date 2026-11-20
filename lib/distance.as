@@ -705,11 +705,11 @@ const B3_GJK_SIMPLEX: i32 = 0;
 const B3_GJK_BACKUP: i32 = 1;
 @parallel.shared const s_gjkSimplexes = new StaticArray<b3Simplex>(2 * B3_MAX_WORKERS);
 
-unsafe function b3ZeroGJKSimplexes(base: i32): void {
+function b3ZeroGJKSimplexes(base: i32): void {
 	memory.fill(changetype<usize>(s_gjkSimplexes) + <usize>base * sizeof<b3Simplex>(), 0, 2 * sizeof<b3Simplex>());
 }
 
-unsafe function b3CopyGJKSimplex(dst: i32, src: i32): void {
+function b3CopyGJKSimplex(dst: i32, src: i32): void {
 	let base = changetype<usize>(s_gjkSimplexes);
 	let size = sizeof<b3Simplex>();
 	memory.copy(base + <usize>dst * size, base + <usize>src * size, size);

@@ -62,8 +62,6 @@ export class b3ParallelStats {
 	finalizes: i32 = 0;
 	deferredBodies: i64 = 0;
 	solves: i32 = 0;
-	// How many times a long stage wait had every part sync
-	stageSyncs: i32 = 0;
 }
 
 export const b3_parallelStats = new b3ParallelStats();
@@ -94,7 +92,6 @@ function b3ParallelSolve(context: b3StepContext): bool {
 
 	Parallel.runUpTo(s_partLimit, b3ParallelSolverTask, context);
 	b3_parallelStats.solves += 1;
-	b3_parallelStats.stageSyncs += context.syncRequests.value;
 	return true;
 }
 
@@ -131,7 +128,7 @@ function b3ParallelForBlockSize(itemCount: i32, minRange: i32, workerCount: i32)
 	return (itemCount + maxBlockCount - 1) / maxBlockCount;
 }
 
-unsafe function b3ParallelCollide(context: b3StepContext, contactCount: i32): bool {
+function b3ParallelCollide(context: b3StepContext, contactCount: i32): bool {
 	let world = context.world;
 	let custom = world.preSolveFcn != null || world.frictionCallback != b3DefaultFrictionCallback ||
 		world.restitutionCallback != b3DefaultRestitutionCallback;
@@ -186,7 +183,7 @@ unsafe function b3ParallelCollide(context: b3StepContext, contactCount: i32): bo
 	return true;
 }
 
-@parallel.inplace export unsafe function b3ParallelFinalizeTask(part: Part, context: b3StepContext, bodyCount: i32, blockSize: i32): void {
+@parallel.inplace export function b3ParallelFinalizeTask(part: Part, context: b3StepContext, bodyCount: i32, blockSize: i32): void {
 	let workerIndex = part.index;
 	let trace = b3TraceRowAt(workerIndex);
 	let traceBegin = b3SpanBegin(trace);
@@ -196,7 +193,7 @@ unsafe function b3ParallelCollide(context: b3StepContext, contactCount: i32): bo
 	b3SpanEnd(trace, b3_traceFinalize, traceBegin);
 }
 
-unsafe function b3ParallelFinalize(context: b3StepContext, bodyCount: i32): bool {
+function b3ParallelFinalize(context: b3StepContext, bodyCount: i32): bool {
 	let world = context.world;
 	if (Parallel.size() > world.workerCount) {
 		return false;
@@ -355,8 +352,7 @@ export function b3SetParallelLimit(parts: i32): void {
 // Fields for a bench's result line
 export function b3ParallelReport(): string {
 	let ps = b3_parallelStats;
-	return " parts=" + Parallel.size().toString() + " parSolves=" + ps.solves.toString() + " parStageSyncs=" +
-		ps.stageSyncs.toString() + " parCollides=" +
+	return " parts=" + Parallel.size().toString() + " parSolves=" + ps.solves.toString() + " parCollides=" +
 		ps.collides.toString() + " parFinalizes=" + ps.finalizes.toString() + " parContacts=" +
 		formatFixed(<f64>ps.contacts / <f64>max(1, ps.collides), 1) + " parDeferredContacts=" +
 		formatFixed(<f64>ps.deferredContacts / <f64>max(1, ps.collides), 1) + " parDeferredBodies=" +

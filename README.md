@@ -134,7 +134,7 @@ exactness, with no tolerance.
 | `verify/run.sh` | each module's outputs against a C driver over fixed and seeded random inputs, every value's bits | 29 modules, about 69 million values |
 | `verify/traj.sh --large` | every body's state, the mover and the world counters, every step, against a native recording | 13 scenes |
 | `verify/threads.sh --large` | the per step state hash under rive-cli on parallel calls at 1, 2, 4 and 8 parts and the default, and on lanes at 1, 2, 4 and 8 on workers and on jobs | 195 runs |
-| `verify/parts.sh` | parallel calls on edited copies: part 0 runs no block, so the other parts must be able to run them all; a sync every 8 polls of a stage wait; a trap in a worker and in part 0, which must end the call. It does not hold speed | 2 scenes, 12 runs, and 2 trap runs |
+| `verify/parts.sh` | parallel calls on edited copies: part 0 runs no block, so the other parts must be able to run them all; part 0 reads the stop flag at every poll of a stage wait; a trap in the workers and in part 0, which must end the call. It does not hold speed | 2 scenes, 12 runs, and 2 trap runs |
 | `bench/web/verify.sh` | the state hash of every step on V8, for the port and for C Box3D on wasm | 13 scenes, 6 builds |
 | `examples/check.sh` | the examples run and show what they say, interpreted and on AOT | 8 cases |
 
@@ -249,7 +249,7 @@ in `notes/web.md`), and `bench/threads/run.sh` natively.
   the narrow phase with the tree rebuild, the solver stages and finalize as `@parallel.inplace` calls over the world's
   own memory, with no serialization ([example](examples/threading.as)). It is bit exact at every part count and
   scales like native's workers, natively on WAMR and in Chrome and Firefox on librive's threads build.
-  - It needs rive master at 4a861ff147 or later (#15105), where parallel calls landed.
+  - It needs a runtime with parallel calls (#15105) and, to build, the toolchain below.
   - The part count is `Parallel.size()`: the job pool plus the main lane natively (`--job-threads=N` gives N + 1, the
     default keeps to the fast cores), one per core up to 8 on an isolated web page with the threads build, and 1
     anywhere without threads, where the calls run on the main lane with the same results (`notes/web.md`).
@@ -265,9 +265,10 @@ in `notes/web.md`), and `bench/threads/run.sh` natively.
 
 ## Branches
 
-`main` is the only branch: the port, the examples, the gates and every bench. It builds and passes every gate on rive
-master at 4a861ff147 or later. The older branches (`single-core`, `parallel`, `web-bench`, `threads`) are merged in and
-kept for history.
+`main` is the only branch: the port, the examples, the gates and every bench. It builds on rive master from 57e98c9a11
+on, and at that commit, with a wamrc built at 5d0e608da3, it passed every gate above but `bench/web/verify.sh`,
+which was not run. The older branches (`single-core`, `parallel`, `web-bench`, `threads`) are merged in and kept
+for history.
 
 ## Layout and tooling
 
@@ -294,8 +295,9 @@ cmake -S $R/packages/rive-cli/dependencies/bytecodealliance_wasm-micro-runtime_W
 
 `build_rive.sh` is in `$R/packages/runtime/build`. A dependency's patches apply only when it is first downloaded, so
 delete `packages/*/dependencies/bytecodealliance_wasm-micro-runtime_*` when rive's WAMR patches change. The scripts
-default to `~/Projects/rive-master`; `RASC`, `AS_STD`, `RIVE` and `RIVE_WAMRC` override. bench/threads needs rive at
-rive#15736 or later.
+default to `~/Projects/rive-master`; `RASC`, `AS_STD`, `RIVE` and `RIVE_WAMRC` override. Every build of the lib
+needs rasc and its std at 57e98c9a11 or later: the solver reads `Part.stopping()`, and the lib no longer marks its
+raw memory code `unsafe`, which rasc demanded before rive#15863.
 
 The gates need upstream Box3D at `~/Projects/box3d` (`BOX3D`), built in `build/scalar` (`BOX3D_DISABLE_SIMD=ON`,
 `-ffp-contract=off`) and `build/release`. The native recordings in `verify/scenes/out` are not committed:

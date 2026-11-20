@@ -293,7 +293,7 @@ time from `Jobs.threads()`, a probe job and `Parallel.size()`:
 
 | Where | Serial | Lanes | Parallel |
 |---|---|---|---|
-| rive-cli at 4a861ff147 or later | yes | 1, 2, 4 (8 with `--job-threads=7`) | 1, 2, 4 (`Parallel.size()` is the 6 fast cores; 8 with `--job-threads=7`) |
+| rive-cli at 57e98c9a11 or later | yes | 1, 2, 4 (8 with `--job-threads=7`) | 1, 2, 4 (`Parallel.size()` is the 6 fast cores; 8 with `--job-threads=7`) |
 | `@rive-app/webgl2-threads` built from master, isolated page | yes | 1, 2, 4 (the pool has 6 job threads) | 1, 2, 4, 8 (one part per core, up to 8) |
 | `@rive-app/webgl2-threads` 2.48.0 and older (the UAT player) | yes | the same | off: this runtime has no parallel calls |
 | a browser runtime without threads (`@rive-app/webgl2`, the live demo's), or a page without isolation | yes | off: this runtime has no threads | off, the same |

@@ -127,7 +127,7 @@ export function b3PrepareParallelJoint(base: b3JointSim, context: b3StepContext)
 }
 
 @noinline
-export unsafe function b3WarmStartParallelJoint(base: b3JointSim, context: b3StepContext): void {
+export function b3WarmStartParallelJoint(base: b3JointSim, context: b3StepContext): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(base.type == b3_parallelJoint);
 
 	let iA = base.invIA;
@@ -158,7 +158,7 @@ export unsafe function b3WarmStartParallelJoint(base: b3JointSim, context: b3Ste
 }
 
 @noinline
-export unsafe function b3SolveParallelJoint(base: b3JointSim, context: b3StepContext): void {
+export function b3SolveParallelJoint(base: b3JointSim, context: b3StepContext): void {
 	let iA = base.invIA;
 	let iB = base.invIB;
 

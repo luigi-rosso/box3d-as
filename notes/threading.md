@@ -7,7 +7,65 @@ inputs and outputs can be serialized onto jobs and workers, keeps every result b
 native at any lane count, and measures what it costs.
 
 
+## The waits read the call's stop flag (2026-11-18)
+
+rive's std gained `part.stopping()` (rive#15864, master 57e98c9a11), true once the call a part runs in was stopped,
+as it is when a part fails. Both solver waits read it now: part 0 traps in its stage wait, as `part.sync()` does in
+its own, and a worker returns from its wait for new sync bits. Part 0 reads it once in 65536 polls of a stage
+(`B3_STAGE_STOP_POLLS`), since on a page its read calls the host; a worker reads it at every yield. The sync part 0
+asked of every part each 2^24 polls of a stage, the workers' answer to it and the limit on a worker's sleeps are
+gone, and `parStageSyncs` with them. The build needs rasc and its std at 57e98c9a11 or later.
+
+- **A trap ends the call in milliseconds on both tiers.** With a trap injected in every worker's stage blocks, or in
+  part 0 once it has published a stage, on large_pyramid at 4 and 8 parts, at loads of 13 to 26, from the last good
+  step's hash line to the error, which the log stamps to the millisecond, beside the lib before it (f5ad27e): on AOT
+  2 to 5 ms for the workers' trap and 1 to 5 for part 0's, where that lib took 12 to 23 ms and 0.63 to 0.91 s; on
+  the interpreter 21 to 53 ms and 6 to 12, where it took 123 to 203 ms and 8 to 11. When a part fails the host
+  interrupts the workers, which the interpreter honors and an AOT build without a host budget does not, so on the
+  interpreter part 0's trap does not wait for the workers' read. Of 16 more runs of the workers' trap on AOT, at
+  loads of 7 to 64, 15 took 0 to 3 ms and one 40.
+- **On a page** in Chrome, WebKit and Firefox those two traps end the run with an `unreachable` error, at 4 and 8
+  parts. With part 0's read taken out the workers' trap leaves the page's thread unresponsive, and with the workers'
+  read taken out part 0's does (Chrome, 4 parts). `bench/web/parallel.mjs` itself injects no trap. Part 0's read
+  also checks in with the host, which wakes the team again for a thread that has not started its part and fails the
+  call once it is a second old, as the join does after part 0 returns. So it can fail only a solver call that lasts
+  over a second, where the join would have passed it had the thread started by the time the join ran.
+- **Few stage waits last 65536 polls.** On AOT at 8 parts, at a load of 3 to 5, in three runs a wait of
+  large_pyramid polled 3000 to 3600 times on average and 220000 at most, and part 0 read the flag 0.7 to 0.9 times a
+  step there and on mesh_drop, 1.4 to 1.8 times on many_bodies and under 0.1 on village. It was not counted on a
+  page here; box2d-as counted 0.01 to 0.1 reads a step there at 8 parts. With a read on every poll, a host call each
+  on a page, box2d-as read 3 to 8% slower in Chrome over 6 rounds and 0 to 4% over 12, though no page round ran a
+  build twice to show how much of that was the read. Counting polls takes it out of the wait.
+- **The medians show no step time cost.** Interleaved with the lib before it, that lib run twice a round so that its
+  ratio to itself shows, a cell's three runs back to back once the load was under 10 (they logged loads of 5 to 18);
+  median over 6 rounds of the paired ratio of the median step, on AOT: large_pyramid at 4 and 8 parts 0.97 and 0.95
+  (that lib to itself 0.99 and 1.01), village at 8 parts 0.92 (1.07), mesh_drop at 8 parts 1.10 (0.96), under 1 in 1
+  of the 6. Over 18 more rounds mesh_drop read 0.92 (1.02), under 1 in 15 of them where that lib's second run is in
+  8. On the interpreter large_pyramid at 4 and 8 parts read 1.00 and 1.03 (0.98 and 1.00) over 6 rounds and 1.01 and
+  0.99 (0.99 and 1.01) over 14 more. One pair's ratio runs from 0.7 to 1.5, but for six. In four this lib's run
+  was the slow one, at 1.6, 1.8, 2.0 and, in a run whose every step was slow, 27. In two, both of one interpreter
+  round, the first run of the lib before it was, at 0.5. On a page in Chrome at 8 parts, by median over 12 rounds,
+  with no second run of a lib beside them: 0.96, 0.99, 1.02 and 0.99 of that lib's median step on large_pyramid,
+  many_bodies, mesh_drop and village.
+- `verify/parts.sh` lost its sync variant, keeps part 0 running no block and the two traps, and gained part 0
+  reading the flag at every poll, which must change no step, all on AOT. With part 0's read taken out the workers'
+  trap hangs its run, and with the workers' read taken out part 0's does. The lib that read at every poll had also
+  passed `bench/web/parallel.mjs` parity in the three browsers, 28 of 28 each.
+- The lib also lost every `unsafe` modifier, which rive's compiler retired and now warns about (rive#15863), 153
+  times in a bench build of the lib before.
+
+Gates on this lib, on rive master at 57e98c9a11 (rasc, rive-cli and the web harness; the wamrc is the one built at
+5d0e608da3, master's WAMR patches being the same): verify/run.sh 29 of 29 and verify/traj.sh --large 13 of 13, each
+on the scalar and SIMD artifacts, verify/threads.sh --large 195 of 195 (65 on parallel calls at 1, 2, 4 and 8 parts
+and the default, 130 on lanes), verify/parts.sh 14 of 14 (part 0 running no block, and part 0 reading the stop flag
+at every poll, on pyramid and large_pyramid at 2, 4 and 8 parts, the two traps on pyramid at 4), examples/check.sh
+8 of 8 interpreted and on AOT, and bench/web/parallel.mjs `MODE=parity` 28 of 28 in each of headless Chrome 157,
+Firefox 157 and WebKit 27.2. bench/web/verify.sh was not run on it.
+
 ## The solver without a sync per stage (2026-11-15)
+
+This is the lib as it was then. The syncs part 0 requests, the workers' limit of 500 sleeps and the sync variant of
+`verify/parts.sh` that it describes are gone since 2026-11-18, above.
 
 The solver stages no longer sync after each stage. Every part runs C's `b3SolverTask` as its own worker
 (`b3SolverWorker(context, part.index, part)`): part 0 orchestrates, the others spin on the sync bits and claim blocks from
@@ -16,8 +74,8 @@ for C's atomics take the value's address and are real atomics under `Parallel.in
 elsewhere. Where a waiting C worker yields its core, a part sleeps on the sync bits after 2048 yields in one wait
 (`atomic.wait`), and part 0 wakes sleepers when it stores new bits (`atomic.notify`). Pair finding is one claim loop
 over the cross seeds and the self pair blocks. So no stage ends at a `part.sync()`; the parts sync only when a stage
-wait runs long, as below. The change came from box2d-as, where the stages are short enough for the syncs to show on
-a quiet machine.
+wait runs long, as below (and not at all since 2026-11-18, above). The change came from box2d-as, where the stages
+are short enough for the syncs to show on a quiet machine.
 
 Why: a sync waits for every part of the call, about a hundred times a step, so one part that is not scheduled holds
 all the others. C waits for a stage's blocks, and whoever is running claims them.
@@ -36,7 +94,7 @@ This is slower to report a trap than a sync per stage was, which ended the call 
 depends on the tier. With a trap injected with no step condition on large_pyramid at 4 and 8 parts, at loads of 17
 to 35, from the bench's start line to the error: on AOT 19 to 38 ms for a worker's trap and 0.73 to 0.76 s for part
 0's; on the interpreter 0.17 to 0.2 s and 0.08 to 0.12 s. A std accessor for the stop flag would let both wait
-loops poll it and report at once again.
+loops poll it and report at once again, which is what the section above did.
 
 `verify/parts.sh` holds what parity cannot see, on edited copies of bench/threads: part 0 running no block (the
 other parts must run them all), a sync every 8 polls, and a trap in a worker and in part 0.

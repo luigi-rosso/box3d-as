@@ -145,7 +145,7 @@ export function b3PrepareWeldJoint(base: b3JointSim, context: b3StepContext): vo
 }
 
 @noinline
-export unsafe function b3WarmStartWeldJoint(base: b3JointSim, context: b3StepContext): void {
+export function b3WarmStartWeldJoint(base: b3JointSim, context: b3StepContext): void {
 	if (B3_ASSERT_ENABLED) B3_ASSERT(base.type == b3_weldJoint);
 
 	let mA = base.invMassA;
@@ -184,7 +184,7 @@ export unsafe function b3WarmStartWeldJoint(base: b3JointSim, context: b3StepCon
 }
 
 @noinline
-export unsafe function b3SolveWeldJoint(base: b3JointSim, context: b3StepContext, useBias: bool): void {
+export function b3SolveWeldJoint(base: b3JointSim, context: b3StepContext, useBias: bool): void {
 	let mA = base.invMassA;
 	let mB = base.invMassB;
 	let iA = base.invIA;
